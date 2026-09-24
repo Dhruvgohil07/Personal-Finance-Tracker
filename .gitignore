@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------
+# Private data — NEVER commit (see CLAUDE.md §4 rule 8)
+# ---------------------------------------------------------------
+# Real bank statements used for local testing
+samples/
+
+# CSV exports and any other local data. Synthetic test fixtures in
+# backend/tests/fixtures/ are allowed back in with the "!" rule below.
+*.csv
+!backend/tests/fixtures/**/*.csv
+data/
+exports/
+uploads/
+
+# Secrets (.env.example is safe and SHOULD be committed)
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# ---------------------------------------------------------------
+# Frontend (Next.js, Phase 3)
+# ---------------------------------------------------------------
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.vercel/
+npm-debug.log*
+
+# ---------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

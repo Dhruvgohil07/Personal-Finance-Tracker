@@ -1,0 +1,75 @@
+[project]
+name = "kharcha"
+version = "0.1.0"
+description = "Personal finance tracker for Indian bank statements"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.20.0",
+    "apscheduler>=3.11.3",
+    "argon2-cffi>=25.1.0",
+    "cryptography>=50.0.1",
+    "email-validator>=2.3.0",
+    "fastapi>=0.141.1",
+    "groq>=1.7.0",
+    "pdfplumber>=0.11.10",
+    "psycopg[binary]>=3.3.6",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "pyjwt>=2.15.0",
+    "python-multipart>=0.0.32",
+    "redis>=8.1.0",
+    "resend>=2.47.0",
+    "rq>=2.12.0",
+    "slowapi>=0.1.10",
+    "sqlalchemy>=2.0",
+    "structlog>=26.1.0",
+    "uvicorn[standard]>=0.53.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.8",
+]
+
+# ---------------------------------------------------------------
+# Ruff: linter + formatter (replaces flake8, isort, black)
+# ---------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors (basic style)
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes: unused imports/variables, undefined names
+    "I",   # isort: consistent import ordering
+    "B",   # flake8-bugbear: common bug patterns (e.g. mutable default args)
+    "UP",  # pyupgrade: use modern Python 3.12 syntax
+    "S",   # flake8-bandit: security checks (hardcoded secrets, SQL built from strings, ...)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use plain `assert` (S101) and fake passwords/secrets (S105, S106).
+"tests/**" = ["S101", "S105", "S106"]
+
+# ---------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]              # so tests can `import app...` when run from backend/
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: needs Postgres + Redis from docker-compose",
+]
+
+# ---------------------------------------------------------------
+# Coverage (used by pytest-cov: `pytest --cov`)
+# ---------------------------------------------------------------
+[tool.coverage.run]
+source = ["app"]
+branch = true

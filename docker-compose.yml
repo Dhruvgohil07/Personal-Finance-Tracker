@@ -1,0 +1,45 @@
+# Local development infrastructure: Postgres + Redis.
+# Start:  docker compose up -d        Stop: docker compose down
+# Reset all data (deletes volumes!): docker compose down -v
+#
+# The RQ worker will be added here as a service in Phase 2 (RQ needs fork(),
+# which Windows doesn't have, so the worker always runs inside Linux/Docker).
+
+name: kharcha
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      # Local-only credentials. Real deployments use Neon with secrets from env.
+      POSTGRES_USER: kharcha
+      POSTGRES_PASSWORD: kharcha
+      POSTGRES_DB: kharcha
+    ports:
+      # Bind to 127.0.0.1 so the database is not reachable from your network.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Scripts here run ONCE, when the data volume is first created.
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kharcha -d kharcha"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:
+  redis_data:
