@@ -7,12 +7,12 @@ Phase 0 — Foundation (plan: docs/plans/phase-0.md)
 - [x] Step 1: Tooling and infrastructure — pyproject.toml, docker-compose, .env.example, .gitignore
 - [x] Step 2a: Config — app/core/config.py (fail-fast validation, secrets hidden)
 - [x] Step 2b: Logging — app/core/logging.py (structlog JSON, key-based redaction)
+- [x] Step 2c: Errors — app/core/errors.py (AppError + global handlers, one error shape)
 
 ## In progress
 - (none)
 
 ## Next up
-- Step 2c: Errors
 - Step 2d: Money helpers
 
 ## Open decisions / questions
@@ -26,4 +26,4 @@ Phase 0 — Foundation (plan: docs/plans/phase-0.md)
 - [ ] App version field in /health (Step 4)
 
 ## Known issues
-- (none)
+- pytest warns that Starlette's TestClient with `httpx` is deprecated (suggests `httpx2`); dependency change pending decision
