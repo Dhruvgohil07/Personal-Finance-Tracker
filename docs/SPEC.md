@@ -51,7 +51,7 @@ In India, most spending now happens through UPI in dozens of small payments per 
 | LLM | Groq Python SDK, used only as a fallback categorizer (model name from env) |
 | Logging | structlog (structured JSON logs) |
 | Lint / format | ruff |
-| Testing | pytest, pytest-cov, FastAPI TestClient (httpx) |
+| Testing | pytest, pytest-cov, FastAPI TestClient (httpx2) |
 | Email (Phase 5) | Resend |
 
 ### Frontend (Phase 3 onward)
