@@ -21,6 +21,9 @@ check, and CI. No product features yet.
 | Extra dependencies | `python-multipart`, `email-validator` added | Required by FastAPI file uploads and Pydantic `EmailStr` |
 | Service ports | Bound to `127.0.0.1` only | Local DB/Redis not reachable from the network |
 | Test database | Separate `kharcha_test` DB, created by a Postgres init script | Tests can wipe tables without touching dev data |
+| `categories.user_id` before `users` exists | Column now, FK added in Phase 1 | Final table shape from day one (ADR 002) |
+| Enum storage | `VARCHAR` + `CHECK` (non-native) | Adding values is a simple migration (ADR 002) |
+| System category uniqueness | `UNIQUE NULLS NOT DISTINCT (user_id, slug)` | One constraint; seed upserts on it (ADR 002) |
 
 ## Steps
 
@@ -65,7 +68,11 @@ understand now" summary, a progress update and a proposed commit.
   `pgcrypto`, `citext`, `pg_trgm` + the two tables
 - `backend/app/db/seed.py` — idempotent seed of system categories and
   common Indian merchants
-- Tests for the seed (runs twice without duplicating rows)
+- `backend/app/db/seed_data.py` — the seed data, separate so it can be
+  unit tested without a database
+- Tests for the seed (runs twice without duplicating rows), a migration test
+  (`alembic check` + downgrade/upgrade), `docs/decisions/002-database-schema-conventions.md`
+- TODO(dhruv): add 3 merchants + `test_merchant_categories_exist`
 
 ### Step 4 — App and health check
 - `backend/app/main.py` — app factory, error handlers, strict CORS,

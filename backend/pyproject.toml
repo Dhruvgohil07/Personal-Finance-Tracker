@@ -52,6 +52,11 @@ select = [
     "S",   # flake8-bandit: security checks (hardcoded secrets, SQL built from strings, ...)
 ]
 
+[tool.ruff.lint.isort]
+# Our migrations folder is also called `alembic/`, which makes ruff think the
+# alembic *library* is our own code. Tell it explicitly that it isn't.
+known-third-party = ["alembic"]
+
 [tool.ruff.lint.per-file-ignores]
 # Tests use plain `assert` (S101) and fake passwords/secrets (S105, S106).
 "tests/**" = ["S101", "S105", "S106"]
