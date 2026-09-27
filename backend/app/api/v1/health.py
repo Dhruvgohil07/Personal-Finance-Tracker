@@ -8,7 +8,7 @@ from http import HTTPStatus
 
 from fastapi import APIRouter, Response
 
-from app.api.deps import DbSession, RedisClient
+from app.api.deps import HealthDbSession, RedisClient
 from app.schemas.health import HealthResponse
 from app.services.health import get_health
 
@@ -25,7 +25,7 @@ router = APIRouter(tags=["health"])
     response_model=HealthResponse,
     responses={HTTPStatus.SERVICE_UNAVAILABLE: {"model": HealthResponse}},
 )
-def health(db: DbSession, redis_client: RedisClient, response: Response) -> HealthResponse:
+def health(db: HealthDbSession, redis_client: RedisClient, response: Response) -> HealthResponse:
     result = get_health(db, redis_client)
     if result.status != "ok":
         # Declaring `response: Response` gives us the response FastAPI will

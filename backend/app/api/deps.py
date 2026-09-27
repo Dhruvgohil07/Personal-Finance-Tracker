@@ -16,7 +16,9 @@ from redis import Redis
 from sqlalchemy.orm import Session
 
 from app.core.redis import get_redis
-from app.db.session import get_db
+from app.db.session import get_db, get_health_db
 
 DbSession = Annotated[Session, Depends(get_db)]
+# Only for GET /health: fails after 3 s instead of 10 s (see app/db/session.py).
+HealthDbSession = Annotated[Session, Depends(get_health_db)]
 RedisClient = Annotated[Redis, Depends(get_redis)]

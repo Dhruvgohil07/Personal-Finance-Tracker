@@ -2,7 +2,7 @@
 
 No Postgres or Redis needed: we replace the real dependencies with fakes
 through `app.dependency_overrides`. FastAPI then calls our fake instead of
-get_db / get_redis, and the route code runs unchanged. This is one of the
+get_health_db / get_redis, and the route code runs unchanged. This is one of the
 big wins of dependency injection.
 """
 
@@ -18,7 +18,7 @@ from app import __version__
 from app.core.config import get_settings
 from app.core.middleware import SecurityHeadersMiddleware
 from app.core.redis import get_redis
-from app.db.session import get_db
+from app.db.session import get_health_db
 from app.main import create_app
 
 HEALTH_URL = "/api/v1/health"
@@ -46,10 +46,10 @@ class FakeRedis:
 def make_client(*, db_fails: bool = False, redis_fails: bool = False) -> TestClient:
     app = create_app()
 
-    def fake_get_db() -> Iterator[FakeSession]:
+    def fake_get_health_db() -> Iterator[FakeSession]:
         yield FakeSession(fail=db_fails)
 
-    app.dependency_overrides[get_db] = fake_get_db
+    app.dependency_overrides[get_health_db] = fake_get_health_db
     app.dependency_overrides[get_redis] = lambda: FakeRedis(fail=redis_fails)
     return TestClient(app)
 

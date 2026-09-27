@@ -14,12 +14,18 @@ from collections.abc import Iterator
 
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 
 # Seconds to wait for Postgres to accept a new connection. Without it,
-# psycopg waits forever if the server never answers.
+# psycopg waits forever if the server never answers. Generous, because
+# hosted Postgres (Neon) can take a few seconds to wake up.
 CONNECT_TIMEOUT_SECONDS = 10
+
+# The health check must answer quickly, even when Postgres is down:
+# monitors give up after a few seconds and would never see our 503.
+HEALTH_CONNECT_TIMEOUT_SECONDS = 3
 
 
 def build_engine(database_url: str) -> Engine:
@@ -34,12 +40,33 @@ def build_engine(database_url: str) -> Engine:
     )
 
 
+def build_health_engine(database_url: str) -> Engine:
+    """A second engine, used ONLY by the health check.
+
+    Why not reuse `engine`? Its 10 s connect timeout would make /health take
+    10 s to report that Postgres is down. A timeout belongs to the engine,
+    not to a single query, so a different timeout needs a different engine.
+
+    NullPool = no pool: every check opens a fresh connection and closes it
+    afterwards. That's exactly what we want to test ("can we connect right
+    now?"), it holds no idle connections, and health checks are rare enough
+    that the cost of connecting each time doesn't matter.
+    """
+    return create_engine(
+        database_url,
+        poolclass=NullPool,
+        connect_args={"connect_timeout": HEALTH_CONNECT_TIMEOUT_SECONDS},
+    )
+
+
 engine = build_engine(get_settings().database_url)
+health_engine = build_health_engine(get_settings().database_url)
 
 # expire_on_commit=False: after commit(), objects keep their loaded values.
 # Otherwise, reading `category.name` after commit would trigger a new SELECT,
 # which fails if the session has already been closed.
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+HealthSessionLocal = sessionmaker(bind=health_engine)
 
 
 def get_db() -> Iterator[Session]:
@@ -53,6 +80,15 @@ def get_db() -> Iterator[Session]:
     Services decide when to commit; closing without commit rolls back.
     """
     db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def get_health_db() -> Iterator[Session]:
+    """Like get_db, but the session uses the fast-failing health engine."""
+    db = HealthSessionLocal()
     try:
         yield db
     finally:

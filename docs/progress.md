@@ -26,6 +26,8 @@ Phase 0 — Foundation (plan: docs/plans/phase-0.md)
 - TestClient HTTP library → decided: dev dependency `httpx2` replaces `httpx` (Starlette deprecated httpx)
 - /health 503 body → decided: same HealthResponse shape as 200 (not the error shape), so
   monitors can see which check failed
+- /health DB timeout → decided: separate NullPool `health_engine` with a 3 s connect
+  timeout (app keeps 10 s for Neon wake-ups); worst-case 503 now ~5 s instead of ~12 s
 - DB conventions → decided: VARCHAR+CHECK enums, NULLS NOT DISTINCT, user_id FK added in Phase 1 (ADR 002)
 - Category kinds → open: "Transfers to People", "Investments", "Refunds" and "Uncategorized" kinds
   are a first guess; revisit when building insights (§9.1). Changing them = edit seed_data.py + re-seed
@@ -41,8 +43,6 @@ Phase 0 — Foundation (plan: docs/plans/phase-0.md)
 - Windows: use `127.0.0.1`, not `localhost`, in DB/Redis URLs (IPv6 `::1` hangs with Docker);
   engine has a 10 s connect timeout so this fails loudly instead of hanging
 - Run tests from `backend/` with the venv Python, not Anaconda's `python`
-- /health takes ~12 s to answer 503 when Postgres/Redis don't respond (10 s DB connect
-  timeout + 2 s Redis); monitors may time out first → fix pending decision
 - uvicorn's access log writes full URLs incl. query strings and bypasses structlog
   redaction; harmless now, but must be handled before filter endpoints
   (e.g. `?min_amount=`) arrive in Phase 1
