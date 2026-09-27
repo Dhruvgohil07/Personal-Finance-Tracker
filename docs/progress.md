@@ -28,6 +28,8 @@ Phase 0 — Foundation (plan: docs/plans/phase-0.md)
   monitors can see which check failed
 - /health DB timeout → decided: separate NullPool `health_engine` with a 3 s connect
   timeout (app keeps 10 s for Neon wake-ups); worst-case 503 now ~5 s instead of ~12 s
+- Request logging → decided: uvicorn access log off; own middleware logs path without
+  query string + request_id (X-Request-ID header) (ADR 003)
 - DB conventions → decided: VARCHAR+CHECK enums, NULLS NOT DISTINCT, user_id FK added in Phase 1 (ADR 002)
 - Category kinds → open: "Transfers to People", "Investments", "Refunds" and "Uncategorized" kinds
   are a first guess; revisit when building insights (§9.1). Changing them = edit seed_data.py + re-seed
@@ -43,6 +45,3 @@ Phase 0 — Foundation (plan: docs/plans/phase-0.md)
 - Windows: use `127.0.0.1`, not `localhost`, in DB/Redis URLs (IPv6 `::1` hangs with Docker);
   engine has a 10 s connect timeout so this fails loudly instead of hanging
 - Run tests from `backend/` with the venv Python, not Anaconda's `python`
-- uvicorn's access log writes full URLs incl. query strings and bypasses structlog
-  redaction; harmless now, but must be handled before filter endpoints
-  (e.g. `?min_amount=`) arrive in Phase 1

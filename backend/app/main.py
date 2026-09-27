@@ -19,7 +19,11 @@ from app.api.v1 import api_router
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
-from app.core.middleware import SecurityHeadersMiddleware
+from app.core.middleware import (
+    REQUEST_ID_HEADER,
+    RequestLoggingMiddleware,
+    SecurityHeadersMiddleware,
+)
 from app.core.redis import get_redis
 from app.db.session import engine
 
@@ -54,11 +58,13 @@ def create_app() -> FastAPI:
     # Middleware order: each add_middleware() call wraps AROUND everything
     # added before it, so the LAST one added runs FIRST on a request.
     #
-    #   request -> SecurityHeaders -> CORS -> route
+    #   request -> RequestLogging -> SecurityHeaders -> CORS -> route
     #
     # CORS answers browser "preflight" requests (OPTIONS) itself, without
     # calling the route. SecurityHeaders sits outside it, so those answers
     # get the security headers too: every response passes through it.
+    # RequestLogging is outermost, so it times and logs everything,
+    # including requests that CORS rejects.
     app.add_middleware(
         CORSMiddleware,
         # Only our own frontend may call the API from a browser. Never "*".
@@ -68,8 +74,12 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
+        # Browsers hide response headers from JavaScript unless listed here.
+        # The frontend needs to read X-Request-ID to show it in error messages.
+        expose_headers=[REQUEST_ID_HEADER],
     )
     app.add_middleware(SecurityHeadersMiddleware, enable_hsts=settings.env == "production")
+    app.add_middleware(RequestLoggingMiddleware)
 
     app.include_router(api_router, prefix=API_V1_PREFIX)
     return app

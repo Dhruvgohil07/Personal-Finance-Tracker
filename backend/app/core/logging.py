@@ -129,3 +129,11 @@ def configure_logging(env: str) -> None:
         # Write each JSON line to stdout; Docker and hosting platforms collect stdout.
         logger_factory=structlog.PrintLoggerFactory(sys.stdout),
     )
+
+    # uvicorn's access log ("GET /path?query HTTP/1.1" 200) uses Python's
+    # standard `logging`, not structlog, so our redaction never sees it, and
+    # it includes the query string (e.g. ?min_amount=5000). Turn it off;
+    # RequestLoggingMiddleware (app/core/middleware.py) logs requests instead.
+    # This runs when the app is imported, which uvicorn does AFTER setting up
+    # its own logging, so this setting wins.
+    logging.getLogger("uvicorn.access").disabled = True
