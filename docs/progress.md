@@ -1,7 +1,7 @@
 # Progress
 
 ## Current phase
-Phase 0 — Foundation (plan: docs/plans/phase-0.md)
+Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 
 ## Completed
 - [x] Step 1: Tooling and infrastructure — pyproject.toml, docker-compose, .env.example, .gitignore
@@ -12,12 +12,14 @@ Phase 0 — Foundation (plan: docs/plans/phase-0.md)
 - [x] Step 3: Database — session, categories/merchants models, migration 0001, idempotent seed
 - [x] Step 4: App and health check — app factory, strict CORS, security headers, GET /api/v1/health
 - [x] Step 5: CI and docs — GitHub Actions CI, ADR 001, README, docs/request-lifecycle.md
+- [x] Phase 0 complete (CI green)
+- [x] Phase 1 plan approved — docs/plans/phase-1.md
 
 ## In progress
-- Phase 0 wrap-up: confirm CI is green on GitHub after the push (last "Done when" item)
+- (nothing yet)
 
 ## Next up
-- Phase 1 — Backend MVP: plan to be written and approved (docs/plans/phase-1.md)
+- Phase 1 Step 1: users, refresh tokens, security helpers (migration 0002)
 
 ## Open decisions / questions
 - RQ worker on Windows → decided: run as a Docker service (added in Phase 2)
@@ -37,6 +39,10 @@ Phase 0 — Foundation (plan: docs/plans/phase-0.md)
 - Category kinds → open: "Transfers to People", "Investments", "Refunds" and "Uncategorized" kinds
   are a first guess; revisit when building insights (§9.1). Changing them = edit seed_data.py + re-seed
 - Merchant key format → open: confirm against real narrations in Phase 2 (§6.5)
+- ICICI statements are legacy `.xls` → decided: support via new dependency `xlrd` (ADR 004 in Step 6)
+- Rate limiting → decided: built in Phase 1 (Step 3), not Phase 5
+- Phase 1 extra endpoints → decided: only `GET /categories`; `/me`, upload list/delete and
+  user categories CRUD deferred
 
 ## My TODO(dhruv) tasks
 - [x] Nested job-password redaction test (Step 2b, tests/unit/test_logging.py)
