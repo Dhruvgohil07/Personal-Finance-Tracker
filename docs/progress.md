@@ -22,6 +22,8 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 - Phase 1 Step 1: users, refresh tokens, security helpers (migration 0002)
 
 ## Open decisions / questions
+- Git workflow → decided: `main` protected (ruleset `protect-main`); every change via a
+  feature branch + PR, green `backend` check required, rebase-merge only (CLAUDE.md §18)
 - RQ worker on Windows → decided: run as a Docker service (added in Phase 2)
 - Schema scope → decided: add tables phase by phase
 - Log redaction → decided: substring match on normalized keys; `email` is redacted (log user_id instead)

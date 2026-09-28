@@ -83,15 +83,39 @@ parsing work, §10 for a new endpoint). The rules in THIS file apply to every ta
 
 ## 18. Git & Commit Rules (strict)
 
-### Who commits and pushes
-- **Do NOT run `git commit` or `git push`.** I commit and push myself from VS Code, using my own GitHub account. I am the only author and the only contributor of this repository.
-- **Never change git configuration**: do not run `git config` (user.name, user.email, credentials), do not add/change remotes, do not create or change branches unless I ask.
-- If I ever explicitly ask you to create a commit, every rule below still applies, and you still never push.
+### Repository setup (GitHub)
+`main` is protected by the ruleset `protect-main` (no bypass, not even for me):
+- No direct pushes: every change reaches `main` through a pull request
+- No force pushes, no deleting `main`
+- The `backend` CI check (`.github/workflows/ci.yml`: ruff check, ruff format --check, pytest against Postgres + Redis) must pass, on a branch that is up to date with `main`
+- Only **"Rebase and merge"** is allowed, so each commit lands on `main` as written (linear history)
 
-### What to do at the end of each task
-1. List exactly which files belong to this task, so I can stage them (e.g. `git add backend/app/utils/money.py backend/tests/unit/test_money.py`). Never suggest `git add .` or `git add -A` without listing the files.
-2. Confirm that nothing sensitive is being staged: no `.env`, nothing from `samples/`, no exported CSVs, no real statement data.
-3. Propose a commit message following the format below. I will review it and commit it myself.
+### Who does what
+- **You (Claude):**
+  - Create the feature branch at the start of each task (see the flow below).
+  - Commit **only when I say "commit"**, and only on the feature branch — never on `main`.
+  - **Never run `git push`**, never merge, never open or merge PRs.
+- **Me:** push/publish the branch from VS Code, open the PR, watch CI, merge, delete the branch.
+- I am the only author and the only contributor of this repository. Commits use my existing git identity.
+- **Never change git configuration**: do not run `git config` (user.name, user.email, credentials), do not add/change remotes, do not change repository or GitHub settings.
+
+### Branch naming
+- Phase work: `phase-<N>/step-<X>-<short-slug>`, e.g. `phase-1/step-2-auth`
+- Work outside a phase step: `<type>/<short-slug>`, using the commit types below, e.g. `fix/ci-runner-version`, `docs/git-workflow`
+- One branch (and one PR) per task/step; it may contain several commits.
+
+### Flow for every task
+1. **Start:** switch to `main`, pull (`git pull --ff-only`), check the working tree is clean, then create the task branch with `git switch -c <branch>`. If `main` isn't clean or up to date, stop and tell me.
+2. **Work:** small steps; run `ruff check`, `ruff format --check` and `pytest` (see §17).
+3. **End of task** (before any commit):
+   1. Update `docs/progress.md` (see §19).
+   2. List exactly which files belong to each commit (e.g. `git add backend/app/utils/money.py backend/tests/unit/test_money.py`). Never use or suggest `git add .` or `git add -A`.
+   3. Confirm that nothing sensitive is being staged: no `.env`, nothing from `samples/`, no exported CSVs, no real statement data.
+   4. Propose the commit message(s) in the format below and wait for me to say "commit".
+4. **Commit (when I say so):** stage only the listed files, commit, then show `git log --oneline` and confirm the working tree is clean.
+5. **PR:** draft the PR title and description (What / Why / Testing / Known issues / Checklist) as GitHub Markdown. Give it to me without a surrounding code fence (put it on my clipboard or in a file), so the headings and checkboxes render on GitHub.
+6. **CI:** if the `backend` check fails, read the failing step's log (the public GitHub API works without login), fix it with a **new** commit on the same branch (e.g. `fix(ci): ...`), and never rewrite commits that are already pushed.
+7. **After I merge:** switch to `main` and pull. Rebase-merging gives the commits new IDs, so `git branch -d` reports "not fully merged": first confirm `git diff <branch> main` is empty, then delete the local branch with `git branch -D <branch>`.
 
 ### Commit message format (Conventional Commits)
 ```
@@ -103,7 +127,7 @@ parsing work, §10 for a new endpoint). The rules in THIS file apply to every ta
 - `scope`: the area touched, e.g. `money`, `auth`, `parsers`, `db`, `api`, `worker`, `ci`
 - Summary: imperative mood ("add", not "added"), lowercase, no trailing period, max 72 characters
 - Body: explain **what** changed and **why** (the reasoning a reviewer or interviewer would ask about). Skip the body only for trivial changes.
-- One logical change per commit. If a task naturally splits into two changes, propose two commits.
+- One logical change per commit. If a task naturally splits into two changes, propose two commits. (Rebase-merging keeps every commit on `main`, so each one must make sense on its own.)
 
 Examples:
 ```
