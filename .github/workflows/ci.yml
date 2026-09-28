@@ -1,0 +1,116 @@
+# Continuous Integration: on every push to main and every pull request,
+# lint the backend and run the WHOLE test suite (unit + integration)
+# against real Postgres and Redis, the same versions as docker-compose.yml.
+#
+# A red CI run means "do not merge" (docs/SPEC.md §13).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: this workflow only needs to read the code.
+permissions:
+  contents: read
+
+# If you push again while a run is still going, cancel the old run:
+# only the newest commit's result matters.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Every `run:` step below starts inside backend/ (like we do locally).
+    defaults:
+      run:
+        working-directory: backend
+
+    # Service containers: GitHub starts these next to the job, waits until
+    # their health checks pass, and deletes them afterwards. The ports are
+    # published on the runner, so tests reach them on 127.0.0.1.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: kharcha
+          POSTGRES_PASSWORD: kharcha
+          POSTGRES_DB: kharcha
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kharcha -d kharcha"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    # Non-secret settings. Settings (app/core/config.py) reads these from the
+    # environment; there is no .env file in CI.
+    env:
+      ENV: test
+      DATABASE_URL: postgresql+psycopg://kharcha:kharcha@127.0.0.1:5432/kharcha
+      TEST_DATABASE_URL: postgresql+psycopg://kharcha:kharcha@127.0.0.1:5432/kharcha_test
+      REDIS_URL: redis://127.0.0.1:6379/0
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Installs uv. Python 3.12 itself is installed by `uv sync` below,
+      # because uv reads backend/.python-version.
+      # The cache keeps downloaded packages between runs, keyed on uv.lock.
+      - uses: astral-sh/setup-uv@v10
+        with:
+          working-directory: backend
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      # --locked: fail if uv.lock is out of date with pyproject.toml, so CI
+      # installs exactly the versions that were tested locally.
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # The service container can't run our init script, so create the test
+      # database with the SAME script docker-compose uses locally.
+      - name: Create the test database
+        env:
+          PGPASSWORD: kharcha
+        run: psql -h 127.0.0.1 -U kharcha -d kharcha -f ../docker/postgres/init/01-create-test-db.sql
+
+      # The app refuses to start without strong secrets. We generate random
+      # throwaway ones for each run instead of committing values to the repo
+      # (a committed "test" secret tends to get copied somewhere real).
+      # ::add-mask:: hides a value if it ever appears in the CI log.
+      # $GITHUB_ENV makes the variables available to all later steps.
+      - name: Generate throwaway secrets
+        run: |
+          for name in JWT_ACCESS_SECRET JWT_REFRESH_SECRET; do
+            value=$(openssl rand -base64 48)
+            echo "::add-mask::$value"
+            echo "$name=$value" >> "$GITHUB_ENV"
+          done
+          key=$(openssl rand -base64 32)
+          echo "::add-mask::$key"
+          echo "FILE_ENCRYPTION_KEY=$key" >> "$GITHUB_ENV"
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Check formatting (ruff format)
+        run: uv run ruff format --check .
+
+      - name: Tests (pytest, with coverage)
+        run: uv run pytest --cov --cov-report=term-missing
