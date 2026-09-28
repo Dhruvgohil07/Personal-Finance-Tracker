@@ -2,7 +2,7 @@
 
 Two kinds of rows live in this one table:
 - system categories  : user_id IS NULL, created by the seed, shared by everyone
-- user categories    : user_id = the owner (added in Phase 1)
+- user categories    : user_id = the owner (created through the API later)
 """
 
 import uuid
@@ -30,9 +30,12 @@ class Category(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UniqueConstraint("user_id", "slug", postgresql_nulls_not_distinct=True),
     )
 
-    # NULL = system category. The FOREIGN KEY to users is added in Phase 1,
-    # in the same migration that creates the users table (see ADR 002).
-    user_id: Mapped[uuid.UUID | None]
+    # NULL = system category. The FOREIGN KEY was added in migration 0002,
+    # together with the users table (see ADR 002). Deleting a user deletes
+    # their own categories; system categories (NULL) are never affected.
+    # No separate index: the unique constraint (user_id, slug) starts with
+    # user_id, so Postgres can use it for "WHERE user_id = ..." too.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     name: Mapped[str]
     # URL/code-friendly id, e.g. "food-dining". Code refers to categories by
     # slug (merchants, keyword rules, LLM output), never by UUID.

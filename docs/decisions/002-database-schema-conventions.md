@@ -47,3 +47,8 @@ become the pattern every later table follows, so they are recorded once.
 - The seed never deletes rows: removing an entry from `seed_data.py` leaves
   the old row in the database; that needs a data migration.
 - Raw SQL `UPDATE`s must set `updated_at` themselves (`onupdate` is ORM-only).
+
+## Follow-up
+- 2026-09-28 (Phase 1, Step 1): migration `0002` added
+  `fk_categories_user_id_users` (`ON DELETE CASCADE`) together with the
+  `users` table, as planned in decision 3.
