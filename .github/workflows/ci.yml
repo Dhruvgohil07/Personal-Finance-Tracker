@@ -72,7 +72,12 @@ jobs:
       # Installs uv. Python 3.12 itself is installed by `uv sync` below,
       # because uv reads backend/.python-version.
       # The cache keeps downloaded packages between runs, keyed on uv.lock.
-      - uses: astral-sh/setup-uv@v10
+      #
+      # Pinned to a full commit SHA, not a tag: a tag can be moved to point
+      # at different code, a commit SHA can't (supply-chain safety for
+      # third-party actions). setup-uv also has no short "v10" tag, only
+      # full versions. To upgrade: take the SHA of a newer release tag.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           working-directory: backend
           enable-cache: true
