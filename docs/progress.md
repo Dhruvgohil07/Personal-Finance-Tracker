@@ -11,12 +11,13 @@ Phase 0 — Foundation (plan: docs/plans/phase-0.md)
 - [x] Step 2d: Money helpers — app/utils/money.py (Decimal → paise parser, INR lakh formatter)
 - [x] Step 3: Database — session, categories/merchants models, migration 0001, idempotent seed
 - [x] Step 4: App and health check — app factory, strict CORS, security headers, GET /api/v1/health
+- [x] Step 5: CI and docs — GitHub Actions CI, ADR 001, README, docs/request-lifecycle.md
 
 ## In progress
-- (none)
+- Phase 0 wrap-up: confirm CI is green on GitHub after the push (last "Done when" item)
 
 ## Next up
-- Step 5: CI and docs (GitHub Actions, ADR 001, README, request lifecycle write-up)
+- Phase 1 — Backend MVP: plan to be written and approved (docs/plans/phase-1.md)
 
 ## Open decisions / questions
 - RQ worker on Windows → decided: run as a Docker service (added in Phase 2)
@@ -31,6 +32,8 @@ Phase 0 — Foundation (plan: docs/plans/phase-0.md)
 - Request logging → decided: uvicorn access log off; own middleware logs path without
   query string + request_id (X-Request-ID header) (ADR 003)
 - DB conventions → decided: VARCHAR+CHECK enums, NULLS NOT DISTINCT, user_id FK added in Phase 1 (ADR 002)
+- CI secrets → decided: random throwaway JWT/encryption secrets generated per run
+  (openssl), none committed; test DB created with the same init SQL as docker-compose
 - Category kinds → open: "Transfers to People", "Investments", "Refunds" and "Uncategorized" kinds
   are a first guess; revisit when building insights (§9.1). Changing them = edit seed_data.py + re-seed
 - Merchant key format → open: confirm against real narrations in Phase 2 (§6.5)
@@ -40,8 +43,12 @@ Phase 0 — Foundation (plan: docs/plans/phase-0.md)
 - [x] Money parsing + formatting edge-case tests (Step 2d)
 - [x] 3 merchants + `test_merchant_categories_exist` (Step 3)
 - [x] App version field in /health (Step 4) — done together; `app.__version__` + pyproject match test
+- [x] Dependency caching test (Step 5, tests/unit/test_dependency_injection.py)
 
 ## Known issues
 - Windows: use `127.0.0.1`, not `localhost`, in DB/Redis URLs (IPv6 `::1` hangs with Docker);
   engine has a 10 s connect timeout so this fails loudly instead of hanging
 - Run tests from `backend/` with the venv Python, not Anaconda's `python`
+- Unhandled-exception 500 responses have no security headers and no X-Request-ID
+  (Starlette's ServerErrorMiddleware builds them outside our middleware). Body is
+  generic, so low risk; decide whether to fix before Phase 5 security review

@@ -86,8 +86,13 @@ understand now" summary, a progress update and a proposed commit.
   containers
 - `docs/decisions/001-money-as-paise.md`
 - `README.md` — how to run locally
-- Written explanation: FastAPI request lifecycle and dependency injection
+- `docs/request-lifecycle.md` — written explanation: FastAPI request
+  lifecycle and dependency injection
+- TODO(dhruv): dependency caching test (`tests/unit/test_dependency_injection.py`)
 
 ## Change log
 - Step 2 split into 2a (config), 2b (logging), 2c (errors), 2d (money) at
   the user's request, stopping after each for review and a commit.
+- Step 5: the lifecycle explanation lives in `docs/request-lifecycle.md`
+  (so it is versioned with the code); added a TODO(dhruv) DI test; fixed
+  the missing `integration` marker on `tests/integration/test_health.py`.
