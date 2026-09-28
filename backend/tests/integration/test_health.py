@@ -1,10 +1,13 @@
 """The health check against the REAL Postgres and Redis from docker-compose."""
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.db.session import get_health_db
 from app.main import create_app
+
+pytestmark = pytest.mark.integration
 
 
 def test_health_is_green_with_real_services(db: Session) -> None:
