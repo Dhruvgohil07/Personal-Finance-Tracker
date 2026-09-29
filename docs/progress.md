@@ -8,12 +8,12 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 - [x] Phase 1 plan approved — docs/plans/phase-1.md
 - [x] Step 1: Users + security helpers — users/refresh_tokens models, migration 0002
   (incl. categories.user_id FK), app/core/security.py (argon2id, access JWT, refresh token HMAC)
+- [x] Step 2: Auth endpoints (register/login/refresh/logout), `get_current_user`, ADR 005
 
 ## In progress
 - (nothing yet)
 
 ## Next up
-- [ ] Step 2: Auth endpoints (register/login/refresh/logout) + `get_current_user`, ADR 005
 - [ ] Step 3: Rate limiting (slowapi + Redis; login/register, uploads, general API)
 - [ ] Step 4: Accounts CRUD (migration 0003, IDOR test)
 - [ ] Step 5: Pure parsing core — parser protocol, registry, normalization, fingerprint (ADR 006)
@@ -49,6 +49,8 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   user categories CRUD deferred
 - Refresh token lifetime → decided: 30 days (not in the spec); each refresh issues a new token
 - User `name` → required (NOT NULL); `settings` default filled by the ORM, no DB default
+- Register → decided: returns 201 + user, no tokens (client logs in next); duplicate → 409 (ADR 005)
+- Logout → decided: revokes the whole token family of that session; no access token needed
 
 ## My TODO(dhruv) tasks
 - [x] Nested job-password redaction test (Step 2b, tests/unit/test_logging.py)
@@ -58,6 +60,7 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 - [x] Dependency caching test (Step 5, tests/unit/test_dependency_injection.py)
 - [x] Expired access token test (Phase 1 Step 1, tests/unit/test_security.py) — plus a
   just-before-expiry boundary test
+- [x] `test_refresh_after_logout_is_401` (Step 2, tests/integration/test_auth.py)
 
 ## Known issues
 - Windows: use `127.0.0.1`, not `localhost`, in DB/Redis URLs (IPv6 `::1` hangs with Docker);

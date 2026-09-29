@@ -8,6 +8,8 @@ Lifecycle:
   migrations themselves are tested too.
 - once per test      (`db`): hand out a Session, then empty every table
   afterwards so each test starts from a clean database.
+- once per test      (`client`): a TestClient for the real app whose routes
+  use the test database.
 """
 
 from collections.abc import Iterator
@@ -16,12 +18,14 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi.testclient import TestClient
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
 from app.db.base import Base
-from app.db.session import build_engine
+from app.db.session import build_engine, get_db
+from app.main import create_app
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
@@ -70,3 +74,31 @@ def db(migrated_engine: Engine) -> Iterator[Session]:
         table_names = ", ".join(t.name for t in Base.metadata.sorted_tables)
         with migrated_engine.begin() as conn:
             conn.execute(text(f"TRUNCATE {table_names} CASCADE"))
+
+
+@pytest.fixture
+def client(migrated_engine: Engine, db: Session) -> Iterator[TestClient]:
+    """The real app, with every request getting its own test-DB session.
+
+    Depending on `db` means the tables are emptied after the test.
+
+    A fresh session per request (not the shared `db` one) behaves like
+    production: nothing cached in memory carries over between requests.
+
+    base_url is https because the refresh cookie is `Secure`: the test
+    client, like a browser, would not send it back over plain http.
+    """
+    session_factory = sessionmaker(bind=migrated_engine, expire_on_commit=False)
+
+    def _get_test_db() -> Iterator[Session]:
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app = create_app()
+    app.dependency_overrides[get_db] = _get_test_db
+    # Not `with TestClient(...)`: that would run the app's shutdown code,
+    # which closes the shared engine and Redis client used by other tests.
+    yield TestClient(app, base_url="https://testserver")
