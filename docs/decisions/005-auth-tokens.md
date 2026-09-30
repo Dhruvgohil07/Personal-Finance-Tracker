@@ -26,6 +26,14 @@ rotation on every refresh and family-based reuse detection.
 5. **Reuse detection**: presenting an already-revoked token revokes every
    token of that family and returns 401. Other families (other devices) are
    untouched.
+   **Grace window (10 s)**: a token revoked less than 10 s ago is refused
+   with 401 but the family is *not* revoked. Without it, two refreshes sent
+   at once (two tabs, or several requests retrying after the access token
+   expired) look like theft: the second request waits for the row lock,
+   finds the token already rotated, and revokes the family, including the
+   token the first request just issued. No extra column is needed: logout
+   and reuse detection already revoke the whole family, so the only tokens
+   the window spares are ones just replaced by rotation.
 6. **Logout** revokes the session's family and deletes the cookie. It
    needs no access token and always returns 204.
 7. **Login** answers "Invalid email or password." for both unknown email and
@@ -36,6 +44,11 @@ rotation on every refresh and family-based reuse detection.
    (race-free), not by a check-then-insert.
 
 ## Alternatives rejected
+- *No grace window, fix only in the frontend*: can deduplicate refreshes
+  inside one tab, but not across two tabs sharing the same cookie.
+- *A `revoke_reason` / `replaced_by` column to tell rotation apart from
+  logout*: more precise, but needs a migration, and the family state
+  already answers the question.
 - *Refresh token as a JWT*: rotation and revocation need a DB row anyway,
   so the signature adds nothing but size and a second secret to reason about.
 - *Plain SHA-256 of the refresh token*: works, but with HMAC a leaked DB
@@ -52,6 +65,11 @@ rotation on every refresh and family-based reuse detection.
 ## Consequences
 - A stolen access token works until it expires (max 15 min); there is no
   access-token blocklist.
+- A stolen refresh token replayed within 10 s of the real user's refresh
+  is refused but doesn't trigger reuse detection. The thief still gains
+  nothing (the token is already revoked); only the alarm is skipped.
+- The frontend (Phase 3) should still send one refresh at a time per tab,
+  so the grace window is a safety net, not the normal path.
 - Register's 409 reveals that an email is registered. Accepted: login
   hides it, and register will be rate-limited (Step 3).
 - Refresh errors don't clear the cookie (the exception path discards the
