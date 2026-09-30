@@ -24,6 +24,7 @@ from app.core.middleware import (
     RequestLoggingMiddleware,
     SecurityHeadersMiddleware,
 )
+from app.core.rate_limit import setup_rate_limiting
 from app.core.redis import get_redis
 from app.db.session import engine
 
@@ -58,13 +59,17 @@ def create_app() -> FastAPI:
     # Middleware order: each add_middleware() call wraps AROUND everything
     # added before it, so the LAST one added runs FIRST on a request.
     #
-    #   request -> RequestLogging -> SecurityHeaders -> CORS -> route
+    #   request -> RequestLogging -> SecurityHeaders -> CORS -> RateLimit -> route
     #
+    # RateLimit is innermost, so its 429 answers still get CORS headers
+    # (a browser can read them), security headers and a log line.
     # CORS answers browser "preflight" requests (OPTIONS) itself, without
-    # calling the route. SecurityHeaders sits outside it, so those answers
-    # get the security headers too: every response passes through it.
+    # calling the route, so preflights are never rate limited.
+    # SecurityHeaders sits outside CORS, so those answers get the security
+    # headers too: every response passes through it.
     # RequestLogging is outermost, so it times and logs everything,
     # including requests that CORS rejects.
+    setup_rate_limiting(app)
     app.add_middleware(
         CORSMiddleware,
         # Only our own frontend may call the API from a browser. Never "*".

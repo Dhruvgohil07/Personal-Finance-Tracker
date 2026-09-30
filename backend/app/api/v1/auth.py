@@ -11,10 +11,11 @@ cookie itself, so "Try it out" on /auth/refresh works without pasting it.
 from http import HTTPStatus
 from typing import Annotated
 
-from fastapi import APIRouter, Cookie, Response
+from fastapi import APIRouter, Cookie, Request, Response
 
 from app.api.deps import DbSession
 from app.core.errors import ErrorResponse, UnauthorizedError
+from app.core.rate_limit import AUTH_LIMIT, client_ip, limiter
 from app.core.security import ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 from app.services import auth as auth_service
@@ -28,8 +29,9 @@ REFRESH_COOKIE_NAME = "refresh_token"
 # little as possible.
 REFRESH_COOKIE_PATH = "/api/v1/auth"
 
-# Shown in /docs for routes that can answer 401.
+# Shown in /docs for routes that can answer 401 / 429.
 _UNAUTHORIZED = {HTTPStatus.UNAUTHORIZED: {"model": ErrorResponse}}
+_RATE_LIMITED = {HTTPStatus.TOO_MANY_REQUESTS: {"model": ErrorResponse}}
 
 
 def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
@@ -52,19 +54,26 @@ def _token_response(response: Response, tokens: AuthTokens) -> TokenResponse:
     )
 
 
+# Register and login are limited per IP (the caller has no token yet), to
+# slow down password guessing and mass sign-ups. The decorator must sit
+# BELOW @router.post, so FastAPI registers the rate-limited function.
+# Each route has its own counter: the key includes the route's path.
+# `request` is unused by our code, but slowapi needs it to find the client.
 @router.post(
     "/register",
     status_code=HTTPStatus.CREATED,
     response_model=UserResponse,
-    responses={HTTPStatus.CONFLICT: {"model": ErrorResponse}},
+    responses={HTTPStatus.CONFLICT: {"model": ErrorResponse}, **_RATE_LIMITED},
 )
-def register(body: RegisterRequest, db: DbSession) -> UserResponse:
+@limiter.limit(AUTH_LIMIT, key_func=client_ip)
+def register(request: Request, body: RegisterRequest, db: DbSession) -> UserResponse:
     user = auth_service.register_user(db, email=body.email, password=body.password, name=body.name)
     return UserResponse.model_validate(user)
 
 
-@router.post("/login", response_model=TokenResponse, responses=_UNAUTHORIZED)
-def login(body: LoginRequest, db: DbSession, response: Response) -> TokenResponse:
+@router.post("/login", response_model=TokenResponse, responses={**_UNAUTHORIZED, **_RATE_LIMITED})
+@limiter.limit(AUTH_LIMIT, key_func=client_ip)
+def login(request: Request, body: LoginRequest, db: DbSession, response: Response) -> TokenResponse:
     tokens = auth_service.login(db, email=body.email, password=body.password)
     return _token_response(response, tokens)
 

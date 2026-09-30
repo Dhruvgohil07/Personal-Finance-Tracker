@@ -9,6 +9,7 @@ from http import HTTPStatus
 from fastapi import APIRouter, Response
 
 from app.api.deps import HealthDbSession, RedisClient
+from app.core.rate_limit import limiter
 from app.schemas.health import HealthResponse
 from app.services.health import get_health
 
@@ -25,6 +26,9 @@ router = APIRouter(tags=["health"])
     response_model=HealthResponse,
     responses={HTTPStatus.SERVICE_UNAVAILABLE: {"model": HealthResponse}},
 )
+# Not rate limited: uptime monitors poll it, and it must keep answering
+# (with 503) when Redis, which holds the rate-limit counters, is down.
+@limiter.exempt
 def health(db: HealthDbSession, redis_client: RedisClient, response: Response) -> HealthResponse:
     result = get_health(db, redis_client)
     if result.status != "ok":

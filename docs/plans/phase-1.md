@@ -67,6 +67,11 @@ stage and a proposed commit. Stop after each step for review.
 - Limits: register/login 5/min/IP, uploads 10/hour/user, default 100/min/user
 - Tests: the 6th login within a minute → 429 in our error shape; a fixture
   clears limiter keys so tests don't affect each other
+- *Change during the step:* the general limit is one counter per client across
+  the API (slowapi "application limit"), `/health` is exempt, and Redis down =
+  fail open. slowapi 0.1.10 crashes (500) in that case, so a small
+  `RateLimitMiddleware` subclass works around it. Recorded in ADR 007
+  (004/006 stay reserved for Steps 6/5).
 
 ### Step 4 — Accounts CRUD
 - `backend/app/models/account.py` — `bank_code`, `nickname`, `account_type`,
