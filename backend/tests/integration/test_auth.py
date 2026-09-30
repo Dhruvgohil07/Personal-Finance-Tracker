@@ -18,6 +18,7 @@ from structlog.testing import capture_logs
 from app.api.deps import CurrentUser
 from app.core.security import create_access_token
 from app.models import RefreshToken, User
+from app.services.auth import REUSE_GRACE_PERIOD
 
 pytestmark = pytest.mark.integration
 
@@ -58,6 +59,21 @@ def _post_with_refresh_cookie(client: TestClient, url: str, refresh_token: str) 
     """
     client.cookies.clear()
     return client.post(url, headers={"Cookie": f"refresh_token={refresh_token}"})
+
+
+def _move_revocations_past_grace_period(db: Session) -> None:
+    """Pretend every revocation happened a minute ago.
+
+    A token replayed within REUSE_GRACE_PERIOD of its rotation is treated
+    as a harmless race, not theft. Tests of real reuse detection move the
+    revoke time back so the replay is clearly "later".
+    """
+    db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.revoked_at.is_not(None))
+        .values(revoked_at=RefreshToken.revoked_at - REUSE_GRACE_PERIOD - timedelta(minutes=1))
+    )
+    db.commit()
 
 
 @pytest.fixture
@@ -268,6 +284,7 @@ def test_reusing_a_rotated_token_revokes_the_whole_family(client: TestClient, db
     # The real user logs in and refreshes once: T1 -> T2.
     _, token_1 = _registered_and_logged_in(client)
     token_2 = _post_with_refresh_cookie(client, REFRESH, token_1).cookies["refresh_token"]
+    _move_revocations_past_grace_period(db)
 
     # A thief who copied T1 earlier tries to use it.
     with capture_logs() as logs:
@@ -280,16 +297,39 @@ def test_reusing_a_rotated_token_revokes_the_whole_family(client: TestClient, db
     assert all(row.revoked_at is not None for row in db.scalars(select(RefreshToken)))
 
 
-def test_reuse_detection_leaves_other_sessions_alone(client: TestClient) -> None:
+def test_reuse_detection_leaves_other_sessions_alone(client: TestClient, db: Session) -> None:
     # Same user, two devices = two separate logins = two families.
     _, laptop_token = _registered_and_logged_in(client)
     phone_token = _login(client).cookies["refresh_token"]
 
     # Trigger reuse detection on the laptop's family.
     _post_with_refresh_cookie(client, REFRESH, laptop_token)
-    _post_with_refresh_cookie(client, REFRESH, laptop_token)
+    _move_revocations_past_grace_period(db)
+    with capture_logs() as logs:
+        _post_with_refresh_cookie(client, REFRESH, laptop_token)
+    assert any(event["event"] == "refresh_token_reuse_detected" for event in logs)
 
     assert _post_with_refresh_cookie(client, REFRESH, phone_token).status_code == 200
+
+
+def test_concurrent_refresh_does_not_log_the_user_out(client: TestClient) -> None:
+    """Two tabs refresh with the same cookie at the same moment.
+
+    We replay the requests one after the other: that is exactly what the
+    second request sees after waiting for the first one's row lock.
+    """
+    _, token_1 = _registered_and_logged_in(client)
+
+    # Request A wins: T1 -> T2.
+    token_2 = _post_with_refresh_cookie(client, REFRESH, token_1).cookies["refresh_token"]
+    # Request B arrives with T1 a moment later.
+    with capture_logs() as logs:
+        late = _post_with_refresh_cookie(client, REFRESH, token_1)
+
+    assert late.status_code == 401  # T1 is used up either way
+    assert not any(event["event"] == "refresh_token_reuse_detected" for event in logs)
+    # The important part: the session survives, T2 still works.
+    assert _post_with_refresh_cookie(client, REFRESH, token_2).status_code == 200
 
 
 def test_expired_refresh_token_is_401(client: TestClient, db: Session) -> None:

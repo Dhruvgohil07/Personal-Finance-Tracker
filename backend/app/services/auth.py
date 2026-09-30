@@ -9,14 +9,17 @@ Refresh token lifecycle (full reasoning in docs/decisions/005-auth-tokens.md):
     login    -> new family F, token T1 stored (hash only)
     refresh  -> T1 revoked, T2 issued in family F      ("rotation")
     refresh  -> T2 revoked, T3 issued in family F
-    T1 again -> T1 is already revoked = someone replayed an old token
-                -> revoke EVERY token in family F ("reuse detection")
+    T1 again, within 10 s of its rotation
+             -> refused, family untouched (two refreshes at once: a race)
+    T1 again, later
+             -> T1 is already revoked = someone replayed an old token
+             -> revoke EVERY token in family F ("reuse detection")
     logout   -> every token in family F revoked
 """
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import cache
 
 import structlog
@@ -42,6 +45,12 @@ log = structlog.get_logger()
 # would let anyone check which emails have an account here.
 INVALID_LOGIN_MESSAGE = "Invalid email or password."
 INVALID_REFRESH_MESSAGE = "Invalid or expired refresh token."
+
+# A token revoked less than this long ago is treated as a harmless race
+# (two refreshes at once), not as theft. See the grace branch in refresh()
+# and ADR 005. Short, because it is also a window in which a replayed
+# stolen token is refused without raising the alarm.
+REUSE_GRACE_PERIOD = timedelta(seconds=10)
 
 
 @dataclass(frozen=True)
@@ -122,20 +131,35 @@ def login(db: Session, *, email: str, password: str) -> AuthTokens:
 
 def refresh(db: Session, *, refresh_token: str) -> AuthTokens:
     """Swap a valid refresh token for a new access token AND a new refresh token."""
-    now = datetime.now(UTC)
-
     # with_for_update() -> SELECT ... FOR UPDATE: locks this row until we
     # commit. If two requests send the same token at the same moment, the
-    # second one waits, then sees `revoked_at` already set by the first.
+    # second one waits, then sees `revoked_at` already set by the first and
+    # lands in the grace-window branch below.
     # Without the lock, both could read "not revoked" and both get new tokens.
     stored = db.scalar(
         select(RefreshToken)
         .where(RefreshToken.token_hash == hash_refresh_token(refresh_token))
         .with_for_update()
     )
+    # Read the clock AFTER the lock: a request that waited for it must
+    # compare against the current time, not the time it arrived.
+    now = datetime.now(UTC)
 
     if stored is None:
         # Unknown token: made up, or its user was deleted.
+        raise UnauthorizedError(INVALID_REFRESH_MESSAGE)
+
+    if stored.revoked_at is not None and now - stored.revoked_at < REUSE_GRACE_PERIOD:
+        # Revoked moments ago: almost certainly the same browser sending two
+        # refreshes at once (two tabs, or several API calls retrying after
+        # the access token expired). The other request already rotated the
+        # token and the browser now holds the new one, so we just refuse
+        # this one and do NOT revoke the family.
+        #
+        # Why this can't hide a logout: logout and reuse detection revoke
+        # the whole family, so there is nothing left to protect. The only
+        # tokens this branch spares are ones just replaced by rotation.
+        log.info("refresh_token_concurrent_use", user_id=str(stored.user_id))
         raise UnauthorizedError(INVALID_REFRESH_MESSAGE)
 
     if stored.revoked_at is not None:
