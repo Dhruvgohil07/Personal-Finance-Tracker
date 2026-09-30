@@ -10,6 +10,8 @@ Lifecycle:
   afterwards so each test starts from a clean database.
 - once per test      (`client`): a TestClient for the real app whose routes
   use the test database.
+- before every test  (`_reset_rate_limits`, automatic): clear the rate-limit
+  counters in Redis.
 """
 
 from collections.abc import Iterator
@@ -23,6 +25,7 @@ from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
+from app.core.rate_limit import limiter
 from app.db.base import Base
 from app.db.session import build_engine, get_db
 from app.main import create_app
@@ -35,6 +38,21 @@ def _test_database_url() -> str:
     if url is None:
         pytest.fail("TEST_DATABASE_URL is not set; integration tests need it (see .env.example)")
     return url
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits() -> None:
+    """Start every test with empty rate-limit counters.
+
+    All TestClient requests come from the same fake client address
+    ("testclient"), so without this, the logins of earlier tests would use
+    up the 5/minute login limit of later ones.
+
+    reset() deletes every key the `limits` library created in Redis (they
+    all start with "LIMITS:"). Tests and local development share one Redis,
+    so this also clears development counters, which is harmless.
+    """
+    limiter.reset()
 
 
 @pytest.fixture(scope="session")
