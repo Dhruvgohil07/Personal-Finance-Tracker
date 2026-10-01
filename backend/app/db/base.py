@@ -13,8 +13,9 @@ module must be imported before Alembic looks at it (see `app/models/__init__.py`
 
 import uuid
 from datetime import datetime
+from enum import StrEnum
 
-from sqlalchemy import DateTime, MetaData, func, text
+from sqlalchemy import DateTime, Enum, MetaData, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # Naming convention for constraints and indexes.
@@ -37,6 +38,30 @@ class Base(DeclarativeBase):
 
 
 # --- Reusable columns -------------------------------------------------------
+
+
+def str_enum_column(enum_cls: type[StrEnum], name: str) -> Enum:
+    """Column type for a Python StrEnum, stored as VARCHAR + CHECK (ADR 002).
+
+    Usage: `kind: Mapped[CategoryKind] = mapped_column(str_enum_column(CategoryKind, "kind"))`
+
+    - native_enum=False: a VARCHAR column, not a Postgres ENUM type
+    - create_constraint=True: plus a CHECK (column IN (...)) constraint,
+      named ck_<table>_<name> by our naming convention
+    - values_callable: store the enum *values* ("expense"), not the member
+      names ("EXPENSE")
+    One shared definition, so every enum column in the schema behaves the same.
+    """
+    return Enum(
+        enum_cls,
+        native_enum=False,
+        create_constraint=True,
+        name=name,
+        length=20,
+        values_callable=lambda cls: [member.value for member in cls],
+    )
+
+
 # Mixins are small classes whose columns get copied into every model that
 # inherits from them, so we don't repeat these definitions in every table.
 
