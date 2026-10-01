@@ -8,10 +8,10 @@ Two kinds of rows live in this one table:
 import uuid
 from enum import StrEnum
 
-from sqlalchemy import Enum, ForeignKey, UniqueConstraint
+from sqlalchemy import ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum_column
 
 
 class CategoryKind(StrEnum):
@@ -47,17 +47,7 @@ class Category(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     # Stored as VARCHAR + a CHECK constraint (not a native Postgres ENUM), so
     # adding a value later is a simple migration. See ADR 002.
-    # values_callable: store the enum *values* ("expense"), not names ("EXPENSE").
-    kind: Mapped[CategoryKind] = mapped_column(
-        Enum(
-            CategoryKind,
-            native_enum=False,
-            create_constraint=True,
-            name="kind",
-            length=20,
-            values_callable=lambda enum_cls: [member.value for member in enum_cls],
-        )
-    )
+    kind: Mapped[CategoryKind] = mapped_column(str_enum_column(CategoryKind, "kind"))
     # Icon name (from the frontend's icon set) and hex colour, for the UI.
     icon: Mapped[str | None]
     color: Mapped[str | None]
