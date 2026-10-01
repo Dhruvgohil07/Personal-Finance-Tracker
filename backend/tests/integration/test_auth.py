@@ -126,6 +126,12 @@ def test_register_duplicate_email_ignoring_case_is_409(client: TestClient) -> No
         {"email": "not-an-email", "password": PASSWORD, "name": "Dhruv"},
         {"email": EMAIL, "password": "short", "name": "Dhruv"},  # < 8 characters
         {"email": EMAIL, "password": PASSWORD, "name": "   "},  # blank after stripping
+        {
+            "email": EMAIL,
+            "password": PASSWORD,
+            "name": "Dh\u0000ruv",
+        },  # NUL: Postgres can't store it
+        {"email": EMAIL, "password": PASSWORD, "name": "Dh\nruv"},  # control character
         {"email": EMAIL, "password": PASSWORD},  # name missing
     ],
 )

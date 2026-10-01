@@ -10,6 +10,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints
 
+from app.schemas.common import NO_CONTROL_CHARS
+
 # SPEC §7.1: minimum length 8. The maximum stops someone from sending a 10 MB
 # "password" that we would then have to hash. 128 is far above any real
 # password, including long passphrases from a password manager.
@@ -19,7 +21,13 @@ MAX_PASSWORD_LENGTH = 128
 # `Annotated[str, StringConstraints(...)]` is "a str with extra rules".
 # strip_whitespace removes spaces around the name before the length check,
 # so "   " counts as empty and is rejected.
-Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+# pattern: no control characters such as NUL (see app/schemas/common.py).
+Name = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True, min_length=1, max_length=100, pattern=NO_CONTROL_CHARS
+    ),
+]
 Password = Annotated[str, Field(min_length=MIN_PASSWORD_LENGTH, max_length=MAX_PASSWORD_LENGTH)]
 
 

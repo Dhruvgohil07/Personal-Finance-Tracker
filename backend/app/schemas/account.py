@@ -7,8 +7,13 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
 
 from app.models import AccountType, BankCode
+from app.schemas.common import NO_CONTROL_CHARS
 
-Nickname = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)]
+# pattern: no control characters such as NUL (see app/schemas/common.py).
+Nickname = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=50, pattern=NO_CONTROL_CHARS),
+]
 # Exactly 4 digits. A user who pastes their full account number gets a 422
 # here, before it can reach the database, a log line or an error message
 # (the validation handler never echoes the input back, see app/core/errors.py).
