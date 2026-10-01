@@ -14,7 +14,7 @@ Lifecycle:
   counters in Redis.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -120,3 +120,26 @@ def client(migrated_engine: Engine, db: Session) -> Iterator[TestClient]:
     # Not `with TestClient(...)`: that would run the app's shutdown code,
     # which closes the shared engine and Redis client used by other tests.
     yield TestClient(app, base_url="https://testserver")
+
+
+@pytest.fixture
+def make_auth_headers(client: TestClient) -> Callable[[str], dict[str, str]]:
+    """Register + log in a user through the real API; return their auth header.
+
+    A factory (a fixture that returns a function), because IDOR tests need
+    TWO users: one who owns the data and one who tries to reach it.
+    Each call uses one register and one login, well within the 5/minute
+    limits (the counters are reset before every test).
+    """
+
+    def _make(email: str) -> dict[str, str]:
+        password = "correct horse battery"
+        response = client.post(
+            "/api/v1/auth/register", json={"email": email, "password": password, "name": "Test"}
+        )
+        assert response.status_code == 201
+        response = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+        assert response.status_code == 200
+        return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+    return _make
