@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.errors import ConflictError, NotFoundError
+from app.db.errors import violates_constraint
 from app.models import Account
 from app.schemas.account import AccountCreate, AccountUpdate
 
@@ -20,12 +21,19 @@ log = structlog.get_logger()
 
 ACCOUNT_NOT_FOUND_MESSAGE = "Account not found."
 DUPLICATE_ACCOUNT_MESSAGE = "You have already added this account."
+# Name given by our naming convention (app/db/base.py), see migration 0004.
+ACCOUNTS_UNIQUE_CONSTRAINT = "uq_accounts_user_id_bank_code_account_type_masked_number"
 
 
 def list_accounts(db: Session, user_id: uuid.UUID) -> list[Account]:
     """All of the user's accounts, oldest first (a user has only a handful,
     so no pagination)."""
-    stmt = select(Account).where(Account.user_id == user_id).order_by(Account.created_at)
+    # id breaks ties: two accounts created in the same transaction share a
+    # created_at (now() is the transaction's start time), and without a
+    # tie-breaker Postgres may return them in a different order each time.
+    stmt = (
+        select(Account).where(Account.user_id == user_id).order_by(Account.created_at, Account.id)
+    )
     # scalars() gives Account objects instead of one-column rows.
     return list(db.scalars(stmt))
 
@@ -34,8 +42,8 @@ def create_account(db: Session, user_id: uuid.UUID, data: AccountCreate) -> Acco
     """Add an account. ConflictError (409) if the user already has it.
 
     Like register_user: insert and let the unique constraint
-    (user_id, bank_code, masked_number) catch duplicates, instead of a
-    check-then-insert that two parallel requests could both pass.
+    (user_id, bank_code, account_type, masked_number) catch duplicates,
+    instead of a check-then-insert that two parallel requests could both pass.
     """
     # model_dump() turns the validated body into a dict of column values.
     # user_id comes from the token, NEVER from the request body.
@@ -43,9 +51,14 @@ def create_account(db: Session, user_id: uuid.UUID, data: AccountCreate) -> Acco
     db.add(account)
     try:
         db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         db.rollback()
-        raise ConflictError(DUPLICATE_ACCOUNT_MESSAGE) from None
+        # Only our unique constraint means "duplicate". Anything else (e.g.
+        # the user was deleted while this request ran: a foreign-key error)
+        # is unexpected, so it is re-raised and becomes a 500.
+        if violates_constraint(exc, ACCOUNTS_UNIQUE_CONSTRAINT):
+            raise ConflictError(DUPLICATE_ACCOUNT_MESSAGE) from None
+        raise
 
     log.info("account_created", user_id=str(user_id), account_id=str(account.id))
     return account

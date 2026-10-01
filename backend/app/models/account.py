@@ -11,10 +11,10 @@ even a bug in our code can't write a full account number here.
 import uuid
 from enum import StrEnum
 
-from sqlalchemy import CheckConstraint, Enum, ForeignKey, String, UniqueConstraint
+from sqlalchemy import CheckConstraint, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum_column
 
 
 class BankCode(StrEnum):
@@ -37,36 +37,26 @@ class AccountType(StrEnum):
     CREDIT_CARD = "credit_card"
 
 
-def _enum_column(enum_cls: type[StrEnum], name: str) -> Enum:
-    # Same settings as Category.kind: VARCHAR + CHECK, storing the values.
-    return Enum(
-        enum_cls,
-        native_enum=False,
-        create_constraint=True,
-        name=name,
-        length=20,
-        values_callable=lambda cls: [member.value for member in cls],
-    )
-
-
 class Account(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "accounts"
     __table_args__ = (
-        # One row per real account: the same user can't add "ICICI ...1234"
-        # twice. Other users CAN have an ICICI ...1234 too (different people).
+        # One row per real account: the same user can't add "ICICI savings
+        # ...1234" twice. account_type is part of the key because a savings
+        # account and a credit card at the same bank can end in the same 4
+        # digits (migration 0004). Other users CAN have the same account too.
         # Like categories, no separate user_id index is needed: this
         # constraint starts with user_id, so "WHERE user_id = ..." uses it.
-        UniqueConstraint("user_id", "bank_code", "masked_number"),
+        UniqueConstraint("user_id", "bank_code", "account_type", "masked_number"),
         # `~` is Postgres' regular-expression match: exactly 4 digits.
         # Named "masked_number_4_digits" -> ck_accounts_masked_number_4_digits.
         CheckConstraint("masked_number ~ '^[0-9]{4}$'", name="masked_number_4_digits"),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    bank_code: Mapped[BankCode] = mapped_column(_enum_column(BankCode, "bank_code"))
+    bank_code: Mapped[BankCode] = mapped_column(str_enum_column(BankCode, "bank_code"))
     # The user's own label, e.g. "Salary account".
     nickname: Mapped[str] = mapped_column(String(50))
-    account_type: Mapped[AccountType] = mapped_column(_enum_column(AccountType, "account_type"))
+    account_type: Mapped[AccountType] = mapped_column(str_enum_column(AccountType, "account_type"))
     # Last 4 digits only, kept as TEXT so leading zeros ("0042") survive.
     masked_number: Mapped[str] = mapped_column(String(4))
 

@@ -37,6 +37,7 @@ from app.core.security import (
     password_needs_rehash,
     verify_password,
 )
+from app.db.errors import violates_constraint
 from app.models import RefreshToken, User
 
 log = structlog.get_logger()
@@ -51,6 +52,9 @@ INVALID_REFRESH_MESSAGE = "Invalid or expired refresh token."
 # and ADR 005. Short, because it is also a window in which a replayed
 # stolen token is refused without raising the alarm.
 REUSE_GRACE_PERIOD = timedelta(seconds=10)
+
+# Name given by our naming convention (app/db/base.py), see migration 0002.
+USERS_EMAIL_CONSTRAINT = "uq_users_email"
 
 
 @dataclass(frozen=True)
@@ -80,9 +84,13 @@ def register_user(db: Session, *, email: str, password: str, name: str) -> User:
     db.add(user)
     try:
         db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         db.rollback()
-        raise ConflictError("An account with this email already exists.") from None
+        # Only the email constraint means "taken"; any other integrity
+        # error is unexpected and stays a 500 (see violates_constraint).
+        if violates_constraint(exc, USERS_EMAIL_CONSTRAINT):
+            raise ConflictError("An account with this email already exists.") from None
+        raise
 
     log.info("user_registered", user_id=str(user.id))
     return user
