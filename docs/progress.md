@@ -12,7 +12,9 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 - [x] Step 3: Rate limiting (slowapi + Redis): login/register 5/min/IP, general
   100/min/user, `UPLOAD_LIMIT` ready for Step 7; ADR 007
 - [x] Step 4: Accounts CRUD — model + migration 0003, GET/POST/PATCH/DELETE /accounts,
-  IDOR tests, `make_auth_headers` test fixture
+  IDOR tests, `make_auth_headers` test fixture; review fixes: account_type in the unique
+  key (migration 0004), only the matching unique constraint maps to 409, no control
+  characters in names/nicknames
 
 ## In progress
 - (nothing yet)
@@ -53,6 +55,11 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 - User `name` → required (NOT NULL); `settings` default filled by the ORM, no DB default
 - Register → decided: returns 201 + user, no tokens (client logs in next); duplicate → 409 (ADR 005)
 - Logout → decided: revokes the whole token family of that session; no access token needed
+- Accounts → GENERIC collisions: two "other" banks with the same last 4 digits and type
+  (e.g. Axis + Kotak, both GENERIC savings ...1234) still get 409. Open: decide when
+  generic CSV upload exists (Step 6/7) — add banks, or key GENERIC accounts differently
+- Accounts → changing `account_type` after transactions exist (savings <-> credit_card)
+  would change how existing debits/credits are read. Open: block or handle it in Step 7
 - Accounts → decided (confirmed by Dhruv 2026-10-01): `bank_code` is a VARCHAR+CHECK enum (HDFC/SBI/ICICI/GENERIC; new
   bank = migration); nickname required (1–50); only nickname/account_type are editable
 - Rate limiting → decided: key = user id from a valid JWT, else client IP (never
@@ -74,6 +81,9 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   together, tests/integration/test_accounts.py)
 
 ## Known issues
+- Engines don't set `hide_parameters=True`: an unexpected DB error logs a traceback whose
+  text includes SQL parameters (and Postgres error detail can include row values).
+  Rule 3 risk; decide on a fix (hide_parameters + scrub exception text) before Phase 5
 - slowapi 0.1.10 crashes with Redis down; worked around in `RateLimitMiddleware`
   (regression test in tests/integration/test_rate_limit.py). Recheck on upgrade
 - Production behind a proxy needs uvicorn `--proxy-headers --forwarded-allow-ips`,

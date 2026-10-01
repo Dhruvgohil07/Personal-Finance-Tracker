@@ -11,10 +11,12 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import Account, AccountType, BankCode, User
+from app.schemas.account import AccountCreate
+from app.services import accounts as accounts_service
 
 pytestmark = pytest.mark.integration
 
@@ -109,6 +111,14 @@ def test_same_number_at_another_bank_is_allowed(client: TestClient, alice: dict[
     _create(client, alice, bank_code="HDFC")
 
 
+def test_savings_and_credit_card_with_same_digits_are_allowed(
+    client: TestClient, alice: dict[str, str]
+) -> None:
+    # Same bank, same last 4 digits, but two different real accounts.
+    _create(client, alice, account_type="savings")
+    _create(client, alice, account_type="credit_card")
+
+
 def test_two_users_can_add_the_same_account_number(
     client: TestClient, alice: dict[str, str], bob: dict[str, str]
 ) -> None:
@@ -128,6 +138,8 @@ def test_two_users_can_add_the_same_account_number(
         {"account_type": "loan"},
         {"nickname": "   "},  # blank after stripping
         {"nickname": "x" * 51},
+        {"nickname": "Sal\u0000ary"},  # NUL: Postgres can't store it (would be a 500)
+        {"nickname": "two\nlines"},  # control character
         {"user_id": str(uuid.uuid4())},  # can't choose the owner
     ],
 )
@@ -284,6 +296,8 @@ def test_patch_empty_body_changes_nothing(client: TestClient, alice: dict[str, s
         {"masked_number": "1111"},  # identifies the account: not changeable
         {"bank_code": "HDFC"},
         {"account_type": "loan"},
+        # A valid change next to an invalid one: the whole body is rejected.
+        {"nickname": "New name", "masked_number": "1111"},
     ],
 )
 def test_patch_invalid_body_is_422(
@@ -294,6 +308,10 @@ def test_patch_invalid_body_is_422(
     response = client.patch(f"{ACCOUNTS}/{account['id']}", json=body, headers=alice)
 
     assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    # Nothing was saved, not even part of the body.
+    [stored] = client.get(ACCOUNTS, headers=alice).json()
+    assert stored == account
 
 
 def test_patch_unknown_account_is_404(client: TestClient, alice: dict[str, str]) -> None:
@@ -312,12 +330,7 @@ def _make_user(db: Session) -> User:
     return user
 
 
-@pytest.mark.parametrize("masked_number", ["123", "12345", "12a4"])
-def test_db_rejects_masked_number_that_is_not_4_digits(db: Session, masked_number: str) -> None:
-    # Even if the API validation had a bug, Postgres' CHECK constraint
-    # refuses to store anything but 4 digits. (String(4) alone would not
-    # catch "123" or "12a4".)
-    user = _make_user(db)
+def _add_account(db: Session, user: User, masked_number: str = "1234") -> None:
     db.add(
         Account(
             user_id=user.id,
@@ -327,23 +340,52 @@ def test_db_rejects_masked_number_that_is_not_4_digits(db: Session, masked_numbe
             masked_number=masked_number,
         )
     )
-    # "12345" fails as a DataError (too long for VARCHAR(4)), the others as an
-    # IntegrityError (the CHECK constraint). Both are DBAPIErrors.
-    with pytest.raises(DBAPIError):
+
+
+@pytest.mark.parametrize("masked_number", ["123", "12a4", "1 34"])
+def test_db_check_constraint_rejects_masked_number(db: Session, masked_number: str) -> None:
+    # Even if the API validation had a bug, Postgres' CHECK constraint
+    # refuses to store anything but 4 digits. (VARCHAR(4) alone would not
+    # catch these.) We assert the constraint's NAME, so the test fails if the
+    # constraint is ever dropped and the insert fails for another reason.
+    _add_account(db, _make_user(db), masked_number)
+
+    with pytest.raises(IntegrityError) as excinfo:
         db.commit()
+
+    assert excinfo.value.orig is not None
+    assert excinfo.value.orig.diag.constraint_name == "ck_accounts_masked_number_4_digits"
+
+
+def test_db_rejects_masked_number_longer_than_4(db: Session) -> None:
+    # Too long fails even earlier, on the column type VARCHAR(4).
+    _add_account(db, _make_user(db), "123456789012")
+
+    with pytest.raises(DataError):
+        db.commit()
+
+
+def test_non_duplicate_integrity_error_is_not_a_409(db: Session) -> None:
+    # A foreign-key failure (user doesn't exist, e.g. deleted mid-request)
+    # must NOT be reported as "you already added this account": only the
+    # unique constraint means duplicate. It is re-raised (-> 500).
+    data = AccountCreate(
+        bank_code=BankCode.ICICI,
+        nickname="x",
+        account_type=AccountType.SAVINGS,
+        masked_number="1234",
+    )
+
+    with pytest.raises(IntegrityError) as excinfo:
+        accounts_service.create_account(db, uuid.uuid4(), data)
+
+    assert excinfo.value.orig is not None
+    assert excinfo.value.orig.diag.constraint_name == "fk_accounts_user_id_users"
 
 
 def test_deleting_user_deletes_their_accounts(db: Session) -> None:
     user = _make_user(db)
-    db.add(
-        Account(
-            user_id=user.id,
-            bank_code=BankCode.ICICI,
-            nickname="x",
-            account_type=AccountType.SAVINGS,
-            masked_number="1234",
-        )
-    )
+    _add_account(db, user)
     db.commit()
 
     db.delete(user)
