@@ -11,12 +11,13 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 - [x] Step 2: Auth endpoints (register/login/refresh/logout), `get_current_user`, ADR 005
 - [x] Step 3: Rate limiting (slowapi + Redis): login/register 5/min/IP, general
   100/min/user, `UPLOAD_LIMIT` ready for Step 7; ADR 007
+- [x] Step 4: Accounts CRUD — model + migration 0003, GET/POST/PATCH/DELETE /accounts,
+  IDOR tests, `make_auth_headers` test fixture
 
 ## In progress
 - (nothing yet)
 
 ## Next up
-- [ ] Step 4: Accounts CRUD (migration 0003, IDOR test)
 - [ ] Step 5: Pure parsing core — parser protocol, registry, normalization, fingerprint (ADR 006)
 - [ ] Step 6: File readers (CSV + XLS via xlrd), generic CSV parser, ICICI parser (ADR 004)
 - [ ] Step 7: Uploads + import service (migration 0004, idempotent inserts)
@@ -52,6 +53,8 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 - User `name` → required (NOT NULL); `settings` default filled by the ORM, no DB default
 - Register → decided: returns 201 + user, no tokens (client logs in next); duplicate → 409 (ADR 005)
 - Logout → decided: revokes the whole token family of that session; no access token needed
+- Accounts → decided (confirmed by Dhruv 2026-10-01): `bank_code` is a VARCHAR+CHECK enum (HDFC/SBI/ICICI/GENERIC; new
+  bank = migration); nickname required (1–50); only nickname/account_type are editable
 - Rate limiting → decided: key = user id from a valid JWT, else client IP (never
   X-Forwarded-For); general limit counted across the whole API; /health exempt;
   Redis down = fail open (ADR 007)
@@ -66,6 +69,9 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   just-before-expiry boundary test
 - [x] `test_refresh_after_logout_is_401` (Step 2, tests/integration/test_auth.py)
 - [x] `test_register_and_login_have_separate_counters` (Step 3, tests/integration/test_rate_limit.py)
+
+- [x] `PATCH /accounts/{id}` service + route + explicit-null validator (Step 4; finished
+  together, tests/integration/test_accounts.py)
 
 ## Known issues
 - slowapi 0.1.10 crashes with Redis down; worked around in `RateLimitMiddleware`
