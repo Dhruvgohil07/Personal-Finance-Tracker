@@ -130,6 +130,13 @@ def make_auth_headers(client: TestClient) -> Callable[[str], dict[str, str]]:
     TWO users: one who owns the data and one who tries to reach it.
     Each call uses one register and one login, well within the 5/minute
     limits (the counters are reset before every test).
+
+    Only the bearer header is returned. Logging in also sets the refresh
+    cookie on the shared client, and with two users the second login would
+    overwrite the first one's cookie, so /auth/refresh would silently act as
+    whoever logged in last. The cookies are therefore cleared here; a test
+    that needs a refresh cookie should send it explicitly (see
+    _post_with_refresh_cookie in test_auth.py).
     """
 
     def _make(email: str) -> dict[str, str]:
@@ -140,6 +147,7 @@ def make_auth_headers(client: TestClient) -> Callable[[str], dict[str, str]]:
         assert response.status_code == 201
         response = client.post("/api/v1/auth/login", json={"email": email, "password": password})
         assert response.status_code == 200
+        client.cookies.clear()
         return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
     return _make
