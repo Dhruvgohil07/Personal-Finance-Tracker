@@ -158,4 +158,12 @@ stage and a proposed commit. Stop after each step for review.
 - `README.md` — Phase 1 usage walkthrough; progress and plan updated
 
 ## Change log
-- (none yet)
+- **Step 5 (done):** `base.py` also defines the `FileType` (csv/xls/pdf) and `Direction`
+  (debit/credit) enums, and a `NormalizedRow` type that wraps a `RawRow` with its
+  normalized description and merchant key. Reasons: the pure parser layer needs both enums
+  and must not import the models (Step 7's `transactions` model imports `Direction` from
+  here instead), and `NormalizedRow` gives Step 7 a clean `parse → normalize → fingerprint
+  → insert` pipeline instead of passing seven loose values into the fingerprint function.
+  The registry deliberately does *not* fall back to `GenericCsvParser` as SPEC §6.2
+  suggests: that parser needs the user's column mapping, so the fallback is Step 7's
+  decision. Channel/VPA extraction stayed in Phase 2 as planned.
