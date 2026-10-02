@@ -314,6 +314,24 @@ def test_patch_invalid_body_is_422(
     assert stored == account
 
 
+def test_patch_onto_an_existing_account_is_409(client: TestClient, alice: dict[str, str]) -> None:
+    # account_type is part of the unique key, so changing it can collide with
+    # another of the user's accounts. That is a 409, not a 500.
+    savings = _create(client, alice, account_type="savings")
+    card = _create(client, alice, account_type="credit_card")
+
+    response = client.patch(
+        f"{ACCOUNTS}/{card['id']}", json={"account_type": "savings"}, headers=alice
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "CONFLICT"
+    # Both accounts are unchanged.
+    stored = {a["id"]: a for a in client.get(ACCOUNTS, headers=alice).json()}
+    assert stored[savings["id"]]["account_type"] == "savings"
+    assert stored[card["id"]]["account_type"] == "credit_card"
+
+
 def test_patch_unknown_account_is_404(client: TestClient, alice: dict[str, str]) -> None:
     response = client.patch(f"{ACCOUNTS}/{uuid.uuid4()}", json={"nickname": "x"}, headers=alice)
 

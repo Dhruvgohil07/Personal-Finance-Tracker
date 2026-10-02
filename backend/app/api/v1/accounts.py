@@ -39,7 +39,9 @@ def create_account(user: CurrentUser, db: DbSession, body: AccountCreate) -> Acc
 # `account_id: uuid.UUID` in the path: FastAPI rejects a non-UUID like
 # /accounts/abc with a 422 before our code runs.
 # PATCH (not PUT): the client sends only the fields it wants to change.
-@router.patch("/{account_id}", response_model=AccountResponse, responses=_NOT_FOUND)
+@router.patch(
+    "/{account_id}", response_model=AccountResponse, responses={**_NOT_FOUND, **_CONFLICT}
+)
 def update_account(
     user: CurrentUser, db: DbSession, account_id: uuid.UUID, body: AccountUpdate
 ) -> AccountResponse:

@@ -117,7 +117,8 @@ stage and a proposed commit. Stop after each step for review.
 
 ### Step 7 — Uploads + import service
 - `backend/app/models/statement_upload.py`, `backend/app/models/transaction.py`
-  (full §5 shape; keyset index and trigram GIN index), migration `0004`
+  (full §5 shape; keyset index and trigram GIN index), migration `0005`
+  (`0004` was used by the Step 4 accounts unique-key fix)
 - `backend/app/services/imports.py` — validate size (`MAX_UPLOAD_MB`), type,
   account ownership → sha256 → reject re-upload (409) → parse → normalize →
   fingerprint → insert all rows in ONE DB transaction with

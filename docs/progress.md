@@ -13,8 +13,8 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   100/min/user, `UPLOAD_LIMIT` ready for Step 7; ADR 007
 - [x] Step 4: Accounts CRUD — model + migration 0003, GET/POST/PATCH/DELETE /accounts,
   IDOR tests, `make_auth_headers` test fixture; review fixes: account_type in the unique
-  key (migration 0004), only the matching unique constraint maps to 409, no control
-  characters in names/nicknames
+  key (migration 0004), 409 (not 500) when PATCH collides with that key, only the matching
+  unique constraint maps to 409, no control characters in names/nicknames
 
 ## In progress
 - (nothing yet)
@@ -22,7 +22,8 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 ## Next up
 - [ ] Step 5: Pure parsing core — parser protocol, registry, normalization, fingerprint (ADR 006)
 - [ ] Step 6: File readers (CSV + XLS via xlrd), generic CSV parser, ICICI parser (ADR 004)
-- [ ] Step 7: Uploads + import service (migration 0004, idempotent inserts)
+- [ ] Step 7: Uploads + import service (migration 0005 — 0004 is the accounts unique key,
+  idempotent inserts)
 - [ ] Step 8: Transactions list + manual categorization, GET /categories
 - [ ] Step 9: Insights — monthly summary + category breakdown
 - [ ] Step 10: End-to-end check with the real ICICI statement, README walkthrough

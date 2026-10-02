@@ -85,6 +85,10 @@ def update_account(
 
     PATCH = partial update: only the fields the client sent are changed.
     An explicit null is already rejected by AccountUpdate (422).
+
+    ConflictError (409) if the change would collide with another of the
+    user's accounts: account_type is part of the unique key, so changing it
+    can run into an account that already has the new combination.
     """
     # Ownership check: 404 for a missing OR another user's account.
     account = get_account(db, user_id, account_id)
@@ -95,7 +99,15 @@ def update_account(
         # Same as `account.nickname = value`, with the name in a variable.
         setattr(account, field, value)
     # One commit after the loop: all fields are saved together, or none.
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        # Same narrow mapping as create_account: only our unique constraint
+        # means "duplicate"; anything else is unexpected and becomes a 500.
+        if violates_constraint(exc, ACCOUNTS_UNIQUE_CONSTRAINT):
+            raise ConflictError(DUPLICATE_ACCOUNT_MESSAGE) from None
+        raise
 
     log.info("account_updated", user_id=str(user_id), account_id=str(account_id))
     return account
