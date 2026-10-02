@@ -15,12 +15,15 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   IDOR tests, `make_auth_headers` test fixture; review fixes: account_type in the unique
   key (migration 0004), 409 (not 500) when PATCH collides with that key, only the matching
   unique constraint maps to 409, no control characters in names/nicknames
+- [x] Step 5: Pure parsing core — `app/parsers/` base types (FileType/Direction/ParserInput/
+  RawRow/NormalizedRow/ParsedStatement/ParseError/StatementParser Protocol), normalization,
+  fingerprint + occurrence index, ParserRegistry; ADR 006; 83 unit tests, 100% coverage of
+  the package, and a test asserting the package imports no FastAPI/SQLAlchemy/Redis
 
 ## In progress
 - (nothing yet)
 
 ## Next up
-- [ ] Step 5: Pure parsing core — parser protocol, registry, normalization, fingerprint (ADR 006)
 - [ ] Step 6: File readers (CSV + XLS via xlrd), generic CSV parser, ICICI parser (ADR 004)
 - [ ] Step 7: Uploads + import service (migration 0005 — 0004 is the accounts unique key,
   idempotent inserts)
@@ -47,7 +50,24 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   (openssl), none committed; test DB created with the same init SQL as docker-compose
 - Category kinds → open: "Transfers to People", "Investments", "Refunds" and "Uncategorized" kinds
   are a first guess; revisit when building insights (§9.1). Changing them = edit seed_data.py + re-seed
-- Merchant key format → open: confirm against real narrations in Phase 2 (§6.5)
+- Merchant key format → open: confirm against real narrations in Phase 2 (§6.5). Step 5
+  builds a first-pass candidate: drop noise/filler words, pure digits and 1–2 char tokens,
+  take the first token left. Known gap: a P2P VPA yields the bank handle ("YBL") until
+  Phase 2 adds VPA extraction + P2P detection (§8.3) ahead of the merchant lookup
+- Parsing core (Step 5) → decided: `FileType` = csv/xls/pdf (SPEC §5 lists only csv/pdf;
+  `xls` added for ICICI, ADR 004 — the Step 7 migration uses these three values);
+  `Direction` lives in `app/parsers/base.py` and the Step 7 model imports it from there
+  (models may import parsers, never the reverse); `NormalizedRow` wraps `RawRow` instead of
+  copying its fields; normalization replaces `|` so it can't blur fingerprint fields;
+  registry does NOT fall back to the generic CSV parser (that needs the user's column
+  mapping, so Step 7 decides it) and has no module-level instance (Step 6 builds one)
+- Fingerprint (Step 5, ADR 006) → decided: sha256 over account_id|txn_date|amount_paise|
+  direction|normalized_description|balance_after_paise|occurrence_index; `value_date`
+  excluded (not in every statement). Open edge case: `occurrence_index` is per statement,
+  so a period starting *between* two identical same-day rows would skip the second as a
+  duplicate — accepted (see ADR 006 consequences), revisit if real data shows it
+- Changing `normalize_description` later changes every fingerprint → Phase 2 needs a one-off
+  migration recomputing fingerprints for stored rows (`normalized_description` is stored)
 - ICICI statements are legacy `.xls` → decided: support via new dependency `xlrd` (ADR 004 in Step 6)
 - Rate limiting → decided: built in Phase 1 (Step 3), not Phase 5
 - Phase 1 extra endpoints → decided: only `GET /categories`; `/me`, upload list/delete and
@@ -80,6 +100,11 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 
 - [x] `PATCH /accounts/{id}` service + route + explicit-null validator (Step 4; finished
   together, tests/integration/test_accounts.py)
+- [ ] Three narrations of your own in tests/unit/test_normalize.py (Phase 1 Step 5) —
+  an ATM withdrawal, a NACH/EMI debit and a salary credit, hand-written, never pasted
+  from a real statement. Add them to the parametrized description and merchant-key cases;
+  if a key looks wrong, write the test with the wrong value + a comment instead of
+  changing the code, and we decide in Step 6
 
 ## Known issues
 - Engines don't set `hide_parameters=True`: an unexpected DB error logs a traceback whose
