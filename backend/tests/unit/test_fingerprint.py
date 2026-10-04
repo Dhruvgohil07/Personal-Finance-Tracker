@@ -11,6 +11,8 @@ Two properties matter, and every test below is one of them:
 import uuid
 from datetime import date
 
+import pytest
+
 from app.parsers.base import Direction, NormalizedRow, RawRow
 from app.parsers.fingerprint import (
     assign_occurrence_indexes,
@@ -63,12 +65,35 @@ def test_same_row_gives_the_same_fingerprint() -> None:
     )
 
 
-def test_a_uuid_and_its_string_form_agree() -> None:
+# A UUID with letters in it, so that upper/lower case actually differ. The
+# all-digit ACCOUNT_ID above cannot catch a case-sensitivity bug.
+MIXED_CASE_ID = uuid.UUID("a1b2c3d4-dead-beef-cafe-0123456789ab")
+
+
+@pytest.mark.parametrize(
+    "written_as",
+    [
+        str(MIXED_CASE_ID),  # canonical text
+        str(MIXED_CASE_ID).upper(),  # some tools shout UUIDs
+        "{" + str(MIXED_CASE_ID) + "}",  # the Microsoft-style form
+        MIXED_CASE_ID.hex,  # 32 chars, no dashes
+    ],
+)
+def test_every_spelling_of_one_account_id_agrees(written_as: str) -> None:
     # Step 7 may hold the account id as a UUID or as text depending on
-    # where it came from; both must produce the same key.
-    assert compute_fingerprint(ACCOUNT_ID, make_row(), 0) == compute_fingerprint(
-        str(ACCOUNT_ID), make_row(), 0
+    # where it came from, and the type hint allows both. All of them must
+    # produce the same key, or "the same account" written two ways would
+    # re-import every row.
+    assert compute_fingerprint(MIXED_CASE_ID, make_row(), 0) == compute_fingerprint(
+        written_as, make_row(), 0
     )
+
+
+def test_a_value_that_is_not_a_uuid_is_a_caller_bug() -> None:
+    # Not a ParseError: a bad account id means our own code passed
+    # nonsense, not that the user's statement is wrong.
+    with pytest.raises(ValueError, match="badly formed|invalid"):
+        compute_fingerprint("not-a-uuid", make_row(), 0)
 
 
 # --- compute_fingerprint: sensitivity to every field ---------------------

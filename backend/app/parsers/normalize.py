@@ -118,7 +118,7 @@ def normalize_description(raw_description: str | None) -> str:
         4. whitespace collapsed and trimmed
 
     Examples:
-        "UPI/428913456789/Payment to/Zomato"  -> "UPI//PAYMENT TO/ZOMATO"
+        "UPI/428913456789/Payment to/Zomato"  -> "UPI/ /PAYMENT TO/ZOMATO"
         "  NEFT   Cr-Acme   Pvt  Ltd "        -> "NEFT CR-ACME PVT LTD"
         None / ""                             -> ""
 
@@ -148,7 +148,7 @@ def merchant_key_candidate(normalized_description: str) -> str | None:
     Takes the first token that looks like a name: not a channel or filler
     word (`_NOISE_WORDS`), not purely digits, at least three characters.
 
-        "UPI//PAYMENT TO/ZOMATO ONLINE"  -> "ZOMATO"
+        "UPI/ /PAYMENT TO/ZOMATO ONLINE" -> "ZOMATO"
         "POS 4312 SWIGGY INSTAMART"      -> "SWIGGY"
         "NEFT CR-ACME PVT LTD"           -> "ACME"      ("CR" is too short)
         "UPI/ /TO/ "                     -> None        (nothing left)
