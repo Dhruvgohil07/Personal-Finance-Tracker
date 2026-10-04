@@ -80,6 +80,21 @@ unit tested in `backend/tests/unit/test_fingerprint.py`.
 - **`value_date` is excluded.** Some statements print it and some do not;
   including it would make the same transaction hash differently depending
   on which download it came from.
+- **Open question — the balance may be inconsistent with excluding
+  `value_date`.** `value_date` is left out because it is present in some
+  downloads and absent in others, and the same transaction must hash the
+  same either way. A balance has that same property *across file formats*:
+  an ICICI `.xls` has a balance column, and a generic CSV whose balance
+  column the user did not map does not. Uploading both for an overlapping
+  period therefore re-inserts every overlapping row, because
+  `with balance` and `without balance` hash differently. SPEC §6.3 lists
+  the balance in the fingerprint and it is the strongest tie-breaker for
+  two identical same-day rows, so it stays for now. Revisit in Step 7, when
+  the generic CSV mapping exists and we can see whether a user would
+  realistically mix formats for one account. The options are: drop the
+  balance from the identity and rely on `occurrence_index` alone; or
+  include it only when every row in the statement has one, which costs the
+  fingerprint its "one pure function per row" simplicity.
 - **A hash column, not a seven-column unique constraint.** One narrow
   b-tree index instead of a wide one; no `NULL` in the key (in SQL
   `NULL != NULL`, so a missing balance would defeat the constraint); and
@@ -88,6 +103,19 @@ unit tested in `backend/tests/unit/test_fingerprint.py`.
 - **sha256, not a shorter hash.** It is used as a content identifier, not
   as password protection (passwords use argon2id). Collisions are not a
   practical concern, and 64 hex characters per row is cheap.
+- **`account_id` is canonicalized before hashing**, by parsing it into a
+  `uuid.UUID`. The same id written as uppercase text, with braces, or as
+  the 32-character `.hex` form would otherwise produce different
+  fingerprints for the same account.
+- **`RawRow` validates the *types* of its money and date fields**, not
+  only their values. Every one of those fields is a fingerprint input, so a
+  wrong type does not fail - it silently produces a different hash. The two
+  that matter in practice both come from reading a legacy `.xls` (Step 6):
+  numeric cells arrive as Python `float`, and `xlrd.xldate_as_datetime`
+  returns a `datetime`, which passes `isinstance(x, date)` and then formats
+  as `2026-08-14T00:00:00` instead of `2026-08-14`. A plain `str` direction
+  is the third: `Direction` is a `StrEnum`, so `"debit"` compares equal to
+  `Direction.DEBIT` everywhere except the one line that reads `.value`.
 
 ## Alternatives rejected
 - *Only the file hash (level 1).* Does nothing for overlapping date

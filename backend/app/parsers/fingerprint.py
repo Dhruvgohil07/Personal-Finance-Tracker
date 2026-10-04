@@ -109,6 +109,11 @@ def compute_fingerprint(
     legitimately exist in two of the user's accounts (a transfer between
     them shows up in both statements), and those are two real rows.
 
+    It is parsed into a `uuid.UUID` first, so every way of writing the same
+    id - a `UUID` object, lowercase or uppercase text, with braces, or the
+    32-character `.hex` form - produces one fingerprint. Without that,
+    "the same account" written two ways would silently re-import every row.
+
     A missing balance becomes an empty field rather than the text "None",
     so the value is never confused with a narration containing that word.
 
@@ -116,8 +121,16 @@ def compute_fingerprint(
     (passwords use argon2id, see `app/core/security.py`): we need a short,
     stable, collision-free-in-practice string for a row's contents.
     """
+    # uuid.UUID() accepts all of those spellings and str() then gives the
+    # one canonical form (lowercase, with dashes). A value that is not a
+    # UUID at all raises ValueError, which is a bug in the caller, not a
+    # bad statement - so it is deliberately not turned into a ParseError.
+    canonical_account_id = (
+        account_id if isinstance(account_id, uuid.UUID) else uuid.UUID(account_id)
+    )
+
     parts = (
-        str(account_id),
+        str(canonical_account_id),
         row.raw.txn_date.isoformat(),
         str(row.raw.amount_paise),
         row.raw.direction.value,

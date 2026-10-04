@@ -20,9 +20,19 @@ library, and still gives us fixed field names, type hints, a readable
 """
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Protocol
+
+
+def _is_paise(value: object) -> bool:
+    """True when `value` is a genuine integer amount in paise.
+
+    `bool` is excluded because it is a subclass of `int` (`True` would be
+    read as 1 paisa), and anything non-`int` - above all `float` - is
+    rejected outright, which is the rule from ADR 001.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 class FileType(StrEnum):
@@ -128,6 +138,14 @@ class RawRow:
     `value_date` (the date the bank actually moved the money) and
     `balance_after_paise` are optional: plenty of statements have neither
     column.
+
+    `__post_init__` checks the *types* of the money and date fields as well
+    as their values. That looks paranoid for a dataclass our own parsers
+    build, but each of these fields ends up in the dedupe fingerprint
+    (ADR 006), so a wrong type does not fail - it silently produces a
+    different hash, and the same transaction imported from two file formats
+    would no longer match. A loud `ParseError` with a row number is much
+    easier to debug than a duplicate transaction found weeks later.
     """
 
     row_number: int
@@ -148,10 +166,33 @@ class RawRow:
         # `bool` is a subclass of `int` in Python, so `amount_paise=True`
         # would pass a plain `> 0` test. Checking the type also keeps
         # floats out of money (ADR 001).
-        if isinstance(self.amount_paise, bool) or not isinstance(self.amount_paise, int):
+        if not _is_paise(self.amount_paise):
             raise ParseError("amount must be integer paise", row_number=self.row_number)
         if self.amount_paise <= 0:
             raise ParseError("amount must be greater than zero", row_number=self.row_number)
+
+        # The balance is money too, and it is the field most likely to
+        # arrive as a float: numeric cells in a legacy `.xls` come back
+        # from xlrd as Python floats (Step 6).
+        if self.balance_after_paise is not None and not _is_paise(self.balance_after_paise):
+            raise ParseError("balance must be integer paise", row_number=self.row_number)
+
+        # A plain string would pass every comparison in this package,
+        # because `Direction` is a StrEnum and `Direction.DEBIT == "debit"`.
+        # It only breaks later, where the fingerprint reads `.value`.
+        if not isinstance(self.direction, Direction):
+            raise ParseError("direction must be a Direction value", row_number=self.row_number)
+
+        # `datetime` is a SUBCLASS of `date`, so a datetime passes
+        # `isinstance(x, date)` and then formats as "2026-08-14T00:00:00"
+        # instead of "2026-08-14". Statement dates are whole days (SPEC §5
+        # stores DATE), and `xlrd.xldate_as_datetime` returns a datetime,
+        # so a parser that forgets `.date()` must be caught here.
+        for field_name, value in (("date", self.txn_date), ("value date", self.value_date)):
+            if value is None:
+                continue
+            if isinstance(value, datetime) or not isinstance(value, date):
+                raise ParseError(f"{field_name} must be a date", row_number=self.row_number)
 
 
 @dataclass(frozen=True)

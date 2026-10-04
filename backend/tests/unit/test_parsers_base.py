@@ -1,7 +1,7 @@
 """Tests for app.parsers.base: the shared types and the layering rule."""
 
 import ast
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -83,6 +83,50 @@ def test_amount_must_be_an_integer(amount: object) -> None:
     # `> 0` check would accept it as 1 paisa.
     with pytest.raises(ParseError, match="integer paise"):
         _raw_row(amount_paise=amount)
+
+
+@pytest.mark.parametrize("balance", [2500000.0, "2500000", True])
+def test_balance_must_be_an_integer_when_present(balance: object) -> None:
+    # The balance is money too (ADR 001) and it goes into the fingerprint,
+    # so a float would not fail - it would just hash as "2500000.0" and
+    # stop matching the same row read from another file format.
+    # Numeric .xls cells arrive from xlrd as floats, so this is the field
+    # most likely to get one.
+    with pytest.raises(ParseError, match="balance must be integer paise"):
+        _raw_row(row_number=4, balance_after_paise=balance)
+
+
+def test_a_missing_balance_is_allowed() -> None:
+    # Plenty of statements have no balance column at all.
+    assert _raw_row(balance_after_paise=None).balance_after_paise is None
+
+
+@pytest.mark.parametrize("direction", ["debit", "DEBIT", None, 1])
+def test_direction_must_be_a_direction_value(direction: object) -> None:
+    # A plain "debit" string is the dangerous case: Direction is a StrEnum,
+    # so `Direction.DEBIT == "debit"` and the string passes every
+    # comparison in this package. It only breaks later, where the
+    # fingerprint reads `.value` - a crash in the middle of an import.
+    with pytest.raises(ParseError, match="direction must be"):
+        _raw_row(row_number=9, direction=direction)
+
+
+@pytest.mark.parametrize("field", ["txn_date", "value_date"])
+def test_a_datetime_is_not_accepted_as_a_date(field: str) -> None:
+    # datetime is a SUBCLASS of date, so isinstance(x, date) is True for it
+    # and nothing would complain - but it formats as "2026-08-14T00:00:00"
+    # instead of "2026-08-14", which changes the fingerprint. Statement
+    # dates are whole days (SPEC §5 stores DATE), and
+    # xlrd.xldate_as_datetime returns a datetime, so a parser that forgets
+    # .date() has to be caught here.
+    with pytest.raises(ParseError, match="must be a date"):
+        _raw_row(**{field: datetime(2026, 8, 14, 10, 30)})
+
+
+def test_a_plain_date_is_accepted() -> None:
+    row = _raw_row(txn_date=date(2026, 8, 14), value_date=date(2026, 8, 15))
+
+    assert row.txn_date.isoformat() == "2026-08-14"
 
 
 def test_raw_row_is_frozen() -> None:
@@ -172,19 +216,38 @@ FORBIDDEN_IMPORTS = frozenset(
 ALLOWED_APP_MODULES = frozenset({"app.parsers", "app.utils"})
 
 
-def _imported_modules(source: str) -> set[str]:
+def _imported_modules(source: str, package: str = "app.parsers") -> set[str]:
     """Every module name imported by a Python file, via `ast`.
 
     Reading the source instead of importing it and inspecting `sys.modules`
     keeps the test honest: an import that only happens inside a function
     still counts, and nothing has to be importable for the test to run.
+
+    Relative imports are resolved against `package`, because a guard that
+    skipped them would be no guard at all: `from ..models.account import
+    BankCode` must be reported as `app.models.account`. `node.level` is the
+    number of leading dots - 1 means this package (`app.parsers`), 2 means
+    its parent (`app`) - so dropping `level - 1` trailing parts of the
+    package name and appending the module gives the absolute name.
     """
     names: set[str] = set()
+    package_parts = package.split(".")
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            names.add(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                if node.module:
+                    names.add(node.module)
+                continue
+            base = package_parts[: len(package_parts) - (node.level - 1)]
+            if node.module:
+                names.add(".".join([*base, node.module]))
+            else:
+                # `from . import base` has no module name, and here the
+                # imported *names* are themselves modules - unlike
+                # `from .base import RawRow`, where RawRow is a class.
+                names.update(".".join([*base, alias.name]) for alias in node.names)
     return names
 
 
@@ -202,3 +265,36 @@ def test_parsers_package_imports_nothing_heavy(path: Path) -> None:
         if top_level == "app":
             package = ".".join(module.split(".")[:2])
             assert package in ALLOWED_APP_MODULES, f"{path.name} imports {module}"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("import sqlalchemy", {"sqlalchemy"}),
+        ("import re, hashlib", {"re", "hashlib"}),
+        ("from app.parsers.base import RawRow", {"app.parsers.base"}),
+        # Relative imports must be resolved, not skipped: one dot is this
+        # package, two dots is its parent.
+        ("from .base import RawRow", {"app.parsers.base"}),
+        ("from ..models.account import BankCode", {"app.models.account"}),
+        ("from . import base", {"app.parsers.base"}),
+        ("from .. import models", {"app.models"}),
+        # An import hidden inside a function still counts.
+        ("def f():\n    import sqlalchemy", {"sqlalchemy"}),
+    ],
+)
+def test_import_scanner_sees_every_import_form(source: str, expected: set[str]) -> None:
+    # Tests the test above. Without this, a scanner that quietly returned
+    # nothing would make the layering guard pass for any file at all - which
+    # is exactly what the `node.level == 0` filter used to do to relative
+    # imports.
+    assert _imported_modules(source) == expected
+
+
+def test_the_layering_guard_would_catch_a_relative_sqlalchemy_import() -> None:
+    # The end-to-end version of the check above, written the way the real
+    # mistake would look: a parser reaching for the Account model.
+    modules = _imported_modules("from ..models.account import BankCode")
+
+    assert any(module.split(".")[0] == "app" for module in modules)
+    assert not any(".".join(module.split(".")[:2]) in ALLOWED_APP_MODULES for module in modules)
