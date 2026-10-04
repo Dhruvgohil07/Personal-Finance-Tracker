@@ -100,11 +100,9 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 
 - [x] `PATCH /accounts/{id}` service + route + explicit-null validator (Step 4; finished
   together, tests/integration/test_accounts.py)
-- [ ] Three narrations of your own in tests/unit/test_normalize.py (Phase 1 Step 5) —
-  an ATM withdrawal, a NACH/EMI debit and a salary credit, hand-written, never pasted
-  from a real statement. Add them to the parametrized description and merchant-key cases;
-  if a key looks wrong, write the test with the wrong value + a comment instead of
-  changing the code, and we decide in Step 6
+- [x] ATM / NACH-EMI / salary narrations in tests/unit/test_normalize.py (Phase 1 Step 5;
+  finished together). Three keys are "wrong on purpose" and open for Step 6: ATM → `CASH`,
+  NACH/EMI → `EMI` (not the lender), NEFT salary → `HDFC` (IFSC bank code, not the employer)
 
 ## Known issues
 - Engines don't set `hide_parameters=True`: an unexpected DB error logs a traceback whose

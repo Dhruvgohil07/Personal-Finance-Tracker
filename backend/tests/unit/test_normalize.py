@@ -39,6 +39,18 @@ from app.parsers.normalize import (
         ("ACME|STORES", "ACME STORES"),
         # Already clean input is unchanged
         ("ZOMATO", "ZOMATO"),
+        # --- Hand-written ATM / NACH / salary shapes (Step 5 TODO) ---
+        # ATM: the 5-digit terminal id survives, the 7-digit reference goes
+        ("ATW-48291 Cash Withdrawal 4829130", "ATW-48291 CASH WITHDRAWAL"),
+        # NACH/EMI debit: nothing long enough to strip, only uppercased
+        ("NACH/EMI Payment to/ICICI Bank", "NACH/EMI PAYMENT TO/ICICI BANK"),
+        # Digits are stripped even inside a token: "LN482913057" -> "LN"
+        ("ACH D- Acme Finance Ltd -LN482913057", "ACH D- ACME FINANCE LTD -LN"),
+        # Salary: the digit part of the IFSC code is stripped, "HDFC" stays
+        (
+            "NEFT CR-HDFC0001234-Acme Tech Solutions Pvt Ltd-Salary Sep",
+            "NEFT CR-HDFC -ACME TECH SOLUTIONS PVT LTD-SALARY SEP",
+        ),
     ],
 )
 def test_normalize_description(raw: str, expected: str) -> None:
@@ -88,6 +100,18 @@ def test_normalization_is_idempotent() -> None:
         ("ATM 42 IN HSR LAYOUT", "HSR"),
         # Already a bare key
         ("NETFLIX", "NETFLIX"),
+        # "D" is too short and ACH is noise, so the lender wins
+        ("ACH D- ACME FINANCE LTD -LN", "ACME"),
+        # --- Wrong on purpose: today's behaviour, decide in Step 6 ---
+        # "CASH" is not a noise word, so an ATM withdrawal gets key CASH.
+        # Harmless (keyword rules catch ATW for Cash Withdrawal, SPEC §8),
+        # but CASH/WITHDRAWAL could join _NOISE_WORDS.
+        ("ATW-48291 CASH WITHDRAWAL", "CASH"),
+        # "EMI" is a payment type, not the lender; ICICI was intended.
+        ("NACH/EMI PAYMENT TO/ICICI BANK", "EMI"),
+        # The IFSC bank code comes before the employer, so a salary credit
+        # is keyed by the sender's bank. Phase 2 should skip IFSC prefixes.
+        ("NEFT CR-HDFC -ACME TECH SOLUTIONS PVT LTD-SALARY SEP", "HDFC"),
     ],
 )
 def test_merchant_key_candidate(narration: str, expected: str) -> None:
@@ -157,11 +181,5 @@ def test_normalize_row_keeps_the_raw_description_intact() -> None:
     assert normalize_row(raw).raw.raw_description == "  Chai  Point  "
 
 
-# TODO(dhruv): add three narrations of your own to the parametrized
-# `test_normalize_description` and `test_merchant_key_candidate` cases
-# above - make them shapes you have actually seen in your ICICI or HDFC
-# statements, written out by hand (never pasted from a real statement).
-# Good ones to try: an ATM withdrawal, a NACH/EMI debit, and a salary
-# credit. If one of them produces a merchant key that looks wrong, do not
-# fix the code yet - write the test with the wrong value and a comment,
-# and we will decide in Step 6 whether it is worth a rule.
+# The "wrong on purpose" merchant keys above (CASH, EMI, HDFC) record known
+# gaps in the first-pass rules. Revisit them in Step 6 with real narrations.
