@@ -224,6 +224,14 @@ class ParsedStatement:
     Step 7 writes them into `statement_uploads.period_start/period_end`,
     and balance reconciliation (SPEC §6.4, Phase 2) checks against them.
 
+    `account_last4` is the last four digits of the account number when the
+    statement prints one in its header (ICICI does). Step 7 compares it with
+    the account the user picked for the upload, so a statement imported into
+    the wrong account is caught instead of quietly adding someone else's
+    transactions. Four digits is also the most we are allowed to keep
+    (SPEC §7.3), so a parser must truncate before it gets here - never
+    return the full number and let a caller shorten it.
+
     `rows` is listed first because every field after it has a default, and
     in Python a field with a default cannot be followed by one without.
     """
@@ -233,6 +241,7 @@ class ParsedStatement:
     period_end: date | None = None
     opening_balance_paise: int | None = None
     closing_balance_paise: int | None = None
+    account_last4: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -241,6 +250,14 @@ class ParsedStatement:
             and self.period_start > self.period_end
         ):
             raise ParseError("statement period ends before it starts")
+
+        # A guard against a parser handing over more than it should: this
+        # field must be exactly four digits, so a full account number cannot
+        # travel any further into the app (SPEC §7.3).
+        if self.account_last4 is not None and not (
+            len(self.account_last4) == 4 and self.account_last4.isdigit()
+        ):
+            raise ParseError("account_last4 must be exactly 4 digits")
 
     @property
     def row_date_range(self) -> tuple[date, date] | None:

@@ -167,3 +167,22 @@ stage and a proposed commit. Stop after each step for review.
   The registry deliberately does *not* fall back to `GenericCsvParser` as SPEC §6.2
   suggests: that parser needs the user's column mapping, so the fallback is Step 7's
   decision. Channel/VPA extraction stayed in Phase 2 as planned.
+- **Step 6 (done):** four changes to the planned shape, all from reading the real
+  sample first.
+  1. The fixture is **generated, not committed**: `backend/tests/fixtures/icici_xls.py`
+     writes a real `.xls` into `tmp_path` from plain-Python rows (new dev dependency
+     `xlwt`), instead of a committed `icici_sample.xls`. A binary cannot be reviewed in
+     a diff, and each test variant (credit row, broken date, continuation row, missing
+     period) would have needed its own blob.
+  2. `ParsedStatement` gained **`account_last4`** (validated as exactly 4 digits), so
+     Step 7 can check the uploaded file belongs to the account the user picked. The
+     statement header holds the full number and the holder's name; only four digits
+     leave the parser (SPEC §7.3).
+  3. The ICICI parser **joins narration continuation rows**. The real file spills a long
+     narration into the next row (6 of 181 body rows), cutting it mid-token, so the
+     parts are concatenated with nothing between them — a separator would change the
+     merchant key and the dedupe fingerprint (ADR 004, ADR 006).
+  4. **Opening and closing balances are derived** from the rows, because ICICI prints
+     neither, and `build_default_registry()` was added to `registry.py` as Step 5's
+     docstring promised. The `GenericCsvParser` signed-amount branch is left as a
+     `TODO(dhruv)` task with three skipped tests.
