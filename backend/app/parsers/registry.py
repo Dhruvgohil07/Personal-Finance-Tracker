@@ -118,3 +118,28 @@ class ParserRegistry:
 
     def _candidates(self, file_type: FileType) -> Sequence[StatementParser]:
         return [parser for parser in self._parsers if file_type in parser.file_types]
+
+
+def build_default_registry() -> ParserRegistry:
+    """Build a registry holding every real bank parser (promised in Step 5).
+
+    One function instead of a module-level `REGISTRY = ...`: a shared global
+    would be mutable state that any test could add to and leak into the
+    next, and FastAPI can hand this to a route as a cached dependency when
+    Step 7 needs it.
+
+    `GenericCsvParser` is deliberately NOT here. It needs the user's column
+    mapping, so it cannot be built without a request - see the note at the
+    top of this module.
+
+    The import sits inside the function on purpose. This module is the
+    mechanism and the parsers are the catalogue; importing them at the top
+    would mean that anything touching `ParserRegistry` - including a test
+    for the registry itself - also loads xlrd today and pdfplumber
+    tomorrow.
+    """
+    from app.parsers.icici import IciciXlsParser
+
+    registry = ParserRegistry()
+    registry.register(IciciXlsParser())
+    return registry

@@ -298,3 +298,19 @@ def test_the_layering_guard_would_catch_a_relative_sqlalchemy_import() -> None:
 
     assert any(module.split(".")[0] == "app" for module in modules)
     assert not any(".".join(module.split(".")[:2]) in ALLOWED_APP_MODULES for module in modules)
+
+
+# --- ParsedStatement.account_last4 ----------------------------------------
+
+
+def test_account_last4_is_accepted_when_it_is_four_digits() -> None:
+    statement = ParsedStatement(rows=[], account_last4="5606")
+
+    assert statement.account_last4 == "5606"
+
+
+@pytest.mark.parametrize("value", ["084601505606", "606", "56o6", ""])
+def test_account_last4_rejects_anything_but_four_digits(value: str) -> None:
+    """A guard against a parser passing on more than SPEC §7.3 allows."""
+    with pytest.raises(ParseError, match="exactly 4 digits"):
+        ParsedStatement(rows=[], account_last4=value)
