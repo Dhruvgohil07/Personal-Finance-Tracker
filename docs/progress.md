@@ -134,9 +134,8 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   finished together). Three keys are "wrong on purpose" and open for Step 6: ATM → `CASH`,
   NACH/EMI → `EMI` (not the lender), NEFT salary → `HDFC` (IFSC bank code, not the employer)
 
-- [ ] Signed-amount-column branch in `GenericCsvParser._parse_amount` (Step 6) — the
-  `TODO(dhruv)` block in `app/parsers/generic_csv.py`; then un-skip the three
-  `test_signed_amount_column_*` tests in `tests/unit/test_generic_csv.py`
+- [x] Signed-amount-column branch in `GenericCsvParser._parse_amount` (Step 6) — done and
+  reviewed; the three `test_signed_amount_column_*` tests now run (no skips left)
 
 ## Known issues
 - Engines don't set `hide_parameters=True`: an unexpected DB error logs a traceback whose
@@ -152,5 +151,6 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 - Unhandled-exception 500 responses have no security headers and no X-Request-ID
   (Starlette's ServerErrorMiddleware builds them outside our middleware). Body is
   generic, so low risk; decide whether to fix before Phase 5 security review
-- Integration tests (95 of them) need Docker Desktop running; it was off during Step 6, so
-  only the 394 non-integration tests ran locally. CI runs everything on the PR
+- The 95 integration tests need `docker compose up -d` (Postgres + Redis) first; without it
+  they ERROR at fixture setup with a SQLAlchemy connection error, which is an environment
+  problem and not a code failure. Use `pytest -m "not integration"` to skip them deliberately

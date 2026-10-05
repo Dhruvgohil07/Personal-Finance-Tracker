@@ -255,17 +255,19 @@ class GenericCsvParser:
         mapping = self.mapping
 
         if mapping.amount_column is not None:
-            # TODO(dhruv): implement the single signed amount column.
-            #   1. read the cell with `self._money(..., "amount", row_number)`
-            #   2. None or 0 means the row has no amount -> raise
-            #      ParseError("row has no amount", row_number=row_number)
-            #   3. negative means money out: direction = Direction.DEBIT,
-            #      positive means Direction.CREDIT
-            #   4. return (abs(value), direction) - `RawRow` requires a
-            #      POSITIVE amount plus a direction (ADR 001)
-            #   Then un-skip test_signed_amount_column_* in
-            #   tests/unit/test_generic_csv.py and tell me to review.
-            raise ParseError("a single signed amount column is not supported yet")
+            # One signed column: a negative number means money out. Zero and a
+            # blank cell are both "no amount here", as in the two-column style
+            # below. `abs()` plus a direction, because `RawRow` requires a
+            # POSITIVE amount (ADR 001) - and since `_money` already reads
+            # "(70.00)" and "70.00 Dr" as negative, those spellings are handled
+            # without a case of their own.
+            money = self._money(
+                self._cell(row, columns, mapping.amount_column), "amount", row_number=row_number
+            )
+            if money is None or money == 0:
+                raise ParseError("row has no amount", row_number=row_number)
+            direction = Direction.DEBIT if money < 0 else Direction.CREDIT
+            return abs(money), direction
 
         # Two-column style. `parse_amount_to_paise` returns None for a blank
         # cell, and a bank may print the unused side as "0.00" instead of
