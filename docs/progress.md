@@ -39,12 +39,18 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   label-based column lookup is actually tested. Real statement re-verified unchanged
   (175 rows, same period/last4/balances/fingerprints); 417 unit + 95 integration tests pass
 
+- [x] Step 7: Uploads + import service — `statement_uploads` + `transactions` models (full §5
+  shape, keyset + trigram GIN indexes), migration 0005, `app/services/imports.py`
+  (size → ownership → sha256 → parse → account-number check → normalize → fingerprint →
+  one transaction with `ON CONFLICT DO NOTHING`), `POST /uploads` (multipart, 10/hour/user),
+  `ColumnMappingRequest`, errors `PAYLOAD_TOO_LARGE` + `INVALID_STATEMENT`; ADR 008.
+  576 tests pass, 99% coverage. Verified on the real statement: 175 rows imported, and a
+  re-import of the same rows counts 175 duplicates and inserts 0
+
 ## In progress
 - (nothing yet)
 
 ## Next up
-- [ ] Step 7: Uploads + import service (migration 0005 — 0004 is the accounts unique key,
-  idempotent inserts)
 - [ ] Step 8: Transactions list + manual categorization, GET /categories
 - [ ] Step 9: Insights — monthly summary + category breakdown
 - [ ] Step 10: End-to-end check with the real ICICI statement, README walkthrough
@@ -95,16 +101,40 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 - Register → decided: returns 201 + user, no tokens (client logs in next); duplicate → 409 (ADR 005)
 - Logout → decided: revokes the whole token family of that session; no access token needed
 - Accounts → GENERIC collisions: two "other" banks with the same last 4 digits and type
-  (e.g. Axis + Kotak, both GENERIC savings ...1234) still get 409. Open: decide when
-  generic CSV upload exists (Step 6/7) — add banks, or key GENERIC accounts differently
-- Accounts → changing `account_type` after transactions exist (savings <-> credit_card)
-  would change how existing debits/credits are read. Open: block or handle it in Step 7
+  (e.g. Axis + Kotak, both GENERIC savings ...1234) still get 409. Reviewed in Step 7 and
+  left as is: fixing it means either adding bank codes (a migration per bank) or a new key,
+  and no real file needed it yet. Revisit when the second bank is added (Phase 2)
+- Accounts → changing `account_type` after transactions exist (savings <-> credit_card):
+  reviewed in Step 7 → left allowed. Nothing in Phase 1 reads `account_type` (the parsers
+  take the direction from the statement's own columns), so no stored row changes meaning.
+  Revisit in Phase 2/insights, where credit-card statements are interpreted differently
 - Accounts → decided (confirmed by Dhruv 2026-10-01): `bank_code` is a VARCHAR+CHECK enum (HDFC/SBI/ICICI/GENERIC; new
   bank = migration); nickname required (1–50); only nickname/account_type are editable
 - Rate limiting → decided: key = user id from a valid JWT, else client IP (never
   X-Forwarded-For); general limit counted across the whole API; /health exempt;
   Redis down = fail open (ADR 007)
 
+- Step 7 → decided (ADR 008): a FAILED import writes no `statement_uploads` row in Phase 1.
+  The import runs inside the request, so the caller already gets the reason; and because
+  `unique(user_id, file_sha256)` would then block that file forever, a recorded failure
+  would stop the user retrying after we add PDF support or fix a parser. Only `completed`
+  rows exist; the other five statuses are reserved for the Phase 2 worker
+- Step 7 → decided: the column mapping is the FALLBACK (SPEC §6.2), used only when no bank
+  parser recognises the file, so a real ICICI `.xls` is always read by the ICICI parser even
+  if a mapping was sent with it. A mapping + an unrecognised `.xls` is a 400 (a mapping
+  names CSV columns)
+- Step 7 → decided: the statement's `account_last4` must match the chosen account's
+  `masked_number` (400 if not), but `bank_code` is NOT compared — an account added as
+  GENERIC may legitimately be the ICICI account the file came from
+- Step 7 → decided: transactions are inserted in chunks of 500 rows inside ONE transaction.
+  Postgres allows 65535 bind parameters per statement and each row binds ~20, so a single
+  INSERT would break somewhere above ~3200 rows (a two-year statement)
+- Step 7 → decided: `GET /uploads/{id}` is not built in Phase 1. Processing is synchronous,
+  so `POST /uploads` already returns the final status and counts; the polling endpoint
+  arrives with the worker in Phase 2
+- Step 7 → decided: `merchant_key` from `normalize_row` is computed but not stored.
+  `transactions.merchant_id` points at a `merchants` ROW, and looking one up is the
+  categorizer's job (SPEC §8), not the importer's
 - Step 6 → decided: file type comes from the file's SIGNATURE first (a renamed `.xls` is
   still read as Excel), extension only for CSV; `.xlsx` refused with an actionable message
 - Step 6 → decided: numeric `.xls` cells convert via `Decimal(f"{value:.15g}")` (Excel's own
@@ -120,8 +150,8 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   (validated as exactly 4 digits); Step 7 compares it with the chosen account and should
   answer 400 when they differ. The holder's name in the same cell is dropped
 - Generic CSV → decided: columns are mapped by HEADER LABEL (case/space-insensitive), so a
-  headerless CSV is not supported in Phase 1. Open: add index-based mapping if a real file
-  needs it (decide in Step 7, where the Pydantic `ColumnMapping` schema is written)
+  headerless CSV is not supported in Phase 1. Settled in Step 7: `ColumnMappingRequest` is
+  label-based only; index-based mapping waits for a real headerless file
 - Generic CSV → decided: `ColumnMapping` is a frozen dataclass in the parsers package
   (pure layer) and Step 7 adds the Pydantic request schema that builds it; validation
   raises `ValueError` there and the schema mirrors the same rules for a 422
@@ -149,8 +179,16 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 
 - [x] Signed-amount-column branch in `GenericCsvParser._parse_amount` (Step 6) — done and
   reviewed; the three `test_signed_amount_column_*` tests now run (no skips left)
+- [ ] Chunk-boundary import test (Step 7, `app/services/imports.py` `_INSERT_CHUNK_SIZE`):
+  import a statement with more than 500 rows and assert every row is inserted, then that a
+  re-import counts them all as duplicates. It is the one branch in the import service no
+  test walks through
 
 ## Known issues
+- Uploads: Starlette buffers a multipart body over ~1 MB into a temporary file before the
+  route runs, so an oversized upload briefly touches the disk before the 413 (the temp file
+  is deleted when the request ends). Rejecting it earlier needs a Content-Length check in
+  middleware; the 10/hour/user upload limit bounds the damage meanwhile
 - Engines don't set `hide_parameters=True`: an unexpected DB error logs a traceback whose
   text includes SQL parameters (and Postgres error detail can include row values).
   Rule 3 risk; decide on a fix (hide_parameters + scrub exception text) before Phase 5
