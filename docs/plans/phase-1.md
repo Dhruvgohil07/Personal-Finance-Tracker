@@ -186,3 +186,21 @@ stage and a proposed commit. Stop after each step for review.
      neither, and `build_default_registry()` was added to `registry.py` as Step 5's
      docstring promised. The `GenericCsvParser` signed-amount branch is left as a
      `TODO(dhruv)` task with three skipped tests.
+- **Step 7 (done):** three differences from the planned shape.
+  1. **A failed import writes no upload row** (ADR 008). The plan said status
+     `completed`/`failed`; in a synchronous import the caller already learns the reason
+     from the response, and `unique(user_id, file_sha256)` would turn a recorded failure
+     into a permanent block on re-uploading that file — so after we add PDF support or fix
+     a parser, the user's own file would still be refused. Phase 1 therefore stores only
+     `completed` rows and the other statuses wait for the Phase 2 worker.
+  2. **The import service is three functions, not one:** `parse_statement` (bytes ->
+     `ParsedStatement`, no database), `store_transactions` (rows -> the database, no
+     commit) and `import_statement` (the whole thing). That is what "written so the Phase 2
+     worker can reuse it" has to mean in practice — the worker owns the upload row and
+     calls the middle two.
+  3. **Rows are inserted in chunks of 500** inside one transaction, because Postgres
+     allows 65535 bind parameters per statement (~3200 rows here). Also added beyond the
+     plan: a check that the statement's `account_last4` matches the chosen account, and
+     `_safe_filename` (basename, no control characters, truncated) for the user-supplied
+     filename. `GET /uploads/{id}` was not built: with synchronous processing `POST`
+     already returns the final counts.
