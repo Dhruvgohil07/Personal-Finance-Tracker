@@ -106,6 +106,31 @@ class UnauthorizedError(AppError):
     message = "Authentication is required."
 
 
+class PayloadTooLargeError(AppError):
+    # An upload over MAX_UPLOAD_MB (SPEC §6.1, §14).
+    status_code = HTTPStatus.REQUEST_ENTITY_TOO_LARGE  # 413
+    code = "PAYLOAD_TOO_LARGE"
+    message = "The uploaded file is too large."
+
+
+class InvalidStatementError(AppError):
+    # A well-formed request carrying a file we cannot import: not a
+    # statement at all, an unsupported format, a layout no parser
+    # recognises, or a statement belonging to a different account.
+    #
+    # 400 and not 422: the REQUEST is valid (Pydantic accepted every
+    # field), it is the file's CONTENT that we cannot use, so there are no
+    # field errors to report. 422 is reserved for validation failures, so
+    # the frontend can keep treating it as "highlight these fields".
+    #
+    # The message is built from the parsers' own `ParseError` text, which
+    # is written to be safe to show: what went wrong and in which row,
+    # never what the row contained (CLAUDE.md rule 3).
+    status_code = HTTPStatus.BAD_REQUEST
+    code = "INVALID_STATEMENT"
+    message = "The statement could not be read."
+
+
 # --- Handlers -------------------------------------------------------------
 # A handler receives the request and the exception and returns a response.
 # FastAPI picks the handler registered for the exception's class (or the
