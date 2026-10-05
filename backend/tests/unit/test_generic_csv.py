@@ -262,20 +262,7 @@ def test_this_parser_never_claims_a_file() -> None:
     assert parser.file_types == (FileType.CSV,)
 
 
-# --- the signed-amount style: TODO(dhruv) ---------------------------------
-
-
-def test_a_signed_amount_column_is_not_supported_yet() -> None:
-    """Remove this test when the TODO(dhruv) branch below is implemented."""
-    mapping = ColumnMapping(
-        date_column="Date",
-        description_column="Narration",
-        date_format="%d/%m/%Y",
-        amount_column="Amount",
-    )
-
-    with pytest.raises(ParseError, match="not supported yet"):
-        parse("Date,Narration,Amount\n01/08/2026,UPI/SHOP,-70.00\n", mapping)
+# --- the signed-amount style ----------------------------------------------
 
 
 SIGNED_MAPPING = ColumnMapping(
@@ -289,7 +276,6 @@ SIGNED_MAPPING = ColumnMapping(
 SIGNED_HEADER = "Date,Narration,Amount,Balance\n"
 
 
-@pytest.mark.skip(reason="TODO(dhruv): implement the signed-amount branch in generic_csv.py")
 def test_signed_amount_column_negative_is_a_debit() -> None:
     statement = parse(SIGNED_HEADER + "01/08/2026,UPI/SHOP,-70.00,111471.33\n", SIGNED_MAPPING)
 
@@ -297,7 +283,6 @@ def test_signed_amount_column_negative_is_a_debit() -> None:
     assert (row.amount_paise, row.direction) == (7000, Direction.DEBIT)
 
 
-@pytest.mark.skip(reason="TODO(dhruv): implement the signed-amount branch in generic_csv.py")
 def test_signed_amount_column_positive_is_a_credit() -> None:
     statement = parse(SIGNED_HEADER + "03/08/2026,SALARY,50000.00,161471.33\n", SIGNED_MAPPING)
 
@@ -305,7 +290,6 @@ def test_signed_amount_column_positive_is_a_credit() -> None:
     assert (row.amount_paise, row.direction) == (5000000, Direction.CREDIT)
 
 
-@pytest.mark.skip(reason="TODO(dhruv): implement the signed-amount branch in generic_csv.py")
 def test_signed_amount_column_rejects_an_empty_amount() -> None:
     with pytest.raises(ParseError, match="no amount"):
         parse(SIGNED_HEADER + "01/08/2026,UPI/SHOP,,111471.33\n", SIGNED_MAPPING)
