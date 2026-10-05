@@ -27,6 +27,7 @@ Three rules shape this module:
    in money is exactly the bug this project must not have.
 """
 
+import codecs
 import csv
 import io
 from decimal import Decimal
@@ -50,6 +51,13 @@ _PDF_SIGNATURE = b"%PDF-"
 # A CSV is plain text and has no signature, so for CSV the file name is all
 # we have to go on.
 _CSV_EXTENSIONS = frozenset({".csv", ".txt"})
+
+# Names that promise a workbook. Several Indian banks' "Excel download" is
+# really tab-separated text or HTML served with an `.xls` name, so when one of
+# these arrives with no workbook signature the error has to say what is actually
+# wrong - "upload a CSV or an .xls statement" would describe what the user just
+# did and leave them stuck.
+_SPREADSHEET_EXTENSIONS = frozenset({".xls", ".xlsx", ".xlsm"})
 
 # Encodings tried in order when decoding a CSV. `utf-8-sig` is UTF-8 and
 # also swallows the byte-order mark Excel writes at the start of a file
@@ -98,6 +106,11 @@ def detect_file_type(filename: str, content: bytes) -> FileType:
     suffix = PurePosixPath(filename).suffix.lower()
     if suffix in _CSV_EXTENSIONS:
         return FileType.CSV
+    if suffix in _SPREADSHEET_EXTENSIONS:
+        raise ParseError(
+            "this file is named like an Excel workbook but is not one; if your bank "
+            "gave you a text or HTML file, save it as .csv and upload that"
+        )
 
     raise ParseError("unsupported file type; upload a CSV or an .xls statement")
 
@@ -184,13 +197,40 @@ def read_xls(content: bytes) -> ParserInput:
 
 
 def _decode_csv(content: bytes) -> str:
-    """Decode CSV bytes, trying UTF-8 (BOM-safe) and then Windows-1252."""
+    """Decode CSV bytes: UTF-16 if it says so, else UTF-8 (BOM-safe), else cp1252.
+
+    The UTF-16 check has to come first and has to be explicit. Excel's "Unicode
+    Text (*.txt)" export is UTF-16, and `.txt` is an accepted extension - but
+    cp1252 maps almost every byte to *some* character, so a UTF-16 file would
+    not fail to decode. It would "succeed" into NUL-interleaved nonsense
+    ("D\\x00a\\x00t\\x00e\\x00"), and the parser would then report "could not
+    find a header row", sending the user to check a column mapping that was
+    never the problem.
+
+    The NUL check at the end is the general form of the same trap: no real CSV
+    contains NUL, so finding one means some encoding we do not handle was read
+    as cp1252.
+    """
+    if content.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        try:
+            # "utf-16" (no suffix) reads the byte-order mark and strips it.
+            return _without_nul(content.decode("utf-16"))
+        except UnicodeDecodeError as exc:
+            raise ParseError("file is not readable text; expected a UTF-8 CSV") from exc
+
     for encoding in _CSV_ENCODINGS:
         try:
-            return content.decode(encoding)
+            return _without_nul(content.decode(encoding))
         except UnicodeDecodeError:
             continue
     raise ParseError("file is not readable text; expected a UTF-8 or Windows-1252 CSV")
+
+
+def _without_nul(text: str) -> str:
+    """Return `text`, or raise if it contains NUL - see `_decode_csv`."""
+    if "\x00" in text:
+        raise ParseError("file is not readable text; expected a UTF-8 or Windows-1252 CSV")
+    return text
 
 
 def _cell_to_text(cell: xlrd.sheet.Cell, datemode: int, row_number: int) -> str:

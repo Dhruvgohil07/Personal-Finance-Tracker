@@ -77,10 +77,17 @@ _MAX_HEADER_SEARCH_ROWS = 40
 # `readers.py` produces from a real Excel date cell - see its docstring).
 _DATE_FORMATS = ("%d/%m/%Y", "%Y-%m-%d")
 
-# The first run of four or more digits in the account-number cell. Only the
-# LAST FOUR of that run are ever returned: SPEC §7.3 allows us to keep no
-# more than that, and the holder's name in the same cell is dropped.
-_ACCOUNT_DIGITS = re.compile(r"\d{4,}")
+# Finding the account number inside its cell, which also holds the currency and
+# the holder's name. An account identifier is a run of at least six digits and
+# masking characters ("084601505606", "XXXXXXXX5606", "0846XXXXXX06"); six keeps
+# a stray year like "2026" from matching.
+_ACCOUNT_TOKEN = re.compile(r"[0-9Xx*#]{6,}")
+# The four digits we may keep (SPEC §7.3 allows no more than four) must be at the
+# END of that identifier. Anchoring matters: the first four digits of
+# "0846XXXXXX06" are the branch prefix, not the last four, and returning those
+# would make Step 7 reject a valid upload as belonging to a different account.
+# When the tail is masked, the honest answer is None.
+_ACCOUNT_TAIL_DIGITS = re.compile(r"\d{4,}$")
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -192,8 +199,22 @@ class IciciXlsParser:
 
             parsed.append(self._parse_row(row, columns, row_number, narration))
 
-        if not parsed:
-            raise ParseError("statement has no transaction rows")
+        # The loop above stops at the first row it does not recognise, which is
+        # correct for a footer and silently wrong for anything else - a page
+        # break or a repeated header in the middle of the table would end the
+        # import early and report success with half the month missing. So prove
+        # the table really ended: nothing after this point may still look like a
+        # transaction.
+        _check_table_really_ended(body[index:], columns, header_index + index + 2)
+
+        # An empty table is NOT an error. A dormant or newly opened account has
+        # months with no activity, and ICICI still prints the whole header block
+        # and the column header row for them. Refusing here would tell the user
+        # their file is broken when it is simply quiet, and the upload's file
+        # hash is recorded either way, so retrying would not help. "This is not
+        # an ICICI statement at all" is a different case, caught by the missing
+        # header check in `parse()`; what an empty statement *means* is the
+        # import service's decision (Step 7).
         return parsed
 
     def _parse_row(
@@ -299,6 +320,31 @@ def _find_header_row(rows: list[list[str]]) -> tuple[int, dict[str, int]] | None
     return None
 
 
+def _check_table_really_ended(
+    remaining: list[list[str]], columns: dict[str, int], first_row_number: int
+) -> None:
+    """Raise if a transaction row still follows the end of the table.
+
+    `_parse_rows` stops at the first row it cannot read, because that is what a
+    footer looks like. The danger is everything else that looks the same: a page
+    break, a repeated header, a blank separator row between two statement pages.
+    Stopping there would import half the statement and report success, and the
+    user would have no way to tell - the numbers would simply be too low.
+
+    So after the loop stops, every remaining row is checked for a readable date
+    in the date column. The legend block ICICI appends has nothing in that
+    column, so a normal statement passes; anything that still looks like a
+    transaction turns the silent truncation into a loud failure with the row
+    number to look at.
+    """
+    for offset, row in enumerate(remaining):
+        if _try_parse_date(_cell(row, columns, _DATE_LABEL).strip()) is not None:
+            raise ParseError(
+                "transaction rows continue after the end of the table",
+                row_number=first_row_number + offset,
+            )
+
+
 def _is_continuation(row: list[str], columns: dict[str, int]) -> bool:
     """True when this row only continues the narration of the row above it.
 
@@ -338,8 +384,13 @@ def _find_period(header_rows: list[list[str]]) -> tuple[date | None, date | None
         # The label, the word "to" and the two dates sit in separate cells
         # with blanks between them, so collect whatever parses as a date.
         dates = [parsed for cell in row if (parsed := _try_parse_date(cell.strip())) is not None]
-        if len(dates) >= 2:
+        if len(dates) >= 2 and dates[0] <= dates[-1]:
             return dates[0], dates[-1]
+        # Out of order (or only one date found) means we cannot read the period
+        # from this header. That must NOT fail the import: `ParsedStatement`
+        # rejects a period that ends before it starts, so returning the pair as
+        # found would throw away every transaction in a file whose rows are all
+        # perfectly readable - over metadata Step 7 can derive from the rows.
         return None, None
     return None, None
 
@@ -354,7 +405,14 @@ def _find_account_last4(header_rows: list[list[str]]) -> str | None:
 
     Step 7 uses this to check the uploaded file really belongs to the
     account the user picked, instead of silently importing someone else's
-    statement into it.
+    statement into it. That is why a *wrong* answer is worse than no answer:
+    it would reject a valid upload with no way for the user to get past it.
+    So the four digits are taken only from the END of the account identifier,
+    and a masked tail gives None:
+
+        "084601505606 ( INR ) - NAME"  -> "5606"
+        "XXXXXXXX5606 ( INR ) - NAME"  -> "5606"
+        "0846XXXXXX06 ( INR ) - NAME"  -> None   (last four are not shown)
     """
     for row in header_rows:
         for position, cell in enumerate(row):
@@ -362,9 +420,14 @@ def _find_account_last4(header_rows: list[list[str]]) -> str | None:
                 continue
             # The value sits in a later column, with blank cells between.
             for value in row[position + 1 :]:
-                match = _ACCOUNT_DIGITS.search(value)
-                if match is not None:
-                    return match.group()[-4:]
+                token = _ACCOUNT_TOKEN.search(value)
+                if token is None:
+                    continue
+                # The first account-looking token IS the account, so stop here
+                # either way rather than searching on and finding some other
+                # number further along the row.
+                tail = _ACCOUNT_TAIL_DIGITS.search(token.group())
+                return tail.group()[-4:] if tail is not None else None
     return None
 
 
@@ -390,6 +453,15 @@ def _statement_balances(rows: list[RawRow]) -> tuple[int | None, int | None]:
 
     first, last = rows[0], rows[-1]
     if first.balance_after_paise is None or last.balance_after_paise is None:
+        return None, None
+
+    # Both derivations assume the rows are in chronological order, which the
+    # sample is - but ICICI's net banking can sort the list, and a newest-first
+    # export would make "the balance before the first row" the balance before
+    # the LATEST transaction. That is not an opening balance, and because
+    # neither value would look obviously wrong, Phase 2's reconciliation would
+    # end up checking against invented numbers. Refuse instead of inventing.
+    if first.txn_date > last.txn_date:
         return None, None
 
     signed_first = -first.amount_paise if first.direction is Direction.DEBIT else first.amount_paise

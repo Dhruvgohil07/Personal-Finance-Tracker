@@ -280,3 +280,47 @@ def test_a_non_finite_numeric_cell_is_rejected() -> None:
 
 def test_read_csv_of_no_content_gives_no_rows() -> None:
     assert read_csv(b"").rows == []
+
+
+# --- encodings cp1252 would swallow (review finding 6) --------------------
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-16-be"])
+def test_read_csv_handles_utf_16(encoding: str) -> None:
+    """Excel's "Unicode Text (*.txt)" export is UTF-16, and .txt is accepted.
+    cp1252 would "successfully" decode it into NUL-interleaved nonsense."""
+    text = "Date,Narration\r\n01/08/2026,SHOP\r\n"
+    content = text.encode(encoding)
+    if encoding != "utf-16":  # the LE/BE forms have no BOM of their own
+        content = (b"\xff\xfe" if encoding.endswith("le") else b"\xfe\xff") + content
+
+    data = read_csv(content)
+
+    assert data.rows[0] == ["Date", "Narration"]
+    assert data.rows[1] == ["01/08/2026", "SHOP"]
+
+
+def test_read_csv_rejects_text_containing_nul() -> None:
+    """The general form of the trap above: no real CSV contains NUL, so it
+    means some encoding we do not handle was read as cp1252."""
+    with pytest.raises(ParseError, match="not readable text"):
+        read_csv("Date,Narration\n01/08/2026,SH\x00OP\n".encode("cp1252"))
+
+
+def test_read_csv_rejects_a_truncated_utf_16_file() -> None:
+    """A UTF-16 BOM followed by an odd number of bytes: the BOM promises an
+    encoding the content does not keep, so say that rather than falling back to
+    cp1252 and producing nonsense."""
+    with pytest.raises(ParseError, match="not readable text"):
+        read_csv(b"\xff\xfeD\x00a\x00t\x00e")
+
+
+def test_a_text_file_named_xls_says_what_is_actually_wrong() -> None:
+    """Some banks serve TSV or HTML as .xls. "Upload a CSV or an .xls
+    statement" would describe exactly what the user just did (finding 7)."""
+    with pytest.raises(ParseError) as exc_info:
+        detect_file_type("statement.xls", b"Date\tNarration\n01/08/2026\tSHOP\n")
+
+    message = str(exc_info.value)
+    assert "named like an Excel workbook but is not one" in message
+    assert ".csv" in message

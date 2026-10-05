@@ -293,3 +293,53 @@ def test_signed_amount_column_positive_is_a_credit() -> None:
 def test_signed_amount_column_rejects_an_empty_amount() -> None:
     with pytest.raises(ParseError, match="no amount"):
         parse(SIGNED_HEADER + "01/08/2026,UPI/SHOP,,111471.33\n", SIGNED_MAPPING)
+
+
+# --- one role per column (review finding 5) -------------------------------
+
+
+def test_the_same_column_cannot_be_both_debit_and_credit() -> None:
+    """Otherwise every row fails with "row has both a debit and a credit
+    amount", blaming the statement for a mistake in the mapping."""
+    with pytest.raises(ValueError, match="each column may be mapped only once: amount"):
+        ColumnMapping(
+            date_column="Date",
+            description_column="Narration",
+            date_format="%d/%m/%Y",
+            debit_column="Amount",
+            credit_column="Amount",
+        )
+
+
+def test_a_column_cannot_serve_as_both_date_and_balance() -> None:
+    with pytest.raises(ValueError, match="only once: date"):
+        ColumnMapping(
+            date_column="Date",
+            description_column="Narration",
+            date_format="%d/%m/%Y",
+            amount_column="Amount",
+            balance_column="date",
+        )
+
+
+# --- continuation rows (review finding 10) --------------------------------
+
+
+def test_a_description_only_row_continues_the_previous_narration() -> None:
+    """Same rule as the ICICI parser: banks wrap long narrations, and dropping
+    the second line would change the dedupe fingerprint (ADR 006)."""
+    statement = parse(
+        HEADER + "01/08/2026,UPI/ACME BANK LTD ,70.00,,111471.33\n" + ",D/205412345678/PAYMENT,,,\n"
+    )
+
+    assert len(statement.rows) == 1
+    # Joined with nothing in between, so the trailing space of the first part is
+    # what separates the tokens - a space added here would invent a boundary.
+    assert statement.rows[0].raw_description == "UPI/ACME BANK LTD D/205412345678/PAYMENT"
+
+
+def test_a_footer_row_with_an_amount_is_not_a_continuation() -> None:
+    statement = parse(HEADER + "01/08/2026,UPI/SHOP,70.00,,111471.33\n" + ",Total,70.00,,\n")
+
+    assert len(statement.rows) == 1
+    assert statement.rows[0].raw_description == "UPI/SHOP"

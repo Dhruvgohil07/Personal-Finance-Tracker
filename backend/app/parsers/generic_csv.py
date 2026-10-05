@@ -101,6 +101,17 @@ class ColumnMapping:
         if not has_single and not has_debit:
             raise ValueError("an amount column is required")
 
+        # Each column may be mapped to one role only. Without this check, mapping
+        # the same column as both debit and credit is accepted here and then
+        # fails on the FIRST row of every upload with "row has both a debit and
+        # a credit amount" - an error that blames the user's statement for a
+        # mistake in their mapping. Caught here, Step 7's schema can answer 422
+        # and name the fields.
+        names = [name.strip().lower() for name in self.required_columns]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"each column may be mapped only once: {', '.join(duplicates)}")
+
     @property
     def required_columns(self) -> tuple[str, ...]:
         """Every column that must exist in the file, in a stable order.
@@ -147,28 +158,48 @@ class GenericCsvParser:
 
         Rows are skipped, not rejected, when they are blank or have an
         empty date cell: that is what a separator line, a "Total" footer or
-        a trailing note looks like. A row that *does* have a date but is
-        broken in some other way raises `ParseError` with its row number,
-        because silently dropping a real transaction would make the
-        imported totals wrong without anyone noticing.
+        a trailing note looks like. The exception is a row carrying only a
+        description, which continues the previous row's narration. A row that
+        *does* have a date but is broken in some other way raises `ParseError`
+        with its row number, because silently dropping a real transaction would
+        make the imported totals wrong without anyone noticing.
 
         No statement period or opening/closing balance is reported: a bare
         CSV states none. Step 7 falls back to `ParsedStatement.row_date_range`.
         """
         header_index, columns = self._find_header(data.rows)
 
+        body = data.rows[header_index + 1 :]
         rows: list[RawRow] = []
-        for offset, row in enumerate(data.rows[header_index + 1 :], start=1):
+        index = 0
+
+        while index < len(body):
+            row = body[index]
             # Row numbers are 1-based and count from the top of the FILE, so
             # they match what the user sees in Excel.
-            row_number = header_index + offset + 1
+            row_number = header_index + index + 2
+            index += 1
 
             if not any(cell.strip() for cell in row):
                 continue
             if not self._cell(row, columns, self.mapping.date_column).strip():
                 continue
 
-            rows.append(self._parse_row(row, columns, row_number))
+            narration = self._cell(row, columns, self.mapping.description_column)
+
+            # A row carrying ONLY a description continues the narration of the
+            # row above it, exactly as in `app/parsers/icici.py`: banks wrap a
+            # long narration onto a second line. Joined with nothing in between,
+            # because the cut can fall mid-token. Dropping these rows instead
+            # would truncate the narration, and since the normalized description
+            # feeds the dedupe fingerprint (ADR 006), the same transaction would
+            # then hash differently depending on which format it was imported
+            # from, and its merchant key could be wrong.
+            while index < len(body) and self._is_continuation(body[index], columns):
+                narration += self._cell(body[index], columns, self.mapping.description_column)
+                index += 1
+
+            rows.append(self._parse_row(row, columns, row_number, narration))
 
         return ParsedStatement(rows=rows)
 
@@ -211,7 +242,31 @@ class GenericCsvParser:
         index = columns[name.strip().lower()]
         return row[index] if index < len(row) else ""
 
-    def _parse_row(self, row: list[str], columns: dict[str, int], row_number: int) -> RawRow:
+    def _is_continuation(self, row: list[str], columns: dict[str, int]) -> bool:
+        """True when this row only continues the narration of the row above it.
+
+        "Description and nothing else": every other mapped column is empty. A
+        "Total" footer has an amount, so it is not mistaken for a continuation.
+        """
+        mapping = self.mapping
+        if self._cell(row, columns, mapping.date_column).strip():
+            return False
+        if not self._cell(row, columns, mapping.description_column).strip():
+            return False
+        return not any(
+            self._cell(row, columns, name).strip()
+            for name in (
+                mapping.debit_column,
+                mapping.credit_column,
+                mapping.amount_column,
+                mapping.balance_column,
+            )
+            if name is not None
+        )
+
+    def _parse_row(
+        self, row: list[str], columns: dict[str, int], row_number: int, narration: str
+    ) -> RawRow:
         """Turn one CSV row into a `RawRow`, or raise `ParseError`."""
         mapping = self.mapping
         txn_date = self._parse_date(self._cell(row, columns, mapping.date_column), row_number)
@@ -230,7 +285,9 @@ class GenericCsvParser:
             txn_date=txn_date,
             amount_paise=amount_paise,
             direction=direction,
-            raw_description=self._cell(row, columns, mapping.description_column).strip(),
+            # Stripped only at the two ends: spacing *inside* belongs to the
+            # bank's own text and matters when continuation rows were joined.
+            raw_description=narration.strip(),
             balance_after_paise=balance_after_paise,
         )
 
