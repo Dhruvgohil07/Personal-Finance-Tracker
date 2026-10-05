@@ -235,11 +235,12 @@ def test_a_file_without_a_legend_block_is_fine_too(tmp_path: Path) -> None:
     assert len(statement.rows) == 5
 
 
-def test_rows_after_a_blank_row_are_not_read(tmp_path: Path) -> None:
+def test_a_blank_row_ends_the_table(tmp_path: Path) -> None:
+    """A blank row is a footer boundary. (A blank row with transactions still
+    after it is a different matter - see the truncation guard below.)"""
     rows = (
         ("1", "01/08/2026", "01/08/2026", "", "UPI/SHOP", "70.00", "0.00", "111471.33"),
         ("", "", "", "", "", "", "", ""),
-        ("2", "02/08/2026", "02/08/2026", "", "UPI/CHAI", "20.00", "0.00", "111451.33"),
     )
 
     statement = parse(tmp_path, rows=rows)
@@ -255,11 +256,6 @@ def test_a_file_without_the_icici_header_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ParseError, match="does not look like an ICICI statement"):
         parse(tmp_path, header_labels=labels)
-
-
-def test_a_statement_with_no_transaction_rows_is_rejected(tmp_path: Path) -> None:
-    with pytest.raises(ParseError, match="no transaction rows"):
-        parse(tmp_path, rows=())
 
 
 def test_a_row_with_both_a_withdrawal_and_a_deposit_is_rejected(tmp_path: Path) -> None:
@@ -360,13 +356,13 @@ def test_a_footer_row_without_a_date_ends_the_table(tmp_path: Path) -> None:
     narration, so it ends the table too."""
     rows = (
         ("1", "01/08/2026", "01/08/2026", "", "UPI/SHOP", "70.00", "0.00", "111471.33"),
-        ("", "", "", "", "", "", "", "111471.33"),
         ("2", "02/08/2026", "02/08/2026", "", "UPI/CHAI", "20.00", "0.00", "111451.33"),
+        ("", "", "", "", "", "", "", "111451.33"),
     )
 
     statement = parse(tmp_path, rows=rows)
 
-    assert len(statement.rows) == 1
+    assert len(statement.rows) == 2
 
 
 def test_a_missing_period_row_is_not_an_error(tmp_path: Path) -> None:
@@ -374,3 +370,118 @@ def test_a_missing_period_row_is_not_an_error(tmp_path: Path) -> None:
 
     assert (statement.period_start, statement.period_end) == (None, None)
     assert len(statement.rows) == 5
+
+
+# --- the table must really have ended (review finding 1) -------------------
+
+
+def test_a_page_break_row_does_not_silently_truncate_the_statement(tmp_path: Path) -> None:
+    """The failure this guard exists for: ending the table early would import
+    half the month and report success, with no way for the user to tell."""
+    rows = (
+        ("1", "01/08/2026", "01/08/2026", "", "UPI/SHOP", "70.00", "0.00", "111471.33"),
+        ("2", "02/08/2026", "02/08/2026", "", "UPI/CHAI", "20.00", "0.00", "111451.33"),
+        ("Page 2 of 3", "", "", "", "", "", "", ""),
+        ("3", "03/08/2026", "03/08/2026", "", "UPI/BUS", "30.00", "0.00", "111421.33"),
+    )
+
+    with pytest.raises(ParseError) as exc_info:
+        parse(tmp_path, rows=rows)
+
+    assert exc_info.value.reason == "transaction rows continue after the end of the table"
+    # Row 17, not 16: the error points at the first transaction that WOULD have
+    # been dropped, which is the row the user needs to look at.
+    assert exc_info.value.row_number == 17
+
+
+def test_a_continuation_row_with_zero_amounts_is_reported_not_skipped(tmp_path: Path) -> None:
+    """`_is_continuation` requires the amount cells to be empty. If a bank ever
+    writes 0.00 there instead, the row ends the table - so the guard must turn
+    that into an error rather than a short import."""
+    rows = (
+        ("1", "01/08/2026", "01/08/2026", "", "UPI/SHOP", "70.00", "0.00", "111471.33"),
+        ("", "", "", "", "/CONTINUED", "0.00", "0.00", ""),
+        ("2", "02/08/2026", "02/08/2026", "", "UPI/CHAI", "20.00", "0.00", "111451.33"),
+    )
+
+    with pytest.raises(ParseError, match="continue after the end of the table"):
+        parse(tmp_path, rows=rows)
+
+
+def test_the_legend_block_does_not_trip_the_guard(tmp_path: Path) -> None:
+    """The real file's 27 legend lines have nothing in the date column."""
+    statement = parse(tmp_path, with_legend=True)
+
+    assert len(statement.rows) == 5
+
+
+# --- row order and header metadata (review findings 2 and 4) --------------
+
+
+def test_newest_first_rows_report_no_derived_balances(tmp_path: Path) -> None:
+    """Deriving an opening balance from `rows[0]` only works oldest-first, and
+    ICICI's net banking can sort the list. Refuse rather than invent."""
+    rows = (
+        ("1", "02/08/2026", "02/08/2026", "", "UPI/CHAI", "20.00", "0.00", "111451.33"),
+        ("2", "01/08/2026", "01/08/2026", "", "UPI/SHOP", "70.00", "0.00", "111471.33"),
+    )
+
+    statement = parse(tmp_path, rows=rows)
+
+    assert len(statement.rows) == 2
+    assert statement.opening_balance_paise is None
+    assert statement.closing_balance_paise is None
+
+
+def test_a_reversed_period_is_reported_as_unknown(tmp_path: Path) -> None:
+    """Unusable header metadata must not cost the transactions."""
+    statement = parse(tmp_path, period_from="31/08/2026", period_to="01/08/2026")
+
+    assert (statement.period_start, statement.period_end) == (None, None)
+    assert len(statement.rows) == 5
+
+
+# --- account_last4 (review finding 3) -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("account_number", "expected"),
+    [
+        ("084601505606", "5606"),  # the real format
+        ("XXXXXXXX5606", "5606"),  # masked prefix, real tail
+        ("0846XXXXXX06", None),  # masked TAIL: the last four are not shown
+        ("****1234", "1234"),
+        ("", None),
+    ],
+)
+def test_account_last4_only_comes_from_the_end_of_the_number(
+    tmp_path: Path, account_number: str, expected: str | None
+) -> None:
+    """A wrong value is worse than none: Step 7 compares it with the account the
+    user picked, so a bad guess rejects a valid upload."""
+    statement = parse(tmp_path, account_number=account_number)
+
+    assert statement.account_last4 == expected
+
+
+def test_a_statement_with_no_transactions_is_not_an_error(tmp_path: Path) -> None:
+    """A dormant month is quiet, not corrupt: ICICI still prints the whole
+    header block. What an empty statement means is Step 7's call (finding 8)."""
+    statement = parse(tmp_path, rows=())
+
+    assert statement.rows == []
+    assert statement.row_date_range is None
+    assert statement.opening_balance_paise is None
+    assert statement.account_last4 == "1234"
+
+
+def test_the_table_is_found_when_the_whole_sheet_is_shifted_right(tmp_path: Path) -> None:
+    """The real test of label-based lookup: a parser using hard-coded indexes
+    1-8 passes every fixture built at the default offset (finding 9)."""
+    statement = parse(tmp_path, start_column=3)
+
+    assert len(statement.rows) == 5
+    assert statement.rows[0].amount_paise == 7000
+    assert statement.rows[0].raw_description == "UPI/TESTSHOP/PAY"
+    assert statement.period_start == datetime.date(2026, 8, 1)
+    assert statement.account_last4 == "1234"

@@ -71,6 +71,7 @@ def build_icici_xls(
     header_labels: tuple[str, ...] = HEADER_LABELS,
     with_legend: bool = True,
     with_period: bool = True,
+    start_column: int = 1,
 ) -> Path:
     """Write a synthetic ICICI statement to `path` and return that path.
 
@@ -81,40 +82,45 @@ def build_icici_xls(
         build_icici_xls(tmp_path / "s.xls", rows=BROKEN_ROWS)   # a bad row
         build_icici_xls(tmp_path / "s.xls", with_legend=False)  # no footer
         build_icici_xls(tmp_path / "s.xls", with_period=False)  # no period row
+        build_icici_xls(tmp_path / "s.xls", start_column=3)     # table shifted right
 
-    The table starts in column 1 because column 0 is empty in the real
-    download; a parser that hard-coded column positions would pass a test
-    built any other way and then fail on the real statement.
+    `start_column` is where the table is written; 1 is the real file's layout,
+    because column 0 is empty in ICICI's download. It is an argument rather than
+    a constant so that a test can shift the whole table sideways: that is the
+    only way to prove the parser really finds its columns by header label, since
+    a parser using hard-coded indexes 1-8 passes every fixture built at the
+    default.
     """
     book = xlwt.Workbook()
     sheet = book.add_sheet("OpTransactionHistory")
 
-    sheet.write(1, 1, "DETAILED STATEMENT")
-    sheet.write(3, 1, "Account Number")
+    label_column = start_column
+    sheet.write(1, label_column, "DETAILED STATEMENT")
+    sheet.write(3, label_column, "Account Number")
     # The real cell holds the number, the currency and the holder's name
     # together - which is why the parser must pull out four digits and drop
     # the rest (SPEC §7.3).
-    sheet.write(3, 3, f"{account_number} ( INR )  - {holder}")
+    sheet.write(3, label_column + 2, f"{account_number} ( INR )  - {holder}")
     if with_period:
-        sheet.write(4, 1, "Transaction Date from")
-        sheet.write(4, 3, period_from)
-        sheet.write(4, 4, "to")
-        sheet.write(4, 5, period_to)
-    sheet.write(11, 1, f"Transactions List - {holder} - {account_number}")
+        sheet.write(4, label_column, "Transaction Date from")
+        sheet.write(4, label_column + 2, period_from)
+        sheet.write(4, label_column + 3, "to")
+        sheet.write(4, label_column + 4, period_to)
+    sheet.write(11, label_column, f"Transactions List - {holder} - {account_number}")
 
-    for column, label in enumerate(header_labels, start=1):
+    for column, label in enumerate(header_labels, start=start_column):
         sheet.write(12, column, label)
 
     row_index = 13
     for row in rows:
-        for column, value in enumerate(row, start=1):
+        for column, value in enumerate(row, start=start_column):
             if value != "":
                 sheet.write(row_index, column, value)
         row_index += 1
 
     if with_legend:
         for line in LEGEND_LINES:
-            sheet.write(row_index, 1, line)
+            sheet.write(row_index, label_column, line)
             row_index += 1
 
     book.save(str(path))
