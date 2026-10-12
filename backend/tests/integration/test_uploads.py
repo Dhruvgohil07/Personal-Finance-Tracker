@@ -622,6 +622,47 @@ def test_a_statement_that_cannot_be_parsed_is_rejected(
     assert db.scalar(select(func.count()).select_from(StatementUpload)) == 0
 
 
+def test_an_amount_too_large_to_store_is_rejected(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path, db: Session
+) -> None:
+    """A misread cell can parse into a number no column can hold.
+
+    Python integers have no upper bound, so `parse_amount_to_paise` returns
+    whatever the cell says. Before the `MAX_PAISE` check in
+    `app/parsers/base.py` this reached the INSERT, Postgres answered
+    "numeric field overflow", and the user got a 500 with no row number -
+    while the logged traceback carried the whole chunk's narrations and
+    amounts (CLAUDE.md rule 3). It must be an ordinary bad row instead.
+    """
+    absurd = (
+        ("1", "01/08/2026", "01/08/2026", "", "UPI/SHOP/PAY", "70.00", "0.00", "111471.33"),
+        (
+            "2",
+            "02/08/2026",
+            "02/08/2026",
+            "",
+            "UPI/SHOP/PAY",
+            "99999999999999999999.00",
+            "0.00",
+            "111401.33",
+        ),
+    )
+
+    response = post_upload(
+        client, alice, content=statement_bytes(tmp_path, rows=absurd), account_id=account_id
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "INVALID_STATEMENT"
+    # Names the row, like every other unreadable-row error.
+    assert "row 15" in body["error"]["message"]
+    assert "too large" in body["error"]["message"]
+    # Nothing stored, not even the good first row (ADR 008).
+    assert count_transactions(db) == 0
+    assert db.scalar(select(func.count()).select_from(StatementUpload)) == 0
+
+
 def test_a_simultaneous_duplicate_upload_is_a_conflict(
     client: TestClient,
     alice: dict[str, str],
@@ -751,7 +792,11 @@ def test_a_mapping_cannot_rescue_an_unrecognised_workbook(
     )
 
     assert response.status_code == 400
-    assert "CSV" in response.json()["error"]["message"]
+    # The exact message, not just "CSV": NO_PARSER_MESSAGE also contains the
+    # word ("if it is a CSV, send a column_mapping"), so a looser assertion
+    # would pass even if the two checks in parse_statement were reordered
+    # and this file took the wrong branch.
+    assert response.json()["error"]["message"] == imports_service.MAPPING_NEEDS_CSV_MESSAGE
 
 
 def test_an_unrecognised_workbook_without_a_mapping_is_rejected(
@@ -762,7 +807,7 @@ def test_an_unrecognised_workbook_without_a_mapping_is_rejected(
     response = post_upload(client, alice, content=unknown_bank, account_id=account_id)
 
     assert response.status_code == 400
-    assert "could not recognise" in response.json()["error"]["message"]
+    assert response.json()["error"]["message"] == imports_service.NO_PARSER_MESSAGE
 
 
 # --- Privacy (CLAUDE.md rule 3) ---------------------------------------------

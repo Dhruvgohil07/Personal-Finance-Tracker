@@ -8,6 +8,7 @@ import pytest
 
 import app.parsers
 from app.parsers.base import (
+    MAX_PAISE,
     Direction,
     FileType,
     NormalizedRow,
@@ -83,6 +84,39 @@ def test_amount_must_be_an_integer(amount: object) -> None:
     # `> 0` check would accept it as 1 paisa.
     with pytest.raises(ParseError, match="integer paise"):
         _raw_row(amount_paise=amount)
+
+
+def test_amount_must_fit_in_a_bigint() -> None:
+    """A corrupt cell can parse into a number no column can hold.
+
+    `parse_amount_to_paise` has no upper bound (Python integers have none),
+    so before this check a misread cell reached the INSERT and Postgres
+    answered "numeric field overflow" - which surfaced as a 500 with no row
+    number, and put the whole chunk's narrations and amounts into the logged
+    traceback. Now it is an ordinary bad row.
+    """
+    with pytest.raises(ParseError) as exc_info:
+        _raw_row(row_number=9, amount_paise=MAX_PAISE + 1)
+
+    assert exc_info.value.row_number == 9
+    assert "too large" in exc_info.value.reason
+
+
+def test_the_largest_storable_amount_is_accepted() -> None:
+    """The boundary itself is valid: the check is `>`, not `>=`."""
+    assert _raw_row(amount_paise=MAX_PAISE).amount_paise == MAX_PAISE
+
+
+@pytest.mark.parametrize("balance", [MAX_PAISE + 1, -MAX_PAISE - 1])
+def test_balance_must_fit_in_a_bigint(balance: int) -> None:
+    """Both ends, because a balance may legitimately be negative (an
+    overdraft, or a credit card)."""
+    with pytest.raises(ParseError, match="balance is too large"):
+        _raw_row(balance_after_paise=balance)
+
+
+def test_a_negative_balance_is_allowed() -> None:
+    assert _raw_row(balance_after_paise=-5000000).balance_after_paise == -5000000
 
 
 @pytest.mark.parametrize("balance", [2500000.0, "2500000", True])

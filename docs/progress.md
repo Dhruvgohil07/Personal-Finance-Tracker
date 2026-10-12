@@ -188,6 +188,22 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
   Verified against a deliberately broken slice (`values[start:SIZE]`), which both tests
   catch; the row count is read from `_INSERT_CHUNK_SIZE` so tuning it keeps them honest
 
+- [x] Step 7 code review (`/code-review high` on PR #9, 3 findings) — all 3 fixed:
+  1. **Rule 3 leak.** Only `IntegrityError` was caught around the chunked INSERT, so any
+     other DB error reached the 500 handler, whose logged traceback included SQLAlchemy's
+     `[parameters: ...]` block — up to 500 narrations, amounts and balances. Proved it with
+     a canary narration, then fixed with `hide_parameters=True` on both engines
+     (`app/db/session.py`), re-ran the proof (canary gone, exception text 2533 → 1252
+     chars), and pinned the flag with a test so it cannot be dropped silently
+  2. **Unbounded amount.** `parse_amount_to_paise` has no upper limit, so a misread cell
+     could exceed BIGINT and produce a 500 with no row number (and trigger finding 1).
+     `MAX_PAISE` in `app/parsers/base.py` now rejects it as an ordinary bad row, both ends
+     for balances (an overdraft is legitimately negative)
+  3. **Weak test assertion.** `test_a_mapping_cannot_rescue_an_unrecognised_workbook` only
+     asserted `"CSV" in message`, but both candidate messages contain "CSV", so reordering
+     the two checks in `parse_statement` would not have failed it. Both that test and its
+     sibling now compare against the message constants
+
 ## Known issues
 - Flaky once (2026-10-12): the first full `pytest` run after `docker compose up -d` failed
   with 14 failures + 10 fixture errors, all in test_accounts.py; three later runs (and
@@ -198,9 +214,13 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
   route runs, so an oversized upload briefly touches the disk before the 413 (the temp file
   is deleted when the request ends). Rejecting it earlier needs a Content-Length check in
   middleware; the 10/hour/user upload limit bounds the damage meanwhile
-- Engines don't set `hide_parameters=True`: an unexpected DB error logs a traceback whose
-  text includes SQL parameters (and Postgres error detail can include row values).
-  Rule 3 risk; decide on a fix (hide_parameters + scrub exception text) before Phase 5
+- Postgres' own error text (`DETAIL: Failing row contains (...)`) can still carry row
+  values for a NOT NULL or CHECK violation, and that part is not affected by
+  `hide_parameters`. Every such violation reachable today is unreachable in practice (the
+  importer fills every NOT NULL column, and `amount_paise > 0` is enforced before the
+  INSERT), so this is a watch item rather than an open hole: if a future table lets a
+  constraint fire on user data, catch the error in the service instead of letting it reach
+  the 500 handler. Revisit in the Phase 5 security review
 - slowapi 0.1.10 crashes with Redis down; worked around in `RateLimitMiddleware`
   (regression test in tests/integration/test_rate_limit.py). Recheck on upgrade
 - Production behind a proxy needs uvicorn `--proxy-headers --forwarded-allow-ips`,
