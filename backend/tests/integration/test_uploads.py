@@ -19,6 +19,7 @@ The tests that matter most, and the rules they defend:
 import datetime
 import uuid
 from collections.abc import Callable
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -120,6 +121,53 @@ def account_id(client: TestClient, alice: dict[str, str]) -> str:
 def statement_bytes(tmp_path: Path, name: str = "statement.xls", **kwargs: Any) -> bytes:
     """A synthetic ICICI `.xls` as the bytes a browser would upload."""
     return build_icici_xls(tmp_path / name, **kwargs).read_bytes()
+
+
+def many_rows(count: int) -> tuple[tuple[str, ...], ...]:
+    """`count` ICICI body rows: one debit each, dates ascending.
+
+    Generated rather than written out as a literal, because the only
+    interesting thing about these rows is how MANY there are.
+
+    Three properties the generated rows must have, each for a reason:
+
+    - **a different amount per row**, so every row is a genuinely distinct
+      transaction with its own fingerprint. Identical rows would survive
+      too (that is what the occurrence index is for), but then a failure
+      could mean either bug, and this test is about chunking.
+    - **ascending dates** (four rows per day), because a newest-first
+      statement makes the ICICI parser refuse to derive balances
+      (`_statement_balances`), which would be a second thing going on.
+    - **money as `Decimal`**, formatted to two decimal places. Project
+      rule 1 holds in test fixtures too: a float here could produce a cell
+      like "1.0000000000000002" and the import would rightly refuse it.
+    """
+    rows = []
+    balance = Decimal("200000.00")
+
+    for index in range(count):
+        # 1.00, 1.01, 1.02, ... - distinct, and small enough that the
+        # running balance stays positive for any realistic count.
+        amount = Decimal("1.00") + Decimal(index) / 100
+        balance -= amount
+        txn_date = datetime.date(2026, 8, 1) + datetime.timedelta(days=index // 4)
+        printed_date = txn_date.strftime("%d/%m/%Y")
+
+        # serial, value date, txn date, cheque, remarks, withdrawal, deposit, balance
+        rows.append(
+            (
+                str(index + 1),
+                printed_date,
+                printed_date,
+                "",
+                f"UPI/SHOP{index:04d}/PAY",
+                f"{amount:.2f}",
+                "0.00",
+                f"{balance:.2f}",
+            )
+        )
+
+    return tuple(rows)
 
 
 def post_upload(
@@ -752,3 +800,107 @@ def test_the_log_has_no_narrations_or_amounts(
     imported = [event for event in events if event["event"] == "statement_imported"]
     assert len(imported) == 1
     assert imported[0]["rows_inserted"] == 5
+
+
+# --- Large statements (more than one INSERT chunk) --------------------------
+
+# One row more than `_INSERT_CHUNK_SIZE`, so the import needs exactly two
+# INSERTs and the second one carries a single row.
+#
+# 501 and not 5000: one row past the boundary is the whole proof. If the
+# slice arithmetic in `store_transactions` were wrong, the second chunk
+# would be empty or short and the count would come back 500, so
+# `501 != 500` catches it. A bigger statement only makes the suite slower.
+ROWS_JUST_OVER_ONE_CHUNK = imports_service._INSERT_CHUNK_SIZE + 1
+
+
+def test_a_statement_larger_than_one_chunk_is_fully_imported(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path, db: Session
+) -> None:
+    """A statement too big for one INSERT still imports every row.
+
+    Postgres accepts at most 65535 bind parameters per statement and each
+    row binds about 20, so `store_transactions` splits the INSERT into
+    chunks of `_INSERT_CHUNK_SIZE`. Every other test here imports five
+    rows, which means `range(0, 5, 500)` yields one value and the loop
+    body has only ever run once - the "there is a second chunk" path is
+    untested.
+
+    What makes that worth a test: a wrong slice (`values[start:SIZE]`
+    instead of `values[start : start + SIZE]`) would import every
+    statement under 500 rows perfectly, keep the suite green, and
+    silently drop everything past row 500 of a real year-long statement -
+    while still reporting success, because `rows_inserted` is counted from
+    what the INSERT returned.
+
+    The count is read from the service's own constant, so the test follows
+    if that number is ever tuned.
+    """
+    rows = many_rows(ROWS_JUST_OVER_ONE_CHUNK)
+
+    response = post_upload(
+        client,
+        alice,
+        content=statement_bytes(
+            tmp_path, rows=rows, period_from="01/08/2026", period_to="31/12/2026"
+        ),
+        account_id=account_id,
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert (body["rows_parsed"], body["rows_inserted"], body["rows_duplicate"]) == (
+        ROWS_JUST_OVER_ONE_CHUNK,
+        ROWS_JUST_OVER_ONE_CHUNK,
+        0,
+    )
+    # Counted in the database as well as reported in the response: the two
+    # could disagree if the counting were wrong rather than the inserting.
+    assert count_transactions(db) == ROWS_JUST_OVER_ONE_CHUNK
+
+
+def test_a_large_statement_reimports_as_all_duplicates(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path, db: Session
+) -> None:
+    """The same rows again: every one recognised, across both chunks.
+
+    `ON CONFLICT DO NOTHING` is per INSERT, so dedupe has to hold for each
+    chunk separately. The second file states a different period, which
+    changes its bytes and therefore its sha256 - without that, dedupe
+    level 1 would reject it before a single row was looked at. The header
+    period is not part of a row's fingerprint, so the rows still hash
+    identically.
+    """
+    rows = many_rows(ROWS_JUST_OVER_ONE_CHUNK)
+    first = post_upload(
+        client,
+        alice,
+        content=statement_bytes(
+            tmp_path, rows=rows, period_from="01/08/2026", period_to="31/12/2026"
+        ),
+        account_id=account_id,
+    )
+    assert first.status_code == 201
+
+    again = post_upload(
+        client,
+        alice,
+        content=statement_bytes(
+            tmp_path,
+            name="again.xls",
+            rows=rows,
+            period_from="01/08/2026",
+            period_to="01/01/2027",
+        ),
+        account_id=account_id,
+        filename="again.xls",
+    )
+
+    assert again.status_code == 201
+    body = again.json()
+    assert (body["rows_parsed"], body["rows_inserted"], body["rows_duplicate"]) == (
+        ROWS_JUST_OVER_ONE_CHUNK,
+        0,
+        ROWS_JUST_OVER_ONE_CHUNK,
+    )
+    assert count_transactions(db) == ROWS_JUST_OVER_ONE_CHUNK

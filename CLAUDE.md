@@ -18,7 +18,7 @@ parsing work, §10 for a new endpoint). The rules in THIS file apply to every ta
 - Therefore:
   - After creating or changing a file, explain in plain language what it does and why it is designed that way.
   - At the end of each step, give me a short "What you should understand now" summary (3–5 bullets).
-  - Leave small, clearly marked tasks for me to implement myself using `# TODO(dhruv): ...` comments (e.g. a simple endpoint, a validation schema, a unit test), then review my code when I say I'm done.
+  - **Complete every task yourself, in full.** Do not leave `TODO(dhruv)` comments or hand work back to me to finish — if a step needs a test, an endpoint or a schema, write it. (Decided 2026-10-12, replacing the earlier "leave small tasks for me" rule.) I learn from reading your finished code and your explanation of it, not from unfinished edges.
   - Prefer clear, standard, beginner-readable code over clever tricks. If you use an advanced Python/FastAPI/SQLAlchemy feature, explain it.
   - Never paste large amounts of code without explanation.
 
@@ -74,7 +74,7 @@ parsing work, §10 for a new endpoint). The rules in THIS file apply to every ta
 - Start each phase by listing the tasks and files you plan to create; wait for my go-ahead.
 - Work in small, reviewable steps; run `ruff` and `pytest` after each step and show failures honestly.
 - When something in this spec is ambiguous or seems wrong, ask instead of guessing — especially bank statement formats.
-- Follow §0: explain every file, give "What you should understand now" summaries, and leave `TODO(dhruv)` tasks for me.
+- Follow §0: explain every file, give "What you should understand now" summaries, and finish every task yourself (no `TODO(dhruv)` hand-offs).
 - Explain non-obvious design choices briefly in code comments and in ADRs — I need to explain every part of this project in technical interviews.
 - Prefer clear, standard solutions over clever ones.
 - Never commit secrets or real statements; make sure `.gitignore` includes `samples/`, `.env`, `*.csv` exports, and any local data folders.
@@ -181,10 +181,6 @@ Phase 0 — Foundation (plan: docs/plans/phase-0.md)
 
 ## Open decisions / questions
 - RQ worker on Windows → decided: run as Docker service (see ADR if written)
-
-## My TODO(dhruv) tasks
-- [ ] Money parsing edge-case test (Step 2d)
-- [ ] App version field in /health (Step 4)
 
 ## Known issues
 - (none yet)
