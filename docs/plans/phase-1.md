@@ -204,3 +204,33 @@ stage and a proposed commit. Stop after each step for review.
      `_safe_filename` (basename, no control characters, truncated) for the user-supplied
      filename. `GET /uploads/{id}` was not built: with synchronous processing `POST`
      already returns the final counts.
+- **Step 8 (done):** six differences from the planned shape.
+  1. **A categories service and schema were added** (`app/services/categories.py`,
+     `app/schemas/category.py`); the plan listed only `app/api/v1/categories.py`. Rule 6
+     keeps logic out of routes, and the same module answers the question the transactions
+     service needs - "may this user use this category?" - which is what stops a user
+     filing a transaction under another user's private category.
+  2. **The cursor codec is a pure module** (`app/utils/cursor.py`), not a helper inside the
+     service, for the same reason the parsers are pure: it has no database or HTTP in it, a
+     Pydantic validator can call it to turn a bad cursor into a 422 naming the field, and
+     the next list endpoint reuses it unchanged. ADR 009 records the pagination design
+     (the plan did not foresee an ADR for this step).
+  3. **The filters are one Pydantic "query parameter model"** instead of ten route
+     parameters. That is what makes the cross-field checks (`from <= to`,
+     `min_amount <= max_amount`) ordinary validation, documents every filter in /docs, and
+     turns a misspelled filter (`?catgory_id=`) into a 422 instead of a silently ignored
+     parameter that would return everything.
+  4. **`min_amount` / `max_amount` are in RUPEES**, as a `Decimal` with at most 2 decimal
+     places, converted to paise in the schema. A query parameter arrives as a string, so
+     `Decimal("1250.50")` is exact (rule 1), and the user types what they see. The bound is
+     `MAX_PAISE // 100`, so an impossible filter is a 422 rather than a number the database
+     has to consider.
+  5. **An id that is not yours is a 404, not an empty page.** `?account_id=` and
+     `?category_id=` are looked up through their services first, because an empty list is
+     also a valid answer ("nothing there") and the client could not tell the two apart.
+  6. **Response shape:** `amount_display` was added (the Indian-format string from
+     `format_inr`, rule 10 - derived and read-only, `amount_paise` stays canonical), and
+     `merchant_id` was left out (always null in Phase 1, and no endpoint exposes merchants
+     yet). `PATCH` takes an explicit `null` to clear the category or the note, always
+     clears `category_confidence` (a person is not a guess), and rejects
+     `is_self_transfer` / `apply_to_similar` with a 422 instead of ignoring them.

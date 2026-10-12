@@ -52,5 +52,17 @@ class Category(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     icon: Mapped[str | None]
     color: Mapped[str | None]
 
+    @property
+    def is_system(self) -> bool:
+        """True for a seeded default category (one with no owner).
+
+        A property, not a column: it is only another way of reading
+        `user_id`, so storing it would be a second copy of the same fact
+        that could disagree. The API exposes this instead of `user_id`
+        (see app/schemas/category.py), because system categories are
+        read-only for everyone.
+        """
+        return self.user_id is None
+
     def __repr__(self) -> str:
         return f"Category(slug={self.slug!r}, user_id={self.user_id})"

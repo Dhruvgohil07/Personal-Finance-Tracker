@@ -47,11 +47,23 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   576 tests pass, 99% coverage. Verified on the real statement: 175 rows imported, and a
   re-import of the same rows counts 175 duplicates and inserts 0
 
+- [x] Step 8: Transactions list + manual categorization + categories — `GET /transactions`
+  (10 filters from SPEC §10, keyset pagination on `(txn_date DESC, id DESC)` with an opaque
+  base64 cursor), `PATCH /transactions/{id}` (category + notes, `category_source =
+  user_manual`), `GET /categories` (system + own, `is_system`); new `app/utils/cursor.py`
+  (pure), `app/schemas/transaction.py` + `category.py`, `app/services/transactions.py` +
+  `categories.py`; ADR 009. 697 tests pass, 99% coverage (100% of the new modules).
+  Verified with `EXPLAIN (ANALYZE, BUFFERS)` on 20 000 rows: the cursor lands inside the
+  `Index Cond` of `ix_transactions_user_txn_date_id` (50 rows, 15 buffers, 0.35 ms) while
+  the same page via `OFFSET 19000` reads 19 050 rows (2 753 buffers, 3.33 ms). Re-checked
+  on the real ICICI statement: 175 rows imported, read back in 9 pages of 20 with 175
+  unique ids newest-first, 148 debits / 27 credits, the whole-period date filter returns
+  all 175, and a manual categorization shows up in `?category_id=`
+
 ## In progress
 - (nothing yet)
 
 ## Next up
-- [ ] Step 8: Transactions list + manual categorization, GET /categories
 - [ ] Step 9: Insights — monthly summary + category breakdown
 - [ ] Step 10: End-to-end check with the real ICICI statement, README walkthrough
 
@@ -159,6 +171,35 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   `tests/fixtures/icici_xls.py` (dev dependency `xlwt`) into `tmp_path`, not committed as a
   binary; no real statement is ever committed (rule 8)
 
+- Step 8 → decided (ADR 009): list endpoints page by an OPAQUE base64 cursor holding
+  `(txn_date, id)`, not by `OFFSET`/page numbers. Consequences accepted: no "page 3 of 20",
+  no total count, and filters must be re-sent with the cursor. A cursor is a position, not
+  a permission — `WHERE user_id = caller` is applied regardless
+- Step 8 → decided: `min_amount`/`max_amount` are given in RUPEES (Decimal, max 2 dp,
+  converted to paise in the schema); every other money value in the API is integer paise.
+  Revisit if the frontend would rather send paise everywhere
+- Step 8 → decided: `?account_id=`/`?category_id=` belonging to someone else is a 404, not
+  an empty page, so "no rows" never hides "wrong id". Both are looked up through their
+  services first
+- Step 8 → decided: `q=` searches `normalized_description` only (uppercased, long digit
+  runs stripped by §6.5 normalization), using ILIKE with `%`/`_`/`\` escaped and the
+  trigram GIN index. So searching an account number finds nothing on purpose, and `notes`
+  are NOT searched — revisit when the frontend has a search box
+- Step 8 → decided: `GET /transactions` returns `amount_display` (the `format_inr` string,
+  rule 10) next to `amount_paise`, and does NOT return `merchant_id` (always null in
+  Phase 1, no endpoint exposes merchants yet)
+- Step 8 → decided: `PATCH /transactions/{id}` takes only `category_id` and `notes`;
+  explicit `null` clears either one, a field left out is untouched (`exclude_unset`), a
+  manual category always sets `category_source = user_manual` and clears
+  `category_confidence`. `is_self_transfer` and `apply_to_similar` (SPEC §10) are a 422
+  until Phase 2 builds them
+- Step 8 → open: no way to list UNCATEGORIZED transactions yet (`category_id` has no "is
+  null" form), which is what the Phase 1 manual-categorization flow actually wants. Not in
+  SPEC §10's parameter list; decide the spelling (`uncategorized=true`?) in Phase 3 when
+  the frontend needs it
+- Step 8 → note: category NAME ordering inside a kind is Postgres' collation ("Education"
+  vs "EMI & Loans" sort differently there than in Python), so the test asserts the grouping
+  by kind only
 
 ## Tasks Dhruv implemented (historical — the practice ended 2026-10-12)
 From 2026-10-12 Claude completes every task in full; no new `TODO(dhruv)` items are
