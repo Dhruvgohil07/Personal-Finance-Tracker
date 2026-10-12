@@ -28,7 +28,7 @@ and see a monthly summary and category breakdown.
 | Refresh token format | Opaque random token (`secrets.token_urlsafe`), stored as HMAC-SHA256 keyed with `JWT_REFRESH_SECRET` | Rotation needs a DB row anyway, so a JWT adds nothing; the HMAC key means a leaked DB alone can't confirm guessed tokens. ADR 005 |
 | Swagger auth | `HTTPBearer` (paste the access token into "Authorize") | Login takes JSON, not the OAuth2 form that Swagger's password flow expects; simpler to explain |
 | Schema scope | `statement_uploads` and `transactions` get their full §5 shape now (Phase 2 columns nullable or defaulted) | Same reasoning as ADR 002: final table shape early, smaller later migrations |
-| Deferred to Phase 2 | Channel/VPA extraction, balance reconciliation + `needs_review`, `apply_to_similar`, `is_self_transfer` edits, upload blobs, user categories CRUD, `/me` endpoints, upload list/delete | Matches the roadmap; keeps Phase 1 focused |
+| Deferred to Phase 2 | Channel/VPA extraction, balance reconciliation + `needs_review`, `apply_to_similar`, upload blobs, user categories CRUD, `/me` endpoints, upload list/delete | Matches the roadmap; keeps Phase 1 focused |
 
 ## Steps
 
@@ -233,4 +233,12 @@ stage and a proposed commit. Stop after each step for review.
      `merchant_id` was left out (always null in Phase 1, and no endpoint exposes merchants
      yet). `PATCH` takes an explicit `null` to clear the category or the note, always
      clears `category_confidence` (a person is not a guess), and rejects
-     `is_self_transfer` / `apply_to_similar` with a 422 instead of ignoring them.
+     `apply_to_similar` with a 422 instead of ignoring it.
+  7. **After the code review** (5 findings, 4 fixed on the branch): `is_self_transfer` is
+     derived from the chosen category's kind instead of being refused outright (a
+     `transfer` category sets it, any other clears it), a BLANK value means "not sent" for
+     every filter rather than only for `q`/`cursor`, `category_confidence` is serialized as
+     a JSON number instead of Pydantic's quoted Decimal, and the claim that the trigram GIN
+     index serves `q=` was corrected everywhere after measuring that it does not. The fifth
+     finding — same-day rows ordered by random UUID instead of statement order — needs a
+     migration and is listed in docs/progress.md for Phase 2.

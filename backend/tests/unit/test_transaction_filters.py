@@ -153,6 +153,54 @@ def test_a_blank_search_becomes_no_search(value: str) -> None:
     assert filters(q=value).q is None
 
 
+@pytest.mark.parametrize(
+    ("name", "attribute"),
+    [
+        ("from", "date_from"),
+        ("to", "date_to"),
+        ("direction", "direction"),
+        ("account_id", "account_id"),
+        ("category_id", "category_id"),
+        ("min_amount", "min_amount"),
+        ("max_amount", "max_amount"),
+    ],
+)
+def test_a_blank_value_means_the_filter_was_not_sent(name: str, attribute: str) -> None:
+    """Blank is "not sent" for EVERY filter, not only for `q` and `cursor`.
+
+    A client that serializes all of its filter inputs sends an empty value
+    for each box the user left alone. Before this, `?from=` was a 422
+    ("input is too short") while `?q=` was accepted - the same request
+    rejected or not depending on which box was blank.
+    """
+    result = filters(**{name: "   "})
+
+    assert getattr(result, attribute) is None
+
+
+def test_a_blank_limit_falls_back_to_the_default() -> None:
+    assert filters(limit="").limit == DEFAULT_LIMIT
+
+
+def test_a_blank_unknown_parameter_is_still_rejected() -> None:
+    """Dropping blanks must not start forgiving misspelled filters."""
+    assert [name for name, _ in errors(catgory_id="")] == ["catgory_id"]
+
+
+def test_a_non_dict_input_is_still_a_validation_error() -> None:
+    """The blank-dropping validator must not turn bad input into a 500.
+
+    A `mode="before"` validator is handed whatever the caller passed, which
+    need not be a dict. Calling `.items()` on a string would raise
+    AttributeError - an unhandled exception, so a 500 - instead of the
+    ordinary validation error Pydantic is about to raise anyway.
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        TransactionFilters.model_validate("from=2026-08-01")
+
+    assert [error["type"] for error in exc_info.value.errors()] == ["model_type"]
+
+
 def test_search_text_is_trimmed_and_bounded() -> None:
     assert filters(q="  zomato  ").q == "zomato"
     assert [name for name, _ in errors(q="x" * 101)] == ["q"]
@@ -196,8 +244,14 @@ def test_a_cursor_is_kept_and_decoded() -> None:
     assert result.cursor_key() == (A_DATE, AN_ID)
 
 
-@pytest.mark.parametrize("cursor", ["", "   "])
-def test_an_empty_cursor_means_the_first_page(cursor: str) -> None:
+@pytest.mark.parametrize("cursor", ["", "   ", None])
+def test_an_empty_cursor_means_the_first_page(cursor: str | None) -> None:
+    """Blank, whitespace, or explicitly null: all "give me the first page".
+
+    `None` is its own case because a client (or FastAPI, for a parameter
+    that is absent) can send the key with no value, which the blank-dropping
+    validator leaves in place.
+    """
     assert filters(cursor=cursor).cursor is None
 
 
@@ -231,28 +285,55 @@ def test_direction_accepts_only_the_two_known_values() -> None:
 # --- The response -----------------------------------------------------------
 
 
+def _response(**overrides: Any) -> TransactionResponse:
+    """A complete TransactionResponse, with the given fields replaced."""
+    fields: dict[str, Any] = {
+        "id": AN_ID,
+        "account_id": AN_ID,
+        "upload_id": AN_ID,
+        "txn_date": A_DATE,
+        "value_date": None,
+        "amount_paise": 12_500_000,
+        "direction": Direction.DEBIT,
+        "balance_after_paise": None,
+        "raw_description": "UPI/ZOMATO/PAY",
+        "normalized_description": "UPI/ZOMATO/PAY",
+        "channel": "other",
+        "counterparty_vpa": None,
+        "category_id": None,
+        "category_source": "none",
+        "category_confidence": None,
+        "is_self_transfer": False,
+        "notes": None,
+        "created_at": datetime.datetime(2026, 8, 4, 12, 0, tzinfo=datetime.UTC),
+    }
+    return TransactionResponse(**{**fields, **overrides})
+
+
 def test_the_response_adds_an_indian_formatted_amount() -> None:
     """`amount_display` is derived from `amount_paise` (rules 1 and 10)."""
-    response = TransactionResponse(
-        id=AN_ID,
-        account_id=AN_ID,
-        upload_id=AN_ID,
-        txn_date=A_DATE,
-        value_date=None,
-        amount_paise=12_500_000,
-        direction=Direction.DEBIT,
-        balance_after_paise=None,
-        raw_description="UPI/ZOMATO/PAY",
-        normalized_description="UPI/ZOMATO/PAY",
-        channel="other",
-        counterparty_vpa=None,
-        category_id=None,
-        category_source="none",
-        category_confidence=None,
-        is_self_transfer=False,
-        notes=None,
-        created_at=datetime.datetime(2026, 8, 4, 12, 0, tzinfo=datetime.UTC),
-    )
+    response = _response(amount_paise=12_500_000)
 
     assert response.amount_display == "₹1,25,000.00"
     assert response.model_dump()["amount_display"] == "₹1,25,000.00"
+
+
+@pytest.mark.parametrize(
+    ("confidence", "expected"), [(Decimal("0.95"), 0.95), (Decimal("1.00"), 1.0), (None, None)]
+)
+def test_the_confidence_is_serialized_as_a_number(
+    confidence: Decimal | None, expected: float | None
+) -> None:
+    """SPEC §5 calls it numeric, so it must not leave the API as a string.
+
+    Pydantic's default JSON encoding for a Decimal is a quoted string, which
+    a client comparing or sorting the value would get wrong. The column is
+    always null until Phase 4 fills it from the LLM, so this guards a field
+    that would otherwise change shape unnoticed.
+    """
+    response = _response(category_confidence=confidence)
+
+    value = response.model_dump(mode="json")["category_confidence"]
+
+    assert value == expected
+    assert not isinstance(value, str)

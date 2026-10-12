@@ -182,17 +182,18 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   an empty page, so "no rows" never hides "wrong id". Both are looked up through their
   services first
 - Step 8 → decided: `q=` searches `normalized_description` only (uppercased, long digit
-  runs stripped by §6.5 normalization), using ILIKE with `%`/`_`/`\` escaped and the
-  trigram GIN index. So searching an account number finds nothing on purpose, and `notes`
-  are NOT searched — revisit when the frontend has a search box
+  runs stripped by §6.5 normalization), using ILIKE with `%`/`_`/`\` escaped. So searching
+  an account number finds nothing on purpose, and `notes` are NOT searched — revisit when
+  the frontend has a search box. NOTE: the trigram GIN index does NOT serve this query
+  (see Known issues); the review of Step 8 measured it
 - Step 8 → decided: `GET /transactions` returns `amount_display` (the `format_inr` string,
   rule 10) next to `amount_paise`, and does NOT return `merchant_id` (always null in
   Phase 1, no endpoint exposes merchants yet)
 - Step 8 → decided: `PATCH /transactions/{id}` takes only `category_id` and `notes`;
   explicit `null` clears either one, a field left out is untouched (`exclude_unset`), a
   manual category always sets `category_source = user_manual` and clears
-  `category_confidence`. `is_self_transfer` and `apply_to_similar` (SPEC §10) are a 422
-  until Phase 2 builds them
+  `category_confidence`. `apply_to_similar` (SPEC §10) is a 422 until Phase 2 builds the
+  learned rules (§8.1)
 - Step 8 → open: no way to list UNCATEGORIZED transactions yet (`category_id` has no "is
   null" form), which is what the Phase 1 manual-categorization flow actually wants. Not in
   SPEC §10's parameter list; decide the spelling (`uncategorized=true`?) in Phase 3 when
@@ -200,6 +201,21 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 - Step 8 → note: category NAME ordering inside a kind is Postgres' collation ("Education"
   vs "EMI & Loans" sort differently there than in Python), so the test asserts the grouping
   by kind only
+- Step 8 review → decided: `is_self_transfer` is NOT a field of its own in the PATCH body;
+  it is DERIVED from the chosen category's kind — a `transfer` category sets it, any other
+  category clears it, clearing the category clears it, and a notes-only PATCH leaves it
+  alone. Reason: SPEC §9.1 excludes self transfers by reading the BOOLEAN, so a user who
+  files their credit-card payment under "Self Transfer" must not still see it counted as
+  spending, and two independent controls could contradict each other. Phase 2's automatic
+  detection (§8.4) writes the same column; a manual category is treated as a correction
+  of it
+- Step 8 review → decided: a BLANK value means "filter not sent" for every filter
+  (`?from=&direction=&limit=` behaves like no query string), because a client that
+  serializes all of its filter inputs sends empty strings for the boxes the user left
+  alone. Only the filters' own names are dropped, so a misspelled parameter is still a 422
+- Step 8 review → decided: `category_confidence` is serialized as a JSON NUMBER
+  (`PlainSerializer(float)`), not Pydantic's default quoted Decimal string. Rule 1 is
+  unaffected — this is a 0.00–1.00 confidence, not money
 
 ## Tasks Dhruv implemented (historical — the practice ended 2026-10-12)
 From 2026-10-12 Claude completes every task in full; no new `TODO(dhruv)` items are
@@ -246,6 +262,25 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
      sibling now compare against the message constants
 
 ## Known issues
+- The `q=` search does NOT use the trigram GIN index on `normalized_description`, although
+  Step 7 added the index for it. Measured in the Step 8 review with
+  `EXPLAIN (ANALYZE, BUFFERS)` on 20 000 rows: the ILIKE pattern travels as a BOUND
+  parameter, and `gin_trgm_ops` can only extract trigrams from a pattern visible at plan
+  time, so a search matching few or no rows is a Seq Scan over `transactions` (19 999 rows
+  discarded, ~7 ms) while a common one is answered from the keyset index (~0.2 ms). Fine at
+  personal-finance size. If search gets slow the fix is a different OPERATOR
+  (`word_similarity` / `<%`, which does use the index with a parameter) or a tsvector
+  column. Until that is decided the index only costs write time — decide in Phase 2 whether
+  to switch the search or drop it
+- Transactions on the SAME DAY come back in random order: the sort key is
+  `(txn_date DESC, id DESC)` and ids are UUIDv4, so `balance_after_paise` looks
+  non-monotonic when comparing a day against the paper statement. Nothing stores the
+  statement's own row order. `RawRow.row_number` exists in the parser, but storing it needs
+  migration 0006 AND two decisions first: rows of one day can come from two different
+  statements (indexes from different files are not comparable) and a newest-first statement
+  reverses the meaning of the index, so the importer would have to normalize the sequence
+  to chronological. The cursor would also have to carry the third key component (ADR 009).
+  Planned with Phase 2 balance reconciliation (SPEC §6.4), which needs the same ordering
 - Flaky once (2026-10-12): the first full `pytest` run after `docker compose up -d` failed
   with 14 failures + 10 fixture errors, all in test_accounts.py; three later runs (and
   test_accounts.py alone) are clean. Not reproduced and the output was not kept — suspect

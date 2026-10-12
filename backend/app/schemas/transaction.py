@@ -16,12 +16,13 @@ as `if` statements in the route.
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PlainSerializer,
     StringConstraints,
     computed_field,
     field_validator,
@@ -62,6 +63,15 @@ Notes = Annotated[
 # Decimal("500.50") is exact.
 MAX_AMOUNT_RUPEES = Decimal(MAX_PAISE // 100)
 AmountInRupees = Annotated[Decimal, Field(ge=0, le=MAX_AMOUNT_RUPEES, decimal_places=2)]
+
+# `category_confidence` is a NUMERIC(3,2) column, so the ORM hands us a
+# Decimal - and Pydantic's default JSON encoding for a Decimal is a quoted
+# STRING ("0.95"), which would make a field SPEC §5 calls numeric arrive as
+# text and compare wrongly in JavaScript. It is serialized as a number
+# instead. Decimal is kept on the way IN (exactness costs nothing here);
+# only the output is a float, which is safe because this is a 0.00-1.00
+# confidence, not money (rule 1 is about money).
+Confidence = Annotated[Decimal, PlainSerializer(float, return_type=float, when_used="unless-none")]
 
 # A cursor is about 64 characters (see app/utils/cursor.py). The cap is
 # only there so a megabyte of base64 is rejected before being decoded.
@@ -114,15 +124,34 @@ class TransactionFilters(BaseModel):
         default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT, description="Rows per page (max 200)"
     )
 
-    @field_validator("q")
+    @model_validator(mode="before")
     @classmethod
-    def _blank_search_is_no_filter(cls, value: str | None) -> str | None:
-        """Treat `?q=` (and `?q=%20`) as "no search", not as "match nothing".
+    def _blank_filters_mean_not_sent(cls, data: Any) -> Any:
+        """Treat `?from=&direction=&q=` as "no filters", for EVERY filter.
 
-        A search box the user has cleared sends an empty value, and the
-        honest answer to that is the unfiltered list.
+        A client that builds the query string from all of its filter inputs
+        sends an empty value for each one the user left alone - an HTML form
+        does it, and so does `URLSearchParams` over a form state. Without
+        this, `?q=` is "no search" (an empty string is falsy) while `?from=`
+        is a 422 ("input is too short") and `?direction=` a 422 ("should be
+        'debit' or 'credit'"): the same request rejected inconsistently,
+        depending on which filter happened to be left blank.
+
+        A blank value carries no filtering intent, so the key is dropped
+        and the field falls back to its default - which for `limit` is the
+        default page size, not an error.
+
+        Only the filters' OWN names are dropped, so a misspelled parameter
+        is still a 422 even when it arrives blank (see `extra="forbid"`).
         """
-        return value or None
+        if not isinstance(data, dict):
+            return data
+        known = {field.alias or name for name, field in cls.model_fields.items()}
+        return {
+            key: value
+            for key, value in data.items()
+            if not (key in known and isinstance(value, str) and not value.strip())
+        }
 
     @field_validator("cursor")
     @classmethod
@@ -185,9 +214,17 @@ class TransactionUpdate(BaseModel):
     "field set to null" are therefore different requests, which the
     service tells apart with `model_dump(exclude_unset=True)`.
 
-    `is_self_transfer` and `apply_to_similar` are in SPEC §10 but belong to
-    Phase 2 (self-transfer detection and learned rules), so sending them
-    now is a 422 rather than a field that quietly does nothing.
+    `is_self_transfer` and `apply_to_similar` are in SPEC §10 but are not
+    accepted here, so sending them is a 422 rather than a field that
+    quietly does nothing:
+
+    - `apply_to_similar` needs the learned rules of SPEC §8.1 (Phase 2).
+    - `is_self_transfer` is not a free-standing switch. It is derived from
+      the category: choosing a category of kind `transfer` sets it, any
+      other category clears it (see `_set_category` in
+      app/services/transactions.py). That keeps the flag the insights read
+      in step with the category the user can see, instead of offering two
+      controls that can contradict each other.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -224,7 +261,7 @@ class TransactionResponse(BaseModel):
     counterparty_vpa: str | None
     category_id: uuid.UUID | None
     category_source: CategorySource
-    category_confidence: Decimal | None
+    category_confidence: Confidence | None
     is_self_transfer: bool
     notes: str | None
     created_at: datetime
