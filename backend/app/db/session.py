@@ -34,6 +34,25 @@ def build_engine(database_url: str) -> Engine:
         # Before handing out a pooled connection, check it's still alive
         # (hosted Postgres like Neon closes idle connections).
         pool_pre_ping=True,
+        # Keep the VALUES out of database error messages (CLAUDE.md rule 3).
+        #
+        # By default SQLAlchemy appends the statement and every bound
+        # parameter to the exception it raises:
+        #
+        #   [SQL: INSERT INTO transactions (...) VALUES (...)]
+        #   [parameters: {'raw_description': 'UPI/...', 'amount_paise': 7000, ...}]
+        #
+        # An unexpected database error during a statement import therefore
+        # put hundreds of narrations, amounts and balances into the
+        # traceback that `_handle_unexpected_error` logs. With this flag the
+        # exception says "[SQL: ...]" and
+        # "[parameters: [SQL parameters hidden due to hide_parameters=True]]".
+        #
+        # The cost is real: debugging a failed statement now needs the row
+        # number from the error, not the values from the log. That is the
+        # right trade for a database holding one person's whole spending
+        # history.
+        hide_parameters=True,
         # connect_args are passed straight to psycopg.connect(). A hung
         # connection attempt now fails with an error instead of freezing.
         connect_args={"connect_timeout": CONNECT_TIMEOUT_SECONDS},
@@ -55,6 +74,10 @@ def build_health_engine(database_url: str) -> Engine:
     return create_engine(
         database_url,
         poolclass=NullPool,
+        # Same reasoning as build_engine: no values in error messages. This
+        # engine only runs "SELECT 1", so there is nothing to hide today -
+        # it is set so that the two engines cannot drift apart.
+        hide_parameters=True,
         connect_args={"connect_timeout": HEALTH_CONNECT_TIMEOUT_SECONDS},
     )
 
