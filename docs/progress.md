@@ -160,7 +160,10 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   binary; no real statement is ever committed (rule 8)
 
 
-## My TODO(dhruv) tasks
+## Tasks Dhruv implemented (historical — the practice ended 2026-10-12)
+From 2026-10-12 Claude completes every task in full; no new `TODO(dhruv)` items are
+created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wrote.
+
 - [x] Nested job-password redaction test (Step 2b, tests/unit/test_logging.py)
 - [x] Money parsing + formatting edge-case tests (Step 2d)
 - [x] 3 merchants + `test_merchant_categories_exist` (Step 3)
@@ -179,12 +182,18 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
 
 - [x] Signed-amount-column branch in `GenericCsvParser._parse_amount` (Step 6) — done and
   reviewed; the three `test_signed_amount_column_*` tests now run (no skips left)
-- [ ] Chunk-boundary import test (Step 7, `app/services/imports.py` `_INSERT_CHUNK_SIZE`):
-  import a statement with more than 500 rows and assert every row is inserted, then that a
-  re-import counts them all as duplicates. It is the one branch in the import service no
-  test walks through
+- [x] Chunk-boundary import test (Step 7) — completed by Claude on 2026-10-12 instead:
+  `many_rows()` + `test_a_statement_larger_than_one_chunk_is_fully_imported` and
+  `test_a_large_statement_reimports_as_all_duplicates` in tests/integration/test_uploads.py.
+  Verified against a deliberately broken slice (`values[start:SIZE]`), which both tests
+  catch; the row count is read from `_INSERT_CHUNK_SIZE` so tuning it keeps them honest
 
 ## Known issues
+- Flaky once (2026-10-12): the first full `pytest` run after `docker compose up -d` failed
+  with 14 failures + 10 fixture errors, all in test_accounts.py; three later runs (and
+  test_accounts.py alone) are clean. Not reproduced and the output was not kept — suspect
+  the containers still warming up. If it happens again, save the failure output: a 429 in
+  there would point at the rate-limit reset racing a freshly started Redis
 - Uploads: Starlette buffers a multipart body over ~1 MB into a temporary file before the
   route runs, so an oversized upload briefly touches the disk before the 413 (the temp file
   is deleted when the request ends). Rejecting it earlier needs a Content-Length check in

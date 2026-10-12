@@ -88,12 +88,9 @@ WRONG_ACCOUNT_NUMBER_MESSAGE = (
 # nothing about the real cause. All the chunks still run inside the SAME
 # transaction, so the import stays all-or-nothing.
 #
-# TODO(dhruv): add an integration test that crosses this boundary - import a
-# statement with more than 500 rows (build one with
-# `tests/fixtures/icici_xls.py`, generating the rows in a loop) and assert
-# that rows_inserted equals the number of rows and that a re-import counts
-# all of them as duplicates. Without it, the chunking is the one branch in
-# this module no test walks through.
+# Crossing this boundary is covered by
+# `test_a_statement_larger_than_one_chunk_is_fully_imported`, which reads
+# the number from here - so tuning it keeps the test honest.
 _INSERT_CHUNK_SIZE = 500
 
 # Name given by our naming convention (app/db/base.py), see migration 0005.

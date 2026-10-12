@@ -140,7 +140,7 @@ stage and a proposed commit. Stop after each step for review.
     user's own) and `notes`; sets `category_source = user_manual`
 - `backend/app/api/v1/categories.py` — `GET /categories` (system + user's own)
 - Tests: filters, pagination without gaps or repeats, PATCH, IDOR on PATCH
-- TODO(dhruv): query validation (`min_amount <= max_amount`, `from <= to`) + its test
+- Query validation (`min_amount <= max_amount`, `from <= to`) + its test
 
 ### Step 9 — Insights
 - `backend/app/services/insights.py` — readable SQL via `text()` with bound
@@ -148,8 +148,8 @@ stage and a proposed commit. Stop after each step for review.
   - `GET /insights/summary?month=YYYY-MM` — income, spend, net, % change vs
     previous month (safe when the previous month is 0)
   - `GET /insights/categories?from&to` — spend per category
-- Tests with synthetic data whose totals are computed by hand
-- TODO(dhruv): test that a self-transfer row is excluded from the summary
+- Tests with synthetic data whose totals are computed by hand, including one
+  proving a self-transfer row is excluded from the summary
 
 ### Step 10 — End-to-end check and wrap-up
 - Manual run in `/docs`: register → login → add ICICI account → upload the

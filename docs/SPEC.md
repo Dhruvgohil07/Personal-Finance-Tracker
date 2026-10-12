@@ -398,7 +398,7 @@ Pages:
 
 UX rules: responsive/mobile-first, helpful empty states, loading and error states everywhere, money formatted with `Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' })`, dark mode support.
 
-Since I'm learning JavaScript, keep components simple, explain React concepts (state, effects, props, data fetching) as they come up, and leave small `// TODO(dhruv):` tasks for me.
+Since I'm learning JavaScript, keep components simple and explain React concepts (state, effects, props, data fetching) as they come up. Write every component fully — no `// TODO(dhruv):` hand-offs (CLAUDE.md §0).
 
 ---
 
