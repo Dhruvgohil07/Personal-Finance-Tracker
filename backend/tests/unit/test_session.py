@@ -15,6 +15,7 @@ from sqlalchemy.pool import NullPool
 
 from app.db.session import (
     HEALTH_CONNECT_TIMEOUT_SECONDS,
+    build_engine,
     build_health_engine,
     get_db,
     get_health_db,
@@ -69,3 +70,19 @@ def test_health_engine_fails_fast_and_has_no_pool() -> None:
 
     assert seen["connect_timeout"] == HEALTH_CONNECT_TIMEOUT_SECONDS == 3
     assert isinstance(engine.pool, NullPool)
+
+
+@pytest.mark.parametrize("make_engine", [build_engine, build_health_engine])
+def test_engines_keep_sql_parameters_out_of_errors(make_engine: Callable[[str], Any]) -> None:
+    """Both engines must set `hide_parameters` (CLAUDE.md rule 3).
+
+    Without it, SQLAlchemy appends every bound parameter to the exception it
+    raises, so one unexpected error during a statement import put hundreds
+    of narrations, amounts and balances into the traceback that the global
+    error handler logs. The flag is easy to drop when an engine is edited
+    and nothing else would notice, which is why it is asserted here rather
+    than trusted.
+    """
+    engine = make_engine("postgresql+psycopg://user:pass@127.0.0.1:1/db")
+
+    assert engine.hide_parameters is True
