@@ -24,6 +24,21 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Protocol
 
+# The largest value a Postgres BIGINT can hold, which is what
+# `transactions.amount_paise` and `balance_after_paise` are (SPEC §5).
+#
+# Python integers have no limit, so `parse_amount_to_paise` happily returns
+# a number far beyond this from a corrupt cell - and nothing downstream
+# noticed until the INSERT, where Postgres raised a "numeric field
+# overflow". That reached the user as a 500 with no row number, instead of
+# the 400 every other unreadable row gets. Checking it here means the
+# failure is reported like any other bad row.
+#
+# For scale: this is about ₹92,233,720,368,547,758 - sixteen digits of
+# rupees. No real statement row comes close, so a value above it means the
+# cell was misread, not that someone is very rich.
+MAX_PAISE = 9_223_372_036_854_775_807
+
 
 def _is_paise(value: object) -> bool:
     """True when `value` is a genuine integer amount in paise.
@@ -170,12 +185,23 @@ class RawRow:
             raise ParseError("amount must be integer paise", row_number=self.row_number)
         if self.amount_paise <= 0:
             raise ParseError("amount must be greater than zero", row_number=self.row_number)
+        # Too big to store (see MAX_PAISE). Caught here rather than at the
+        # INSERT, so the user is told which row is wrong instead of getting
+        # a 500 - and so no database error carrying this row's values is
+        # ever raised (CLAUDE.md rule 3).
+        if self.amount_paise > MAX_PAISE:
+            raise ParseError("amount is too large to be real", row_number=self.row_number)
 
         # The balance is money too, and it is the field most likely to
         # arrive as a float: numeric cells in a legacy `.xls` come back
         # from xlrd as Python floats (Step 6).
-        if self.balance_after_paise is not None and not _is_paise(self.balance_after_paise):
-            raise ParseError("balance must be integer paise", row_number=self.row_number)
+        if self.balance_after_paise is not None:
+            if not _is_paise(self.balance_after_paise):
+                raise ParseError("balance must be integer paise", row_number=self.row_number)
+            # A balance may legitimately be negative (an overdraft, or a
+            # credit card), so both ends are checked.
+            if not -MAX_PAISE <= self.balance_after_paise <= MAX_PAISE:
+                raise ParseError("balance is too large to be real", row_number=self.row_number)
 
         # A plain string would pass every comparison in this package,
         # because `Direction` is a StrEnum and `Direction.DEBIT == "debit"`.
