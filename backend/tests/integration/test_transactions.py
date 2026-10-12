@@ -13,6 +13,8 @@ The tests that matter most, and the rules they defend:
 - `test_another_users_transaction_is_not_found`       rule 2 (IDOR)
 - `test_another_users_category_cannot_be_used`        rule 2 (IDOR)
 - `test_a_cursor_never_reaches_another_users_rows`    rule 2 (IDOR)
+- `test_a_transfer_category_marks_the_row_as_...`     SPEC §9.1 totals
+- `test_a_blank_filter_is_not_a_filter`               blank = not sent
 """
 
 import datetime
@@ -491,6 +493,45 @@ def test_a_blank_search_is_not_a_filter(client: TestClient, sample: Owner) -> No
     assert len(items) == len(SAMPLE_ROWS)
 
 
+@pytest.mark.parametrize(
+    "blank",
+    [
+        {"from": ""},
+        {"to": ""},
+        {"direction": ""},
+        {"account_id": ""},
+        {"category_id": ""},
+        {"min_amount": ""},
+        {"max_amount": ""},
+        {"cursor": ""},
+        {"limit": ""},
+        # What a form that serializes every filter field actually sends.
+        {"from": "", "to": "", "direction": "", "q": "", "min_amount": "", "limit": ""},
+    ],
+)
+def test_a_blank_filter_is_not_a_filter(
+    client: TestClient, sample: Owner, blank: dict[str, str]
+) -> None:
+    """Every filter treats an empty value as "not sent", not as a 422.
+
+    A client that builds the query string from all of its filter inputs
+    sends an empty value for the ones the user left alone. Before this,
+    `?q=` worked while `?from=` and `?direction=` were 422s - the same
+    request accepted or rejected depending on which box was left blank.
+    """
+    items, _ = get_page(client, sample, **blank)
+
+    assert len(items) == len(SAMPLE_ROWS)
+
+
+def test_a_blank_unknown_parameter_is_still_rejected(client: TestClient, alice: Owner) -> None:
+    """Dropping blanks must not start forgiving misspelled filters."""
+    response = client.get(TRANSACTIONS, params={"catgory_id": ""}, headers=alice.headers)
+
+    assert response.status_code == 422
+    assert [d["field"] for d in response.json()["error"]["details"]] == ["query.catgory_id"]
+
+
 # --- Keyset pagination ------------------------------------------------------
 
 
@@ -603,6 +644,89 @@ def test_a_cursor_never_reaches_another_users_rows(
 # --- PATCH: manual categorization -------------------------------------------
 
 
+def test_a_transfer_category_marks_the_row_as_a_self_transfer(
+    client: TestClient, db: Session, alice: Owner, system_categories: dict[str, Category]
+) -> None:
+    """Filing a row under "Self Transfer" must set the flag the insights read.
+
+    SPEC §9.1 excludes self transfers from spending and income, but the
+    insights queries read `is_self_transfer`, not the category. If the two
+    could disagree, a credit-card payment the user correctly filed as a
+    self transfer would still be counted as spending - and there is no
+    `is_self_transfer` field in the PATCH body to fix it with.
+    """
+    transaction = add_transaction(db, alice, txn_date=AUGUST, amount_paise=20_00_000)
+    self_transfer = system_categories["self-transfer"]
+    assert self_transfer.kind is CategoryKind.TRANSFER
+
+    response = client.patch(
+        f"{TRANSACTIONS}/{transaction.id}",
+        json={"category_id": str(self_transfer.id)},
+        headers=alice.headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["is_self_transfer"] is True
+    db.refresh(transaction)
+    assert transaction.is_self_transfer is True
+
+
+@pytest.mark.parametrize("second_body", [{"category_id": "groceries"}, {"category_id": None}])
+def test_leaving_the_transfer_category_clears_the_self_transfer_flag(
+    client: TestClient,
+    db: Session,
+    alice: Owner,
+    system_categories: dict[str, Category],
+    second_body: dict[str, str | None],
+) -> None:
+    """A stale True must not keep a row out of the totals invisibly.
+
+    Re-filing the row as groceries, or clearing its category, both mean
+    "this is not a transfer between my accounts".
+    """
+    transaction = add_transaction(
+        db,
+        alice,
+        txn_date=AUGUST,
+        amount_paise=20_00_000,
+        category_id=system_categories["self-transfer"].id,
+    )
+    url = f"{TRANSACTIONS}/{transaction.id}"
+    assert (
+        client.patch(
+            url,
+            json={"category_id": str(system_categories["self-transfer"].id)},
+            headers=alice.headers,
+        ).json()["is_self_transfer"]
+        is True
+    )
+
+    slug = second_body["category_id"]
+    body = {"category_id": str(system_categories[slug].id) if slug is not None else None}
+    response = client.patch(url, json=body, headers=alice.headers)
+
+    assert response.status_code == 200
+    assert response.json()["is_self_transfer"] is False
+
+
+def test_a_note_alone_does_not_touch_the_self_transfer_flag(
+    client: TestClient, db: Session, alice: Owner
+) -> None:
+    """Phase 2 will set this flag by detection; a note must not undo that."""
+    transaction = add_transaction(db, alice, txn_date=AUGUST, amount_paise=20_00_000)
+    transaction.is_self_transfer = True
+    db.commit()
+
+    response = client.patch(
+        f"{TRANSACTIONS}/{transaction.id}",
+        json={"notes": "moved to my card"},
+        headers=alice.headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["is_self_transfer"] is True
+
+
 def test_choosing_a_category_records_that_the_user_chose_it(
     client: TestClient, db: Session, alice: Owner, system_categories: dict[str, Category]
 ) -> None:
@@ -621,6 +745,8 @@ def test_choosing_a_category_records_that_the_user_chose_it(
     # `user_manual` is what stops the Phase 2 categorizer overwriting it.
     assert body["category_source"] == "user_manual"
     assert body["category_confidence"] is None
+    # An expense category is not a transfer between the user's accounts.
+    assert body["is_self_transfer"] is False
     # Stored, not only echoed back.
     db.refresh(transaction)
     assert transaction.category_id == groceries.id

@@ -135,6 +135,15 @@ class Transaction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         # a b-tree is ordered by the START of the string. pg_trgm indexes
         # every 3-character slice instead, so a match anywhere in the text
         # can still use the index. The extension is enabled in migration 0001.
+        #
+        # Step 8 measured this and found Postgres does NOT use it for our
+        # query: the ILIKE pattern is a bound parameter, and the trigrams
+        # can only be extracted from a pattern visible at plan time, so a
+        # selective search is a sequential scan instead (see
+        # `_search_pattern` in app/services/transactions.py). The index is
+        # kept because the fix is a different operator (`word_similarity`,
+        # which does use it with a parameter) rather than a different index;
+        # dropping it is a Phase 2 decision once search is settled.
         Index(
             "ix_transactions_normalized_description_trgm",
             "normalized_description",

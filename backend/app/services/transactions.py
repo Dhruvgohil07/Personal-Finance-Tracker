@@ -34,7 +34,7 @@ from sqlalchemy import Select, select, tuple_
 from sqlalchemy.orm import Session
 
 from app.core.errors import NotFoundError
-from app.models import CategorySource, Transaction
+from app.models import CategoryKind, CategorySource, Transaction
 from app.schemas.transaction import TransactionFilters, TransactionUpdate
 from app.services import accounts as accounts_service
 from app.services import categories as categories_service
@@ -138,6 +138,10 @@ def update_transaction(
 
     `category_confidence` is set to NULL in both cases: it describes how
     sure a GUESS was, and a person choosing a category is not a guess.
+
+    A manual category also decides `is_self_transfer`, so the flag the
+    insights read cannot disagree with the category the user chose - see
+    `_set_category`.
     """
     transaction = get_transaction(db, user_id, transaction_id)
     changes = data.model_dump(exclude_unset=True)
@@ -167,11 +171,34 @@ def update_transaction(
 def _set_category(
     db: Session, user_id: uuid.UUID, transaction: Transaction, category_id: uuid.UUID | None
 ) -> None:
-    """Apply a category change, with its bookkeeping columns."""
+    """Apply a category change, with its bookkeeping columns.
+
+    Including `is_self_transfer`, which is the part worth explaining. A
+    category of kind `transfer` means money moved between the user's own
+    accounts, and SPEC §9.1 excludes exactly that from spending and income
+    totals - but the insights queries read the BOOLEAN, not the category.
+    If the two were allowed to disagree, a user who correctly files their
+    credit-card payment under "Self Transfer" would still see it counted as
+    spending, and (because editing the flag directly is not offered) would
+    have no way to fix it.
+
+    So whenever a category is chosen by hand, it decides the flag:
+
+    - a `transfer` category         -> is_self_transfer = True
+    - any other category            -> False ("this is groceries, not a
+                                       transfer" is a correction of the
+                                       Phase 2 detector, SPEC §8.4)
+    - the category cleared entirely -> False, so a stale True cannot keep
+                                       a row out of the totals invisibly
+
+    A PATCH that only sets `notes` never reaches this function, so it
+    leaves the flag alone.
+    """
     if category_id is None:
         transaction.category_id = None
         transaction.category_source = CategorySource.NONE
         transaction.category_confidence = None
+        transaction.is_self_transfer = False
         return
 
     # 404 unless it is a system category or one of the user's own.
@@ -179,6 +206,7 @@ def _set_category(
     transaction.category_id = category.id
     transaction.category_source = CategorySource.USER_MANUAL
     transaction.category_confidence = None
+    transaction.is_self_transfer = category.kind is CategoryKind.TRANSFER
 
 
 def _filtered_query(user_id: uuid.UUID, filters: TransactionFilters) -> Select[tuple[Transaction]]:
@@ -240,12 +268,30 @@ def _search_pattern(text: str) -> str:
     """Turn the user's `q=` into a "contains" ILIKE pattern.
 
     `%zomato%` matches the text anywhere in the narration, case
-    insensitively (ILIKE). A leading wildcard is normally unindexable, but
-    `normalized_description` has a trigram GIN index
-    (ix_transactions_normalized_description_trgm), which indexes every
-    3-character slice of the text - so a search of 3 characters or more can
-    still use it. Shorter searches fall back to a scan of the user's rows,
-    which is fine at this size.
+    insensitively (ILIKE).
+
+    **The trigram index does not help this query, measured.** There is a
+    trigram GIN index on `normalized_description`
+    (ix_transactions_normalized_description_trgm, added in Step 7 for
+    exactly this search), and the obvious assumption is that it makes a
+    leading-wildcard `ILIKE` indexable. It does not, because the pattern
+    travels as a BOUND PARAMETER: `gin_trgm_ops` has to pull the trigrams
+    out of the pattern, and the planner can only do that for a pattern it
+    can see while planning. `EXPLAIN (ANALYZE, BUFFERS)` on 20 000 rows:
+
+        q matching many rows   Index Scan on the keyset index, this as a
+                               filter, stops once LIMIT is full (~0.2 ms)
+        q matching few/none    Seq Scan on transactions with this as a
+                               filter, 19 999 rows discarded (~7 ms)
+
+    So a selective search costs one scan of the table. That is acceptable
+    at personal-finance size (a few thousand rows per user), and it is why
+    `q` is capped at 100 characters and the endpoint sits under the
+    100/minute general rate limit. If search ever gets slow the fix is a
+    different OPERATOR - `word_similarity` (`<%`), which does use the
+    trigram index with a parameter, or a tsvector column - not a different
+    pattern string. Until then the index earns nothing but write cost; see
+    docs/progress.md.
 
     Note the search runs against the NORMALIZED narration (uppercased,
     collapsed whitespace, long digit runs removed - SPEC §6.5), so
