@@ -16,7 +16,7 @@ as `if` statements in the route.
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated
 
 from pydantic import (
     BaseModel,
@@ -31,7 +31,7 @@ from pydantic import (
 
 from app.models import CategorySource, Channel
 from app.parsers.base import MAX_PAISE, Direction
-from app.schemas.common import NO_CONTROL_CHARS
+from app.schemas.common import NO_CONTROL_CHARS, QueryFilters
 from app.utils.cursor import CursorError, decode_cursor
 from app.utils.money import format_inr
 
@@ -83,15 +83,13 @@ def _to_paise(rupees: Decimal | None) -> int | None:
     return None if rupees is None else int(rupees * 100)
 
 
-class TransactionFilters(BaseModel):
+class TransactionFilters(QueryFilters):
     """The query string of `GET /transactions` (SPEC §10).
 
-    `extra="forbid"` makes an unknown parameter a 422 rather than a filter
-    that is silently ignored: `?catgory_id=...` would otherwise return
-    every transaction, which looks like a bug in the API.
+    From `QueryFilters`: an unknown parameter is a 422 rather than a
+    filter that is silently ignored, and a blank value (`?from=`) means
+    "not sent" rather than a validation error.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     # `from` is a Python keyword, so the field is named date_from and
     # exposed under its SPEC name with an alias.
@@ -123,35 +121,6 @@ class TransactionFilters(BaseModel):
     limit: int = Field(
         default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT, description="Rows per page (max 200)"
     )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _blank_filters_mean_not_sent(cls, data: Any) -> Any:
-        """Treat `?from=&direction=&q=` as "no filters", for EVERY filter.
-
-        A client that builds the query string from all of its filter inputs
-        sends an empty value for each one the user left alone - an HTML form
-        does it, and so does `URLSearchParams` over a form state. Without
-        this, `?q=` is "no search" (an empty string is falsy) while `?from=`
-        is a 422 ("input is too short") and `?direction=` a 422 ("should be
-        'debit' or 'credit'"): the same request rejected inconsistently,
-        depending on which filter happened to be left blank.
-
-        A blank value carries no filtering intent, so the key is dropped
-        and the field falls back to its default - which for `limit` is the
-        default page size, not an error.
-
-        Only the filters' OWN names are dropped, so a misspelled parameter
-        is still a 422 even when it arrives blank (see `extra="forbid"`).
-        """
-        if not isinstance(data, dict):
-            return data
-        known = {field.alias or name for name, field in cls.model_fields.items()}
-        return {
-            key: value
-            for key, value in data.items()
-            if not (key in known and isinstance(value, str) and not value.strip())
-        }
 
     @field_validator("cursor")
     @classmethod
