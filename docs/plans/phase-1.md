@@ -156,6 +156,10 @@ stage and a proposed commit. Stop after each step for review.
   real `.xls` → compare transactions with the statement → re-upload (409) →
   categorize → check the summary
 - `README.md` — Phase 1 usage walkthrough; progress and plan updated
+- *Split during the step:* the run is now **Part A** (automated, against a
+  synthetic statement — done) and **Part B** (the real statement, by hand),
+  written up as a fill-in checklist in `docs/phase-1-acceptance.md`. See the
+  change log.
 
 ## Change log
 - **Step 5 (done):** `base.py` also defines the `FileType` (csv/xls/pdf) and `Direction`
@@ -276,3 +280,23 @@ stage and a proposed commit. Stop after each step for review.
      corrected. The tests were also checked by **mutation**: four deliberate breakages of
      the SQL (no self-transfer filter, no `user_id` filter, an exclusive range end, an
      inner join) each fail the tests that are supposed to catch them.
+- **Step 10 (part A done):** two differences from the planned shape.
+  1. **The end-to-end run was split in two, and half of it was automated.** The plan had
+     one manual `/docs` pass. In practice those are two different checks: whether the HTTP
+     path works at all, and whether the numbers match the paper statement. The first was
+     automated against the live server with a synthetic ICICI `.xls` (73 checks: the whole
+     flow plus cursor paging, the self-transfer exclusion, cross-user isolation, four
+     validation 422s, the security headers, and a scan of the real server logs for rule-3
+     leaks), because it is repeatable and does not need real data. Only the second needs a
+     person, and it is the one a fixture *cannot* do: the fixture was written from our own
+     reading of the ICICI layout, so if the parser misread a column the fixture misreads it
+     identically and the two agree, wrongly. The paper statement is the only thing that
+     breaks that tie — the balance identity (opening − debits + credits == closing) being
+     the single strongest check.
+  2. **An acceptance document was added** (`docs/phase-1-acceptance.md`) rather than the
+     run being a one-off in a chat. It records what Part A proved and gives Part B as a
+     fill-in table per step, with the failure modes spelled out ("one or two rows short →
+     suspect an unjoined continuation row or the end-of-table guard") and an explicit
+     reminder that a row filed as a self transfer is *meant* to make the summary's spend
+     lower than the raw debit sum. Phase 2 can re-run the same checklist after the worker
+     and the PDF parser land.
