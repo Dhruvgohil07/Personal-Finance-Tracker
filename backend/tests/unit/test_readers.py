@@ -9,10 +9,17 @@ import datetime
 import io
 
 import pytest
+import xlrd
 import xlwt
 
 from app.parsers.base import FileType, ParseError
-from app.parsers.readers import detect_file_type, read_csv, read_statement, read_xls
+from app.parsers.readers import (
+    _cell_to_text,
+    detect_file_type,
+    read_csv,
+    read_statement,
+    read_xls,
+)
 from app.utils.money import parse_amount_to_paise
 
 OLE2 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
@@ -324,3 +331,43 @@ def test_a_text_file_named_xls_says_what_is_actually_wrong() -> None:
     message = str(exc_info.value)
     assert "named like an Excel workbook but is not one" in message
     assert ".csv" in message
+
+
+# --- what xlwt cannot write ------------------------------------------------
+#
+# Every other `.xls` test above goes through a workbook xlwt really wrote.
+# These two cases cannot be built that way, so they are the only places in
+# this file that reach past the public function. The reason is stated in
+# each test, because "we mocked it" is otherwise the first thing to doubt.
+
+
+def test_an_error_cell_becomes_an_empty_string() -> None:
+    """An error cell (`#N/A`, `#DIV/0!`) has no usable value, so it reads as "".
+
+    Real exports do contain them - a bank's sheet with a broken formula -
+    but xlwt cannot write one: it stores a formula without a cached result,
+    and only that cached result tells xlrd the cell is an error. So the
+    cell is built directly as the xlrd value object the reader would get.
+    """
+    cell = xlrd.sheet.Cell(xlrd.XL_CELL_ERROR, 42)  # 42 is Excel's #N/A
+
+    assert _cell_to_text(cell, 0, row_number=1) == ""
+
+
+def test_a_workbook_with_no_sheets_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A workbook whose only sheet is a chart or a macro sheet.
+
+    xlrd counts neither as a sheet, so `nsheets` is 0 and there is no first
+    sheet to read - and the message has to say that, not "not a readable
+    .xls workbook", because the file is perfectly readable. xlwt refuses to
+    save a workbook without a worksheet (IndexError), so the only way to
+    see this is to stub the workbook xlrd hands back.
+    """
+
+    class SheetlessBook:
+        nsheets = 0
+
+    monkeypatch.setattr(xlrd, "open_workbook", lambda **kwargs: SheetlessBook())
+
+    with pytest.raises(ParseError, match="workbook has no sheets"):
+        read_xls(OLE2 + b"the content is irrelevant: xlrd is stubbed")

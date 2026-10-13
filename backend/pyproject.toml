@@ -80,3 +80,13 @@ markers = [
 [tool.coverage.run]
 source = ["app"]
 branch = true
+
+[tool.coverage.report]
+# The only lines deliberately left out of the measurement. A
+# `if __name__ == "__main__":` block is a script's entry point: it runs
+# only when the module is started with `python -m ...`, which never happens
+# inside the test process. The function it calls IS tested (e.g. `main()`
+# in tests/integration/test_seed.py), so excluding the guard keeps the
+# report at a real 100% instead of a permanent one-line gap that hides the
+# next real one.
+exclude_also = ['if __name__ == "__main__":']
