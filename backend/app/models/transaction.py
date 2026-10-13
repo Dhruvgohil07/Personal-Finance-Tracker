@@ -126,7 +126,19 @@ class Transaction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             text("txn_date DESC"),
             text("id DESC"),
         ),
-        # Spend per category over a period (SPEC §9.1 insights).
+        # "One category over a date range": GET /transactions with
+        # ?category_id= and ?from=/?to=. Measured in Step 9 - all three
+        # columns land in the Index Cond, 54 buffers and 0.11 ms over
+        # 20 000 rows.
+        #
+        # Step 7 added it for the §9.1 insights breakdown instead, and
+        # that turned out to be wrong: `GET /insights/categories` GROUPS
+        # BY category rather than filtering to one, so the second column
+        # of this index is unconstrained and the date predicate after it
+        # can never become an index condition. Postgres therefore ignores
+        # this index there and reads the user's rows through a narrower
+        # one (ADR 010). It is kept because the query above is real and
+        # uses it in full.
         Index("ix_transactions_user_category_date", "user_id", "category_id", "txn_date"),
         # "everything from this merchant" (top merchants, recurring detection).
         Index("ix_transactions_user_merchant", "user_id", "merchant_id"),

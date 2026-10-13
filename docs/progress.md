@@ -60,11 +60,26 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   unique ids newest-first, 148 debits / 27 credits, the whole-period date filter returns
   all 175, and a manual categorization shows up in `?category_id=`
 
+- [x] Step 9: Insights — `GET /insights/summary?month=YYYY-MM` (income, spend, net, the
+  previous month and the % change) and `GET /insights/categories?from&to` (spend per
+  category, biggest first, with an "Uncategorized" bucket); new `app/utils/dates.py`
+  (pure: fixed-offset IST clock + a `Month` value object), `app/schemas/insights.py`,
+  `app/services/insights.py` (hand-written aggregate SQL via `text()`, every value bound),
+  `app/api/v1/insights.py`; Step 8's "unknown param = 422, blank = not sent" validator
+  extracted into a shared `QueryFilters` base in `app/schemas/common.py`; ADR 010.
+  837 tests pass, 99% coverage (100% of all five new/changed modules).
+  Verified by MUTATION: dropping `NOT is_self_transfer` fails 6 tests, dropping the
+  `user_id` filter fails the IDOR test, making the range end exclusive fails 3 boundary
+  tests, and `LEFT JOIN` → `JOIN` fails 8 — so the totals are not asserted against
+  whatever the SQL happens to return. Measured with `EXPLAIN (ANALYZE, BUFFERS)` on
+  40 800 rows (2 users × 24 months): summary 0.88 ms / 78 buffers and a 1-month
+  breakdown 0.69 ms, both with user_id + both date bounds inside the `Index Cond` of
+  `ix_transactions_user_txn_date_id`; a 12-month breakdown is 8.75 ms
+
 ## In progress
 - (nothing yet)
 
 ## Next up
-- [ ] Step 9: Insights — monthly summary + category breakdown
 - [ ] Step 10: End-to-end check with the real ICICI statement, README walkthrough
 
 ## Open decisions / questions
@@ -217,6 +232,50 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   (`PlainSerializer(float)`), not Pydantic's default quoted Decimal string. Rule 1 is
   unaffected — this is a 0.00–1.00 confidence, not money
 
+- Step 9 → decided (ADR 010): the insights aggregates are HAND-WRITTEN SQL in `text()`
+  with bound parameters, not SQLAlchemy Core. `SUM(...) FILTER (WHERE ...)` over
+  `GROUP BY date_trunc('month', ...)` can be read aloud and pasted into `EXPLAIN ANALYZE`;
+  the Core equivalent (`func.sum(case(...))`) can be neither. The SQL strings are
+  module-level constants — nothing is formatted in, so §7.3 holds
+- Step 9 → decided: self transfers are excluded by `NOT is_self_transfer` (the boolean),
+  never by joining categories and testing `kind <> 'transfer'`. Same column SPEC §9.1
+  names and Phase 2 §8.4 will write, and Step 8 already keeps it in step with the category
+- Step 9 → decided: a % change against a month whose total was 0 is `null`, not 0 and not
+  100 — there is no percentage for growth from nothing. `net` gets no % at all, because a
+  value that crosses zero cannot have a meaningful percentage change
+- Step 9 → decided: the uncategorized bucket (`category_id IS NULL`) is a ROW in
+  `/insights/categories`, via `LEFT JOIN`, so the parts always add up to the total. Open:
+  it is named "Uncategorized", which is also the name of a SEEDED system category (SPEC §8's
+  explicit "looked, nothing fits"), so both can appear as separate rows — distinguishable
+  by `category_id` being null. Revisit the naming in Phase 2 when the categorizer starts
+  using the seeded one
+- Step 9 → decided: `SUM()` over a BIGINT column returns NUMERIC (Postgres refuses to
+  overflow silently), so the driver hands back a `Decimal`; it is converted with `int()` at
+  the service boundary rather than cast `::bigint` in SQL, which would throw that
+  protection away. `format_inr` rejects non-`int`, so an unconverted value was a 500
+- Step 9 → decided: `month` and `from`/`to` are OPTIONAL and default to the current month
+  **in Asia/Kolkata** (rule 10). `app/utils/dates.py` uses a FIXED UTC+05:30 offset, not
+  `zoneinfo.ZoneInfo("Asia/Kolkata")`: India has had no DST since 1945, and a fixed offset
+  needs no `tzdata` package on Windows. `from`/`to` are both-or-neither (one alone is a
+  422), because defaulting the missing half would silently produce an empty range
+- Step 9 → decided: shares and % changes are rounded HALF-UP to one decimal place, so a
+  breakdown's shares need not add to exactly 100.0 (three equal categories give 33.3 × 3 =
+  99.9). `total_spend_paise` is the exact figure for arithmetic; adjusting one row to cover
+  the gap would make that row wrong
+- Step 9 → decided: only `/insights/summary` and `/insights/categories` are built.
+  `/insights/trend?months=12` is the same monthly query over a wider range (easy in
+  Phase 2); `/insights/top-merchants` needs `transactions.merchant_id`, which nothing
+  writes until the Phase 2 categorizer
+- Step 9 → FOUND by measuring: `ix_transactions_user_category_date` does NOT serve the
+  insights breakdown, although Step 7 added it for exactly that. The breakdown GROUPS BY
+  category instead of filtering to one, so the index's second column is unconstrained and
+  the date predicate behind it can never become an index condition — Postgres ignores it
+  even with `enable_bitmapscan`/`enable_seqscan` off. The index IS used in full (all three
+  columns in the `Index Cond`, 54 buffers, 0.11 ms) by Step 8's
+  `GET /transactions?category_id=&from=&to=`, so it is kept and the misleading comment in
+  `app/models/transaction.py` was corrected. Second index in a row whose stated purpose
+  did not survive `EXPLAIN` (the first was the trigram index in Step 8)
+
 ## Tasks Dhruv implemented (historical — the practice ended 2026-10-12)
 From 2026-10-12 Claude completes every task in full; no new `TODO(dhruv)` items are
 created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wrote.
@@ -262,6 +321,11 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
      sibling now compare against the message constants
 
 ## Known issues
+- `GET /insights/categories` over a WHOLE YEAR stops using the date bounds: at ~45% of a
+  user's rows the planner reads everything for that user through a `user_id`-prefixed index
+  and filters the dates from the heap (20 400 rows scanned, 11 220 discarded, 8.75 ms on
+  40 800 rows). A reasonable choice at that selectivity and fine at personal-finance size,
+  so nothing was changed — but this is where the endpoint hurts first. Measured in ADR 010
 - The `q=` search does NOT use the trigram GIN index on `normalized_description`, although
   Step 7 added the index for it. Measured in the Step 8 review with
   `EXPLAIN (ANALYZE, BUFFERS)` on 20 000 rows: the ILIKE pattern travels as a BOUND
