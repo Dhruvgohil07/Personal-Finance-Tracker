@@ -96,11 +96,29 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   leak another user's category because `_set_category` is the only writer of
   `transactions.category_id` and it goes through `categories_service.get_category`
 
+- [x] Step 10 (part A): README Phase 1 walkthrough + `docs/phase-1-acceptance.md`.
+  The README now documents the whole flow endpoint by endpoint (register → login →
+  account → upload → list/page → categorize → both insights), with the deliberate Phase 1
+  gaps listed so the limits are not mistaken for bugs; project layout and design
+  principles brought up to date. Verified the LIVE server end to end (real uvicorn on
+  :8111 with `DATABASE_URL` pointed at `kharcha_test`, synthetic ICICI `.xls`):
+  **73/73 checks** — the flow above plus a wrong-password 401, cursor paging with no
+  repeats, the self-transfer exclusion, cross-user isolation, four validation 422s and the
+  security headers. That covers what `TestClient` does not: real ASGI startup, middleware
+  order, multipart parsing, the Redis rate limiter and the real OpenAPI schema. Also
+  re-checked rule 3 against real server logs — no narration, amount, passphrase or token
+  in any of the 46 lines. Two README examples were wrong and are fixed: the
+  `column_mapping` field names (`date_column`, not `date`) and its header-label-only
+  nature. Dev database untouched by the run
+
 ## In progress
-- (nothing yet)
+- [ ] Step 10 (part B): the manual `/docs` run with the REAL ICICI statement —
+  `docs/phase-1-acceptance.md` Part B. Needs Dhruv: a synthetic fixture cannot catch a
+  column our own parser misread, because the fixture was written from the same reading.
+  The balance identity (opening − debits + credits == closing) is the check that settles it
 
 ## Next up
-- [ ] Step 10: End-to-end check with the real ICICI statement, README walkthrough
+- Close out Phase 1 once Part B passes, then plan Phase 2 (worker, PDF, categorization)
 
 ## Open decisions / questions
 - Git workflow → decided: `main` protected (ruleset `protect-main`); every change via a
