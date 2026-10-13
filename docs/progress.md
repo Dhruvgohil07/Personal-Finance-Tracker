@@ -76,6 +76,26 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   breakdown 0.69 ms, both with user_id + both date bounds inside the `Index Cond` of
   `ix_transactions_user_txn_date_id`; a 12-month breakdown is 8.75 ms
 
+- [x] Step 9 code review (`/code-review high` on PR #11, 1 finding) — fixed:
+  **`Month.parse` accepted a trailing newline.** `MONTH_PATTERN` is read by TWO regex
+  engines and they anchor differently: Pydantic compiles it with the Rust crate and applies
+  it as a SEARCH (so the `^...$` anchors are required), while Python's `re` treats `$` as
+  "end of string OR just before a trailing newline" (so `match` accepted `"2026-08\n"`).
+  `GET /insights/summary` was never affected — Pydantic answered 422 — but `Month.parse` is
+  a pure public function documented to validate, and `/insights/trend`,
+  `/budgets/status?month=` and the recurring cadences are all meant to reuse it. Fixed with
+  `fullmatch` (kept `$`: Rust spells end-of-string `\z`, Python `\Z`, so `$` is the only
+  anchor both understand). Added `test_the_schema_and_month_parse_agree_on_what_is_malformed`,
+  which runs one list of malformed values through BOTH validators so they cannot diverge
+  again; verified both new tests fail against the old `match`. 848 tests pass.
+  Three things the review checked and found correct, so they need no re-litigating: the
+  `ORDER BY amount_paise DESC` alias is unambiguous (Postgres resolves ORDER BY against
+  output names first; the plan confirms `Sort Key: (sum(t.amount_paise))`), the
+  `totals.get(month) or ...` idiom is safe (a dataclass has no `__bool__`/`__len__`, so a
+  zero-valued `PeriodTotals` is truthy), and the unscoped `LEFT JOIN categories` cannot
+  leak another user's category because `_set_category` is the only writer of
+  `transactions.category_id` and it goes through `categories_service.get_category`
+
 ## In progress
 - (nothing yet)
 
@@ -275,6 +295,21 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   `GET /transactions?category_id=&from=&to=`, so it is kept and the misleading comment in
   `app/models/transaction.py` was corrected. Second index in a row whose stated purpose
   did not survive `EXPLAIN` (the first was the trigram index in Step 8)
+- Step 9 → note (checked in the review, no change made): `date_trunc('month', txn_date)`
+  resolves to the **timestamptz** overload (the plan shows `(txn_date)::timestamp with time
+  zone`), so the grouping nominally runs in the session timezone. Tested across UTC,
+  Asia/Kolkata, UTC+14, UTC−12 and a DST zone with a midnight transition: the
+  date → timestamptz → truncate → date round trip returns the correct 1st in every case,
+  because the same zone is used for all three steps. Correct, not lucky — but
+  `txn_date::timestamp` would make it timezone-independent by construction. Decide if a
+  future month-grouped query (the trend endpoint) makes it worth the churn
+- Step 9 → open (raised in the review, not acted on): the `LEFT JOIN categories` in the
+  breakdown has no `user_id` predicate on `c`, so it relies on an invariant enforced in
+  another module (only `_set_category` writes `transactions.category_id`, and it validates
+  ownership). Safe today and no failing scenario exists. Phase 2's categorizer and
+  `POST /categories` must preserve it; adding
+  `AND (c.user_id IS NULL OR c.user_id = :user_id)` to the join would make the query
+  self-defending instead
 
 ## Tasks Dhruv implemented (historical — the practice ended 2026-10-12)
 From 2026-10-12 Claude completes every task in full; no new `TODO(dhruv)` items are
