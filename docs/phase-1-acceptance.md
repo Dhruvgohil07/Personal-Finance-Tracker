@@ -22,17 +22,59 @@ Two halves, because they prove different things:
 |---|---|
 | `ruff check` / `ruff format --check` | clean |
 | Full test suite (`pytest`) | **848 passed** |
-| Coverage | 99% overall; 100% of every module added in Phase 1 |
+| Coverage | 99% overall, branch coverage on; 100% of the five modules Step 9 added |
 | Live-server end-to-end flow, synthetic ICICI `.xls` | **73/73 checks** |
 
+**Coverage is 99%, not 100%, and the gap is in Phase 1 code.** Nine modules
+added during this phase still have uncovered lines:
+
+| Module | Step | Cover |
+|---|---|---|
+| `models/user.py`, `models/refresh_token.py` | 1 | 93% |
+| `services/auth.py` | 2 | 94% |
+| `core/rate_limit.py` | 3 | 94% |
+| `models/account.py` | 4 | 96% |
+| `services/accounts.py` | 4 | 97% |
+| `parsers/readers.py` | 6 | 97% |
+| `parsers/icici.py` | 6 | 99% |
+| `services/imports.py` | 7 | 98% |
+
+Inspected line by line, every uncovered line is a `__repr__`, a bare
+`raise` on an error path we re-raise, or a fallback `return ""` / `return
+None`. Nothing uncovered decides a money value, a `user_id` filter or a
+status code. That is reassuring but it is still not 100%, so it stays a
+Phase 2 cleanup item rather than something to round up here.
+
 The live run was driven against real `uvicorn` on `127.0.0.1:8111` with
-`DATABASE_URL` pointed at `kharcha_test`, so it exercised what the test
-suite's `TestClient` does not: real ASGI startup, real middleware order,
-real multipart parsing, the real Redis rate limiter, and the real OpenAPI
-schema. It covered register → login (including a wrong password → generic
-401) → create account → upload → re-upload (409) → list → page by cursor →
-categorize → both insights endpoints → self-transfer exclusion →
-cross-user isolation → validation errors → security headers.
+`DATABASE_URL` pointed at `kharcha_test`. It covered register → login
+(including a wrong password → generic 401) → create account → upload →
+re-upload (409) → list → page by cursor → categorize → both insights
+endpoints → self-transfer exclusion → cross-user isolation → validation
+errors → security headers.
+
+**What that adds over the test suite is almost nothing, and it is worth
+being precise about why.** The tempting claim is that a live server
+exercises things `TestClient` cannot — ASGI startup, middleware order,
+multipart parsing, the Redis rate limiter, the OpenAPI schema. Checked one
+by one, the committed tests already cover every one of them:
+
+| Supposedly unique to a live server | Already covered by |
+|---|---|
+| ASGI lifespan startup/shutdown | `test_app.py::test_app_starts_and_shuts_down_cleanly` (uses `with TestClient(...)`) |
+| Middleware order | `test_rate_limit.py::test_429_passes_through_the_other_middleware`, `test_app.py::test_cors_preflight_also_gets_security_headers` |
+| The real Redis rate limiter | `test_rate_limit.py` (real counters, plus a Redis-down case) |
+| Real multipart parsing | `test_uploads.py` (real multipart bodies, real Starlette parser) |
+| The OpenAPI schema | `test_app.py::test_health_is_listed_in_openapi_docs` |
+
+The only thing genuinely exclusive to Part A is the **HTTP transport**:
+uvicorn's own HTTP/1.1 parsing over a real socket, where `TestClient` calls
+the ASGI app in process. That is a thin layer and not ours.
+
+So Part A is an **independent end-to-end confirmation**, not extra
+coverage. Its value is that it was written separately from the test suite
+and agreed with it — a decent check that the suite is not passing because
+of how it sets itself up. `tests/integration/` remains the thing CI runs
+and the thing to keep.
 
 It also confirmed **rule 3** against real server logs: no narration,
 amount, passphrase or token appeared in any of the 46 log lines — only
