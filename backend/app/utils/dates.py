@@ -36,6 +36,20 @@ IST = timezone(timedelta(hours=5, minutes=30), name="IST")
 # The month part is restricted to 01-12 by the pattern itself, so a schema
 # can use it as a Pydantic `pattern=` and reject "2026-13" before any
 # Python runs.
+#
+# This one string is read by TWO different regex engines, which anchor
+# differently, so it is belt AND braces on purpose:
+#
+# - Pydantic compiles `pattern=` with the RUST regex crate and applies it
+#   as a SEARCH, so without the `^...$` anchors "xx2026-08xx" would pass.
+#   (Rust spells end-of-string `\z` and Python spells it `\Z`, so neither
+#   is portable between the two - `$` is the only anchor both understand.)
+# - Python's `re` understands `$` as "end of string, OR just before a
+#   trailing newline", so `_MONTH_RE.match("2026-08\n")` succeeds. That is
+#   why `Month.parse` below uses `fullmatch`, which additionally requires
+#   the whole string to be consumed.
+#
+# Drop either half and the two engines stop agreeing on what is valid.
 MONTH_PATTERN = r"^\d{4}-(0[1-9]|1[0-2])$"
 _MONTH_RE = re.compile(MONTH_PATTERN)
 
@@ -98,8 +112,13 @@ class Month:
         `ValueError` and not a custom exception: raised inside a Pydantic
         validator, a ValueError becomes our standard 422 naming the field
         (see app/core/errors.py), which is exactly the behaviour wanted.
+
+        `fullmatch`, not `match`: Python's `$` also matches just before a
+        trailing newline, so `match` would accept "2026-08\\n" even though
+        the pattern looks anchored. `fullmatch` additionally requires the
+        whole string to be consumed. See the note above `MONTH_PATTERN`.
         """
-        if _MONTH_RE.match(text) is None:
+        if _MONTH_RE.fullmatch(text) is None:
             raise ValueError("month must look like YYYY-MM, e.g. 2026-08")
         year, month = text.split("-")
         return cls(year=int(year), month=int(month))

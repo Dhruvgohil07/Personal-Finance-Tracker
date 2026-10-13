@@ -75,6 +75,13 @@ def test_parse_reads_a_yyyy_mm_string() -> None:
         "2026-08-01",  # a date, not a month
         "",
         " 2026-08 ",  # not stripped: a query parameter is stripped upstream
+        # Python's `$` also matches just before a trailing newline, so
+        # these only fail because `parse` uses `fullmatch` rather than
+        # `match`. Without that, "2026-08\n" parsed as August 2026.
+        "2026-08\n",
+        "2026-08\r\n",
+        "\n2026-08",
+        "2026-08\n2026-09",
     ],
 )
 def test_parse_rejects_anything_else(text: str) -> None:
