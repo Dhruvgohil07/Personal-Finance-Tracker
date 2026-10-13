@@ -1,7 +1,8 @@
 # Progress
 
 ## Current phase
-Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
+Phase 1 — Backend MVP: **COMPLETE** (plan: docs/plans/phase-1.md, acceptance:
+docs/phase-1-acceptance.md). Next: plan Phase 2.
 
 ## Completed
 - [x] Phase 0 — Foundation (config, logging, errors, money, DB + seed, /health, CI; plan: docs/plans/phase-0.md)
@@ -134,14 +135,47 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   re-upload, `expires_in: 900`, 25 categories, default limit 50, the refresh cookie's
   `path=/api/v1/auth`, every layout path, every doc link and the heading anchor
 
+- [x] Step 10 (part B): **PASSED on the real ICICI statement** (2026-08, account ...5606,
+  175 lines) — full results in `docs/phase-1-acceptance.md` §Outcome. 175 parsed / 175
+  inserted / 0 duplicate; identical re-upload 409; `/insights/summary` spend ₹99,036.54 and
+  income ₹74,414.50 EQUAL the file's own totals; the breakdown adds up; manual
+  categorization and the self-transfer rule behave as specified (20/20 endpoint checks).
+  The decisive check was the **balance chain**: `balance[n] − balance[n−1] == ±amount[n]`
+  across all 174 links in file order, so every amount and direction agrees with the bank's
+  running balance — a column the importer stores but never derives anything from. Opening
+  ₹1,11,541.33 and closing ₹86,919.29 confirmed by Dhruv against netbanking, which is the
+  one thing no check inside the file can do (the chain survives rows dropped from the start
+  or end of the table). NOT covered: the overlapping-statement case (only one export
+  exists) and dates (ascending across all 175 rows with 30 distinct dates, but a misread
+  date within the month would survive every check here)
+
+## Completed — Phase 1 is done
+All ten steps built, reviewed and merged; the acceptance run passed on the real statement.
+
+- [x] Coverage cleanup (post-Phase 1, 2026-10-13): **100% of statements AND branches**,
+  873 tests (was 99% / 848). 25 tests closed the 20 uncovered lines, and every one of them
+  tests the behaviour the line exists for rather than just touching it: the five model
+  `__repr__`s now assert that no email, nickname, account number or token hash can reach a
+  log (rule 3, new `tests/unit/test_model_reprs.py`); `_retry_after_seconds` answers None
+  with Redis down and never rounds to "Retry-After: 0"; an ICICI export trimmed to the five
+  REQUIRED header labels still imports (no "S No."/"Value Date" → `value_date` None);
+  an `#N/A` cell and a sheetless workbook are handled; login re-hashes a password stored
+  with weaker argon2 parameters; logout with an unknown token revokes NOTHING; a NOT NULL
+  or FK violation on register / PATCH /accounts / upload stays a 500 instead of being
+  reported as a 409 (three services, three real Postgres errors); and `python -m app.db.seed`
+  is run end to end. The only exclusion is the `if __name__ == "__main__":` guard, declared
+  once in `[tool.coverage.report]` (`backend/pyproject.toml`) — no `# pragma: no cover`
+  anywhere. Two of the new tests reach past the public function (a stubbed xlrd workbook,
+  a stubbed ownership lookup) and each says in its docstring why no real fixture can
+  produce the case
+
 ## In progress
-- [ ] Step 10 (part B): the manual `/docs` run with the REAL ICICI statement —
-  `docs/phase-1-acceptance.md` Part B. Needs Dhruv: a synthetic fixture cannot catch a
-  column our own parser misread, because the fixture was written from the same reading.
-  The balance identity (opening − debits + credits == closing) is the check that settles it
+- (nothing)
 
 ## Next up
-- Close out Phase 1 once Part B passes, then plan Phase 2 (worker, PDF, categorization)
+- Plan Phase 2 (RQ worker, PDF + password-protected statements, categorization chain §8,
+  merchants, UPI/VPA + channel extraction, balance reconciliation §6.4). Must be planned
+  and approved before any code (CLAUDE.md §17), then saved to docs/plans/phase-2.md (§19)
 
 ## Open decisions / questions
 - Git workflow → decided: `main` protected (ruleset `protect-main`); every change via a
@@ -351,6 +385,11 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   `POST /categories` must preserve it; adding
   `AND (c.user_id IS NULL OR c.user_id = :user_id)` to the join would make the query
   self-defending instead
+- Coverage gate in CI → open: the suite is at 100% (statements + branches) as of
+  2026-10-13, but nothing enforces it — CI runs `pytest --cov --cov-report=term-missing`
+  with no threshold. `fail_under = 100` in `[tool.coverage.report]` would hold the line,
+  at the cost of a red build for every new defensive branch until it is tested. Decide
+  when planning Phase 2
 
 ## Tasks Dhruv implemented (historical — the practice ended 2026-10-12)
 From 2026-10-12 Claude completes every task in full; no new `TODO(dhruv)` items are
@@ -397,9 +436,6 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
      sibling now compare against the message constants
 
 ## Known issues
-- **Coverage is 99%, not 100%, and nine Phase 1 modules carry the gap** (93%–99%; see the
-  table in `docs/phase-1-acceptance.md`). Mostly `__repr__` and defensive branches, but not
-  entirely. Worth a cleanup pass early in Phase 2 while the code is still fresh
 - `GET /insights/categories` over a WHOLE YEAR stops using the date bounds: at ~45% of a
   user's rows the planner reads everything for that user through a `user_id`-prefixed index
   and filters the dates from the heap (20 400 rows scanned, 11 220 discarded, 8.75 ms on
@@ -423,12 +459,39 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
   statements (indexes from different files are not comparable) and a newest-first statement
   reverses the meaning of the index, so the importer would have to normalize the sequence
   to chronological. The cursor would also have to carry the third key component (ADR 009).
-  Planned with Phase 2 balance reconciliation (SPEC §6.4), which needs the same ordering
-- Flaky once (2026-10-12): the first full `pytest` run after `docker compose up -d` failed
-  with 14 failures + 10 fixture errors, all in test_accounts.py; three later runs (and
-  test_accounts.py alone) are clean. Not reproduced and the output was not kept — suspect
-  the containers still warming up. If it happens again, save the failure output: a 429 in
-  there would point at the rate-limit reset racing a freshly started Redis
+  Planned with Phase 2 balance reconciliation (SPEC §6.4), which needs the same ordering.
+  **Upgraded from cosmetic to BLOCKING by the Part B run (2026-10-13).** A balance-chain
+  check (`balance[n] − balance[n−1] == ±amount[n]`) over the real statement read through
+  `GET /transactions` reported 151 of 174 links broken — purely because ~6 rows share each
+  day and came back shuffled. The same check in the parser's file order was 174/174. So the
+  stored `balance_after_paise` column is **unusable for reconciliation today**: SPEC §6.4
+  cannot be built until the row sequence is stored, which makes migration 0006 a
+  PREREQUISITE of §6.4 rather than a nicety alongside it. It also means any future
+  reconciliation test must order by the stored sequence, never by `(txn_date, id)`
+- **SOLVED (2026-10-13): the "flaky integration tests" are TWO pytest runs sharing one
+  test database.** Reproduced while Dhruv was running the suite in his editor and Claude
+  ran it too: 8 failures + 7 errors, and the run took **454 s instead of the usual ~62 s**.
+  A solo run immediately after was 871 passed in 62 s. The diagnosis is in the captured
+  output: `relation "users" does not exist` mid-run, plus `409` where a `201` was expected
+  (a previous test's user still present) and `401`s. Only one statement in this codebase
+  drops that relation — `DROP SCHEMA public CASCADE` in the session-scoped
+  `migrated_engine` fixture — so a second session was tearing the schema down underneath
+  the first. pytest-xdist is not installed, so it cannot be parallel workers within one run.
+  The earlier guess (2026-10-12: "containers still warming up", with a 429 from the
+  rate-limit reset as the suspected cause) was **wrong**: the captured output contains only
+  2 mentions of "429" and both are the rate-limit tests' own assertions.
+  Seen a second time the same day, from the other side: a Claude run of test_accounts.py
+  stopped making progress entirely. `pg_stat_activity` + `pg_blocking_pids()` showed why —
+  the per-test teardown `TRUNCATE` needs ACCESS EXCLUSIVE on every table, so it queued
+  behind the other run's connection sitting `idle in transaction`, and then blocked that
+  run's next query in turn. Nothing sets `lock_timeout`, so the wait is unbounded: the
+  shared database shows up either as wrong data (409s, a dropped schema) or as a run that
+  simply hangs.
+  **Consequence: do not run `pytest` in two places at once.** If that becomes a real
+  constraint, give each run its own database (`TEST_DATABASE_URL` with a per-run suffix) or
+  its own schema; a lock would just serialize them. Worth doing before CI ever runs two
+  jobs against one Postgres service. A `lock_timeout` on the teardown connection would at
+  least turn the hang into an immediate, readable failure
 - Uploads: Starlette buffers a multipart body over ~1 MB into a temporary file before the
   route runs, so an oversized upload briefly touches the disk before the 413 (the temp file
   is deleted when the request ends). Rejecting it earlier needs a Content-Length check in
