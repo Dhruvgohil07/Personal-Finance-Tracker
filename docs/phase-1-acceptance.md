@@ -21,29 +21,30 @@ Two halves, because they prove different things:
 | Check | Result |
 |---|---|
 | `ruff check` / `ruff format --check` | clean |
-| Full test suite (`pytest`) | **848 passed** |
-| Coverage | 99% overall, branch coverage on; 100% of the five modules Step 9 added |
+| Full test suite (`pytest`) | **all passing** (848 at the time of the run, and growing) |
+| Coverage | **100%** of statements and branches (99% at the time of the run; closed 2026-10-13) |
 | Live-server end-to-end flow, synthetic ICICI `.xls` | **73/73 checks** |
 
-**Coverage is 99%, not 100%, and the gap is in Phase 1 code.** Nine modules
-added during this phase still have uncovered lines:
+**Coverage was 99% at the acceptance run. The gap is now closed.** Every
+uncovered line was a `__repr__`, a bare `raise` on an error path we
+re-raise, or a fallback `return ""` / `return None` — nothing that decided
+a money value, a `user_id` filter or a status code. They are now tested
+rather than excused: `tests/unit/test_model_reprs.py` is new, and
+`test_rate_limit_keys.py`, `test_readers.py`, `test_icici.py`,
+`test_auth.py`, `test_accounts.py`, `test_uploads.py` and `test_seed.py`
+gained the missing cases (873 tests, **100% of statements and branches**).
 
-| Module | Step | Cover |
-|---|---|---|
-| `models/user.py`, `models/refresh_token.py` | 1 | 93% |
-| `services/auth.py` | 2 | 94% |
-| `core/rate_limit.py` | 3 | 94% |
-| `models/account.py` | 4 | 96% |
-| `services/accounts.py` | 4 | 97% |
-| `parsers/readers.py` | 6 | 97% |
-| `parsers/icici.py` | 6 | 99% |
-| `services/imports.py` | 7 | 98% |
+The single deliberate exclusion is the `if __name__ == "__main__":` guard
+in `app/db/seed.py`: a script entry point cannot run inside the test
+process, and the `main()` it calls is itself tested. It is declared in
+`[tool.coverage.report]` in `backend/pyproject.toml`, so the exclusion is
+one visible line rather than a scattering of `# pragma: no cover`.
 
-Inspected line by line, every uncovered line is a `__repr__`, a bare
-`raise` on an error path we re-raise, or a fallback `return ""` / `return
-None`. Nothing uncovered decides a money value, a `user_id` filter or a
-status code. That is reassuring but it is still not 100%, so it stays a
-Phase 2 cleanup item rather than something to round up here.
+No per-module table is written here, for the reason this document already
+learned once: **`pytest --cov --cov-report=term-missing` is the live source
+of truth**, and a number copied into prose is a claim that rots. What
+matters for acceptance is the shape of the gap, not its size — and nothing
+on a money, ownership or status-code path is untested.
 
 The live run was driven against real `uvicorn` on `127.0.0.1:8111` with
 `DATABASE_URL` pointed at `kharcha_test`. It covered register → login
@@ -87,7 +88,12 @@ method, path, status, duration and request id.
 
 ---
 
-## Part B — the real statement (for Dhruv)
+## Part B — the real statement
+
+> **PASSED, 2026-10-13.** Run against the real ICICI `.xls` for August 2026
+> (175 transaction lines, account ending 5606). Results below, in
+> [Outcome](#outcome). The checklist is kept as written so Phase 2 can
+> re-run it after the worker and the PDF parser land.
 
 **Before you start.** Use your development database, not the test one —
 the test database is wiped by every `pytest` run.
@@ -196,10 +202,66 @@ amount is misread, a row is missed, or a direction is flipped.
 
 | | |
 |---|---|
-| Run on | _(date)_ |
-| Statement | _(bank, period, row count — never the file itself)_ |
-| Result | _(pass, or what differed)_ |
+| Run on | 2026-10-13 |
+| Statement | ICICI savings, account ending 5606, 2026-08-01 → 2026-08-31, 175 transaction lines |
+| Result | **PASS** |
 
-Anything that does not match: give me the **counts, dates and the
+### What was checked, and how
+
+| Step | Result |
+|---|---|
+| B2 account | `account_last4` read as **5606**; confirmed as the real account by the balance match below |
+| B3 upload | `completed`, period `2026-08-01 … 2026-08-31`, **175 parsed / 175 inserted / 0 duplicate** |
+| B4 balance chain | **holds for all 174 links** |
+| B4 identity | ₹1,11,541.33 − ₹99,036.54 + ₹74,414.50 = ₹86,919.29 = closing, exactly |
+| B4 netbanking | opening and closing **confirmed by Dhruv** against netbanking |
+| B5 re-upload | identical file → **409 CONFLICT**; a second user *can* upload it (sha is unique per user, not globally) |
+| B6 categorize | `category_source: user_manual`; the row moved category and the total was unchanged; a `transfer` category set `is_self_transfer` and spend dropped by exactly that row |
+| B7 summary | spend ₹99,036.54 and income ₹74,414.50 **equal the file's own totals**; count 175; `previous` = `2026-07` with `null` change percentages |
+| B7 breakdown | `total_spend_paise` equals spend; the parts add up; one `category_id: null` bucket at 100% before categorizing |
+
+**The decisive check was the balance chain, not the row count.** The
+statement carries the bank's running balance, which the importer stores but
+never uses to *derive* anything, so for consecutive rows in file order:
+
+    balance[n] - balance[n-1]  ==  +amount (credit)  or  -amount (debit)
+
+That held for all 174 links. A misread amount, a flipped direction, or a
+dropped or duplicated interior row would each have broken it — so every
+amount and every direction we parsed agrees with independent data inside
+the file. What the chain *cannot* catch is rows dropped from the very start
+or end of the table, which is why the opening and closing balances were
+confirmed against netbanking separately.
+
+### Two things the run did not cover
+
+- **The overlapping-statement case** (the second half of B5) needs a
+  second export covering an overlapping period; only one file exists. The
+  behaviour is covered by
+  `test_an_overlapping_statement_inserts_only_new_rows`, but not against
+  real data.
+- **Dates** are not verified by the chain. They were ascending across all
+  175 rows, with 30 distinct dates in a 31-day month, which is strong
+  circumstantial evidence — but a date misread *within* the month would
+  survive every check here.
+
+### A false alarm worth remembering
+
+The chain check first reported **151 of 174 links broken**. That was the
+checker's bug, not the importer's: it ordered rows by `(txn_date, id)` as
+`GET /transactions` returns them, and ids are UUIDv4 with nothing storing
+the statement's row order — so with ~6 rows a day, most consecutive pairs
+were shuffled within a day. Re-run in the parser's own file order, it was
+174/174.
+
+That is the "same-day ordering" item in `docs/progress.md`, and this
+upgrades it from cosmetic to blocking: **the balance column is unusable for
+reconciliation until the statement's row sequence is stored**, which makes
+it a prerequisite for SPEC §6.4 balance reconciliation in Phase 2, not an
+independent nicety.
+
+---
+
+Anything that does not match on a future run: give **counts, dates and the
 mismatching field**, never the statement or a narration from it. Real bank
 data stays in `samples/`, which is gitignored (CLAUDE.md rule 8).
