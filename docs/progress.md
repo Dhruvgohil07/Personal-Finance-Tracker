@@ -104,12 +104,35 @@ Phase 1 — Backend MVP (plan: docs/plans/phase-1.md)
   :8111 with `DATABASE_URL` pointed at `kharcha_test`, synthetic ICICI `.xls`):
   **73/73 checks** — the flow above plus a wrong-password 401, cursor paging with no
   repeats, the self-transfer exclusion, cross-user isolation, four validation 422s and the
-  security headers. That covers what `TestClient` does not: real ASGI startup, middleware
-  order, multipart parsing, the Redis rate limiter and the real OpenAPI schema. Also
-  re-checked rule 3 against real server logs — no narration, amount, passphrase or token
-  in any of the 46 lines. Two README examples were wrong and are fixed: the
-  `column_mapping` field names (`date_column`, not `date`) and its header-label-only
-  nature. Dev database untouched by the run
+  security headers. Also re-checked rule 3 against real server logs — no narration,
+  amount, passphrase or token in any of the 46 lines. Two README examples were wrong and
+  are fixed: the `column_mapping` field names (`date_column`, not `date`) and its
+  header-label-only nature. Dev database untouched by the run
+
+- [x] Step 10 code review (`/code-review high` on PR #12, 2 findings) — both fixed. The
+  diff was docs-only, so the review verified the factual claims against the code instead,
+  and two of mine were wrong:
+  1. **"100% of every module added in Phase 1" was false.** A coverage run shows nine
+     Phase 1 modules below 100% (lowest 93%: `models/user.py`,
+     `models/refresh_token.py`). The 100% figure is true only of the five modules Step 9
+     added. `docs/phase-1-acceptance.md` now carries the real per-module table
+  2. **The live run's value over `TestClient` was overstated.** I claimed it uniquely
+     exercised ASGI startup, middleware order, multipart parsing, the Redis rate limiter
+     and the OpenAPI schema. Checking each one: **all five are already covered** by the
+     committed tests (`test_app_starts_and_shuts_down_cleanly` uses
+     `with TestClient(...)` so lifespan does run; `test_429_passes_through_the_other_middleware`
+     and `test_cors_preflight_also_gets_security_headers` assert middleware order;
+     `test_rate_limit.py` drives the real Redis limiter; `test_uploads.py` posts real
+     multipart; `test_health_is_listed_in_openapi_docs` fetches `/openapi.json`). The only
+     thing exclusive to the live run is uvicorn's HTTP/1.1 parsing over a real socket. Part
+     A is therefore an INDEPENDENT confirmation, not extra coverage — its worth is that it
+     was written separately and agreed. Corrected in both places the claim appeared.
+     Note: my first attempt at this fix was also wrong (it claimed lifespan was uncovered),
+     which is what checking `tests/unit/test_app.py` instead of asserting caught
+  Everything else in the walkthrough checked out against the code: the 5/min/IP and
+  10/hour/user limits, the 400 for a PDF and for an account-number mismatch, the 409 on a
+  re-upload, `expires_in: 900`, 25 categories, default limit 50, the refresh cookie's
+  `path=/api/v1/auth`, every layout path, every doc link and the heading anchor
 
 ## In progress
 - [ ] Step 10 (part B): the manual `/docs` run with the REAL ICICI statement —
@@ -374,6 +397,9 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
      sibling now compare against the message constants
 
 ## Known issues
+- **Coverage is 99%, not 100%, and nine Phase 1 modules carry the gap** (93%–99%; see the
+  table in `docs/phase-1-acceptance.md`). Mostly `__repr__` and defensive branches, but not
+  entirely. Worth a cleanup pass early in Phase 2 while the code is still fresh
 - `GET /insights/categories` over a WHOLE YEAR stops using the date bounds: at ~45% of a
   user's rows the planner reads everything for that user through a `user_id`-prefixed index
   and filters the dates from the heap (20 400 rows scanned, 11 220 discarded, 8.75 ms on
