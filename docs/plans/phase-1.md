@@ -242,3 +242,37 @@ stage and a proposed commit. Stop after each step for review.
      index serves `q=` was corrected everywhere after measuring that it does not. The fifth
      finding — same-day rows ordered by random UUID instead of statement order — needs a
      migration and is listed in docs/progress.md for Phase 2.
+- **Step 9 (done):** five differences from the planned shape.
+  1. **A pure date module was added** (`app/utils/dates.py`), which the plan did not
+     foresee. Both endpoints need "the current month" and the summary needs "the month
+     before this one", and neither is something to re-derive at each call site: February's
+     length and the fact that the month before January is in the previous year are exactly
+     the kind of arithmetic that is wrong once and then quietly wrong forever. `Month` is a
+     frozen, ordered, hashable value object, which is also what lets the service index two
+     months of SQL rows by month instead of trusting the row order. "Today" is read in
+     Asia/Kolkata (rule 10) through a **fixed UTC+05:30 offset** rather than
+     `zoneinfo.ZoneInfo`: India has observed no DST since 1945, and a fixed offset needs no
+     `tzdata` package on Windows.
+  2. **Both query models' parameters are optional**, defaulting to the current month. The
+     plan wrote them as `?month=YYYY-MM` and `?from&to`. A dashboard's first request has no
+     parameters, so a required one would mean the client has to know today's date in IST
+     before it can ask anything. `from`/`to` are both-or-neither, because defaulting only
+     the missing half turns `?to=<a past date>` into a silently empty range.
+  3. **Step 8's query-parameter rules were extracted into a shared base**
+     (`QueryFilters` in `app/schemas/common.py`): unknown parameter → 422, blank value →
+     "not sent". Two query models would otherwise have carried the same 20-line validator,
+     and the second copy is where they drift apart.
+  4. **The service returns dataclasses, and `SUM()` is converted with `int()`.** Postgres
+     widens `SUM(bigint)` to `numeric` so a total cannot overflow, so the driver returns a
+     `Decimal` — and `format_inr` rejects anything that is not an `int` (ADR 001), so an
+     unconverted value would have been a 500 in a reporting endpoint. Converting in Python
+     keeps the overflow safety; a `::bigint` cast in SQL would have discarded it.
+  5. **ADR 010 records a disproven index.** SPEC §9.1 asks for `EXPLAIN ANALYZE`
+     verification, and it showed that `ix_transactions_user_category_date` — added in
+     Step 7 with the comment "spend per category over a period (SPEC §9.1 insights)" —
+     cannot serve the breakdown at all, because that query groups by category rather than
+     filtering to one. It is used in full by Step 8's
+     `GET /transactions?category_id=&from=&to=` instead, so it is kept and the comment was
+     corrected. The tests were also checked by **mutation**: four deliberate breakages of
+     the SQL (no self-transfer filter, no `user_id` filter, an exclusive range end, an
+     inner join) each fail the tests that are supposed to catch them.
