@@ -8,17 +8,19 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from argon2 import PasswordHasher
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import Response
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from structlog.testing import capture_logs
 
 from app.api.deps import CurrentUser
-from app.core.security import create_access_token
+from app.core.security import create_access_token, password_needs_rehash, verify_password
 from app.models import RefreshToken, User
-from app.services.auth import REUSE_GRACE_PERIOD
+from app.services.auth import REUSE_GRACE_PERIOD, register_user
 
 pytestmark = pytest.mark.integration
 
@@ -142,6 +144,26 @@ def test_register_rejects_invalid_input(client: TestClient, body: dict[str, str]
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
+def test_a_non_duplicate_integrity_error_on_register_is_not_a_409(db: Session) -> None:
+    """Only the email constraint means "this email is taken".
+
+    This calls the service directly, because the route cannot produce it:
+    `name` is required and non-blank by Pydantic, so no request gets this
+    far. That is exactly why the test exists - a future caller (an admin
+    tool, a seed script) that hits some other constraint must get a 500,
+    not a 409 blaming the user's email.
+    """
+    with pytest.raises(IntegrityError) as excinfo:
+        register_user(db, email=EMAIL, password=PASSWORD, name=None)
+
+    # A NOT NULL violation names a column, not a constraint, so
+    # violates_constraint() answers False and the error travels on.
+    assert excinfo.value.orig is not None
+    assert excinfo.value.orig.diag.column_name == "name"
+    # The service rolled back, so the half-written user is gone.
+    assert db.scalar(select(User).where(User.email == EMAIL)) is None
+
+
 # --- Login ------------------------------------------------------------------
 
 
@@ -197,6 +219,35 @@ def test_login_logs_contain_no_email_or_password(client: TestClient) -> None:
 
 
 # --- get_current_user -------------------------------------------------------
+
+
+def test_login_upgrades_a_hash_made_with_weaker_settings(client: TestClient, db: Session) -> None:
+    """Logging in re-hashes a password stored with older argon2 parameters.
+
+    If we ever raise the cost parameters, existing hashes stay weak - and
+    login is the only moment we hold the plain password, so it is the only
+    place that can upgrade them. The user whose row is written here was
+    hashed with deliberately cheap settings, standing in for "hashed by an
+    older version of this app".
+    """
+    weak_hasher = PasswordHasher(time_cost=1, memory_cost=8, parallelism=1)
+    weak_hash = weak_hasher.hash(PASSWORD)
+    db.add(User(email=EMAIL, password_hash=weak_hash, name="Dhruv"))
+    db.commit()
+    assert password_needs_rehash(weak_hash)  # the precondition of the test
+
+    assert _login(client).status_code == 200
+
+    # expire_all(): this session cached the row it just wrote, and the
+    # UPDATE happened in the request's own session.
+    db.expire_all()
+    user = db.scalar(select(User).where(User.email == EMAIL))
+    assert user is not None
+    assert user.password_hash != weak_hash
+    assert not password_needs_rehash(user.password_hash)
+    # The upgrade must not lock the user out: the same password still works.
+    assert verify_password(PASSWORD, user.password_hash)
+    assert _login(client).status_code == 200
 
 
 def test_protected_route_accepts_valid_access_token(protected_client: TestClient) -> None:
@@ -365,6 +416,23 @@ def test_logout_clears_cookie(client: TestClient) -> None:
 
 def test_logout_without_cookie_still_succeeds(client: TestClient) -> None:
     assert client.post(LOGOUT).status_code == 204
+
+
+def test_logout_with_an_unknown_token_changes_nothing(client: TestClient, db: Session) -> None:
+    """A made-up or long-expired cookie: still a 204, and still a no-op.
+
+    The important half is the second one. Logout revokes a whole token
+    family, so a token it cannot find must revoke NOTHING - a bug that
+    logged everyone out would otherwise pass as "logout works".
+    """
+    _, real_token = _registered_and_logged_in(client)
+
+    assert _post_with_refresh_cookie(client, LOGOUT, "made-up-token").status_code == 204
+
+    rows = db.scalars(select(RefreshToken)).all()
+    assert len(rows) == 1
+    assert rows[0].revoked_at is None
+    assert _post_with_refresh_cookie(client, REFRESH, real_token).status_code == 200
 
 
 def test_refresh_after_logout_is_401(client: TestClient, db: Session) -> None:

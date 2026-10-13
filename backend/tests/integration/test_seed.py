@@ -1,10 +1,11 @@
 """The seed is idempotent, and the database enforces category uniqueness."""
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import Engine, func, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
+from app.db import seed
 from app.db.seed import run_seed
 from app.db.seed_data import COMMON_MERCHANTS, SYSTEM_CATEGORIES
 from app.models import Category, CategoryKind, Merchant
@@ -68,3 +69,22 @@ def test_unknown_kind_is_rejected_by_check_constraint(db: Session) -> None:
             text("INSERT INTO categories (name, slug, kind) VALUES (:name, :slug, :kind)"),
             {"name": "Bad", "slug": "bad", "kind": "gift"},
         )
+
+
+def test_main_seeds_the_database(
+    db: Session, migrated_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`python -m app.db.seed`, the way a developer or a deploy runs it.
+
+    `main()` is the only part of the module the tests above skip: it
+    configures logging, opens a session and calls `run_seed`. Its session
+    factory is repointed at the test database, because `SessionLocal` is
+    bound to DATABASE_URL - the DEVELOPMENT database, which no test may
+    write to.
+    """
+    monkeypatch.setattr(seed, "SessionLocal", sessionmaker(bind=migrated_engine))
+
+    seed.main()
+
+    assert count(db, Category) == len(SYSTEM_CATEGORIES)
+    assert count(db, Merchant) == len(COMMON_MERCHANTS)

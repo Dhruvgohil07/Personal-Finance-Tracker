@@ -15,7 +15,7 @@ from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import Account, AccountType, BankCode, User
-from app.schemas.account import AccountCreate
+from app.schemas.account import AccountCreate, AccountUpdate
 from app.services import accounts as accounts_service
 
 pytestmark = pytest.mark.integration
@@ -399,6 +399,38 @@ def test_non_duplicate_integrity_error_is_not_a_409(db: Session) -> None:
 
     assert excinfo.value.orig is not None
     assert excinfo.value.orig.diag.constraint_name == "fk_accounts_user_id_users"
+
+
+def test_non_duplicate_integrity_error_on_update_is_not_a_409(db: Session) -> None:
+    """PATCH maps only its OWN unique constraint to 409, like create does.
+
+    `model_construct` builds the body WITHOUT running Pydantic's
+    validation, so `{"nickname": null}` gets past the `_not_null` validator
+    in AccountUpdate - which is the exact thing that validator exists to
+    stop (see its comment). This is what happens without it: the NULL
+    reaches a NOT NULL column and the database refuses the UPDATE.
+
+    The point of the test is the mapping, not the NULL: that error must
+    travel on as a 500, and never be reported as "you already have this
+    account".
+    """
+    user = _make_user(db)
+    _add_account(db, user)
+    db.commit()
+    account = db.scalars(select(Account)).one()
+
+    body = AccountUpdate.model_construct(nickname=None)
+    with pytest.raises(IntegrityError) as excinfo:
+        accounts_service.update_account(db, user.id, account.id, body)
+
+    # A NOT NULL violation names a column, not a constraint, so
+    # violates_constraint() answers False and the error is re-raised.
+    assert excinfo.value.orig is not None
+    assert excinfo.value.orig.diag.constraint_name is None
+    assert excinfo.value.orig.diag.column_name == "nickname"
+    # The service rolled back, so the account still has its nickname.
+    db.expire_all()
+    assert db.scalars(select(Account)).one().nickname == "x"
 
 
 def test_deleting_user_deletes_their_accounts(db: Session) -> None:

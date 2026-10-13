@@ -351,6 +351,41 @@ def test_an_inr_suffix_change_still_matches(tmp_path: Path) -> None:
     assert len(statement.rows) == len(DEFAULT_ROWS) - 1
 
 
+def test_an_export_with_only_the_required_columns_is_read(tmp_path: Path) -> None:
+    """ "S No." and "Value Date" are optional columns.
+
+    Only five labels make a row the header (`_REQUIRED_LABELS`), so an
+    export trimmed to those five is still an ICICI statement and must still
+    import. Every cell is looked up by label, so a missing column reads as
+    an empty cell instead of shifting the remaining ones: the amounts here
+    would be read from the wrong columns if the parser counted positions.
+    """
+    labels = (
+        "Transaction Date",
+        "Transaction Remarks",
+        "Withdrawal Amount(INR)",
+        "Deposit Amount(INR)",
+        "Balance(INR)",
+    )
+    rows = (
+        ("01/08/2026", "UPI/TESTSHOP/PAY", "70.00", "0.00", "111471.33"),
+        ("03/08/2026", "NEFT-SALARY-ACME", "0.00", "50000.00", "161431.33"),
+    )
+
+    data = read(tmp_path, header_labels=labels, rows=rows)
+    statement = IciciXlsParser().parse(data)
+
+    assert IciciXlsParser().detect(data) == 0.95
+    assert [row.amount_paise for row in statement.rows] == [7000, 5000000]
+    assert [row.direction for row in statement.rows] == [Direction.DEBIT, Direction.CREDIT]
+    # No "Value Date" column: the field stays None rather than borrowing the
+    # transaction date, which would invent a value the file never gave.
+    assert [row.value_date for row in statement.rows] == [None, None]
+    # The balances still line up: 111471.33 + 70.00 opening, 161431.33 closing.
+    assert statement.opening_balance_paise == 11154133
+    assert statement.closing_balance_paise == 16143133
+
+
 def test_a_footer_row_without_a_date_ends_the_table(tmp_path: Path) -> None:
     """Not every footer says "Legends": a total row has no date and no
     narration, so it ends the table too."""

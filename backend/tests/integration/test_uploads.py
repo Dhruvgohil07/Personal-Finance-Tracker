@@ -28,11 +28,12 @@ import structlog
 from fastapi.testclient import TestClient
 from httpx import Response
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.errors import PayloadTooLargeError
-from app.models import StatementUpload, Transaction
+from app.models import Account, StatementUpload, Transaction
 from app.parsers.base import Direction
 from app.services import imports as imports_service
 from tests.fixtures.icici_xls import build_icici_xls
@@ -685,6 +686,55 @@ def test_a_simultaneous_duplicate_upload_is_a_conflict(
 
     assert second.status_code == 409
     assert second.json()["error"]["code"] == "CONFLICT"
+
+
+def test_an_integrity_error_that_is_not_a_duplicate_file_is_not_a_409(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    db: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the test above: only the file-hash constraint is a 409.
+
+    The race it stands in for is a real one - the account is deleted (a
+    second tab, or DELETE /me) after the ownership check and before the
+    INSERT, so the upload row points at an account that no longer exists.
+    Staging it needs the ownership check to hand back an account the
+    database does not have, which is what the stub below does; the
+    IntegrityError itself then comes from Postgres, with the real
+    constraint name our mapping reads.
+
+    It must stay a 500. A 409 here would tell the user "you already
+    uploaded this file" about a file they have never uploaded.
+    """
+    owned = db.scalars(select(Account).where(Account.id == uuid.UUID(account_id))).one()
+    vanished = Account(
+        id=uuid.uuid4(),  # no such row
+        user_id=owned.user_id,
+        bank_code=owned.bank_code,
+        nickname=owned.nickname,
+        account_type=owned.account_type,
+        masked_number=owned.masked_number,
+    )
+    monkeypatch.setattr(imports_service.accounts_service, "get_account", lambda *_args: vanished)
+
+    with pytest.raises(IntegrityError) as excinfo:
+        imports_service.import_statement(
+            db,
+            owned.user_id,
+            account_id=vanished.id,
+            filename="statement.xls",
+            content=statement_bytes(tmp_path),
+        )
+
+    assert excinfo.value.orig is not None
+    assert excinfo.value.orig.diag.constraint_name == "fk_statement_uploads_account_id_accounts"
+    # Rolled back: a failed import leaves nothing behind (ADR 008).
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(StatementUpload)) == 0
+    assert count_transactions(db) == 0
 
 
 # --- Generic CSV + column mapping -------------------------------------------
