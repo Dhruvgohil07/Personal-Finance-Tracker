@@ -1,8 +1,9 @@
 # Progress
 
 ## Current phase
-Phase 1 — Backend MVP: **COMPLETE** (plan: docs/plans/phase-1.md, acceptance:
-docs/phase-1-acceptance.md). Next: plan Phase 2.
+Phase 2 — Real-world imports (plan: docs/plans/phase-2.md, approved 2026-10-14).
+Phase 1 — Backend MVP is COMPLETE (plan: docs/plans/phase-1.md, acceptance:
+docs/phase-1-acceptance.md).
 
 ## Completed
 - [x] Phase 0 — Foundation (config, logging, errors, money, DB + seed, /health, CI; plan: docs/plans/phase-0.md)
@@ -169,13 +170,19 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   a stubbed ownership lookup) and each says in its docstring why no real fixture can
   produce the case
 
+## Completed — Phase 2
+- [x] Step 0: Phase 2 plan approved and saved — docs/plans/phase-2.md (11 steps; P2P
+  detection pulled forward from Phase 4; password PDFs unlocked in the request with
+  `pypdf`; `q=` search/trigram index deferred to Phase 3)
+
 ## In progress
 - (nothing)
 
 ## Next up
-- Plan Phase 2 (RQ worker, PDF + password-protected statements, categorization chain §8,
-  merchants, UPI/VPA + channel extraction, balance reconciliation §6.4). Must be planned
-  and approved before any code (CLAUDE.md §17), then saved to docs/plans/phase-2.md (§19)
+- Phase 2 Step 1: upload lifecycle schema + file encryption — migration 0006
+  (`upload_blobs`, partial unique index on `file_sha256` excluding `failed`),
+  `app/core/crypto.py` (AES-256-GCM), `fail_under = 100`, ADRs 011 + 012
+- Steps 9–10 (ICICI PDF, password PDFs) are blocked until the ICICI PDF is in `samples/`
 
 ## Open decisions / questions
 - Git workflow → decided: `main` protected (ruleset `protect-main`); every change via a
@@ -342,8 +349,8 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   `/insights/categories`, via `LEFT JOIN`, so the parts always add up to the total. Open:
   it is named "Uncategorized", which is also the name of a SEEDED system category (SPEC §8's
   explicit "looked, nothing fits"), so both can appear as separate rows — distinguishable
-  by `category_id` being null. Revisit the naming in Phase 2 when the categorizer starts
-  using the seeded one
+  by `category_id` being null. Decided in the Phase 2 plan: the categorizer leaves
+  "nothing matched" rows NULL, and the null bucket is renamed "Not categorized yet" (Step 6)
 - Step 9 → decided: `SUM()` over a BIGINT column returns NUMERIC (Postgres refuses to
   overflow silently), so the driver hands back a `Decimal`; it is converted with `int()` at
   the service boundary rather than cast `::bigint` in SQL, which would throw that
@@ -385,7 +392,8 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   `POST /categories` must preserve it; adding
   `AND (c.user_id IS NULL OR c.user_id = :user_id)` to the join would make the query
   self-defending instead
-- Coverage gate in CI → open: the suite is at 100% (statements + branches) as of
+- Coverage gate in CI → decided in the Phase 2 plan: `fail_under = 100` lands in Phase 2
+  Step 1. Background: the suite is at 100% (statements + branches) as of
   2026-10-13, but nothing enforces it — CI runs `pytest --cov --cov-report=term-missing`
   with no threshold. `fail_under = 100` in `[tool.coverage.report]` would hold the line,
   at the cost of a red build for every new defensive branch until it is tested. Decide
@@ -449,8 +457,8 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
   discarded, ~7 ms) while a common one is answered from the keyset index (~0.2 ms). Fine at
   personal-finance size. If search gets slow the fix is a different OPERATOR
   (`word_similarity` / `<%`, which does use the index with a parameter) or a tsvector
-  column. Until that is decided the index only costs write time — decide in Phase 2 whether
-  to switch the search or drop it
+  column. Until that is decided the index only costs write time. Phase 2 plan: deferred to
+  Phase 3, when the frontend has a search box
 - Transactions on the SAME DAY come back in random order: the sort key is
   `(txn_date DESC, id DESC)` and ids are UUIDv4, so `balance_after_paise` looks
   non-monotonic when comparing a day against the paper statement. Nothing stores the
