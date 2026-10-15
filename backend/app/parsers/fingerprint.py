@@ -6,9 +6,10 @@ re-importing them must not create duplicate rows (CLAUDE.md rule 5).
 
 Two levels of protection:
 
-- Level 1, the whole file: `statement_uploads` has `unique(user_id,
-  file_sha256)`, so uploading the *exact same file* twice is rejected
-  immediately (Step 7).
+- Level 1, the whole file: `statement_uploads` has a unique index on
+  `(user_id, file_sha256)`, so uploading the *exact same file* twice is
+  rejected immediately (Step 7). Failed uploads are left out of it, so a
+  file whose import failed can be tried again (ADR 011).
 - Level 2, each row: this module. Every transaction gets a `fingerprint` -
   a sha256 of the fields that identify it - and `transactions` has
   `unique(account_id, fingerprint)`. Step 7 inserts with
