@@ -95,7 +95,8 @@ def make_owner(
         account_id=account_id,
         original_filename="statement.xls",
         file_type=FileType.XLS,
-        # unique(user_id, file_sha256), and one upload per user here.
+        # Unique per user among live uploads (the file-hash index, ADR 011),
+        # and one upload per user here.
         file_sha256=uuid.uuid4().hex * 2,
         status=UploadStatus.COMPLETED,
     )

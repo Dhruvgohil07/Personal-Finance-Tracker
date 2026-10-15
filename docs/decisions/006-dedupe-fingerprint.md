@@ -32,6 +32,10 @@ Two independent levels, as SPEC §6.3 describes.
 rejected with 409 before anything is parsed. Cheap, and it catches the
 most common case.
 
+> **Amended by ADR 011 (2026-10-15):** level 1 is now a *partial* unique
+> index that leaves out `failed` uploads, so a file whose import failed
+> can be uploaded again. Level 2 below is unchanged.
+
 **Level 2 — each row.** Every transaction gets a `fingerprint`: the hex
 sha256 of its identifying fields joined with `|`.
 
