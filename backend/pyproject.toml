@@ -90,3 +90,11 @@ branch = true
 # report at a real 100% instead of a permanent one-line gap that hides the
 # next real one.
 exclude_also = ['if __name__ == "__main__":']
+# Fail the run if coverage drops below 100% (statements AND branches, since
+# `branch = true` above). Decided in the Phase 2 plan: the suite reached a
+# real 100% on 2026-10-13, and without a threshold nothing stops the next
+# untested branch from slipping in quietly. CI runs `pytest --cov`, so a gap
+# turns the build red. Only applies when coverage is measured: a plain
+# `pytest`, or a partial run with `-m "not integration"`, is not affected
+# unless `--cov` is passed too.
+fail_under = 100
