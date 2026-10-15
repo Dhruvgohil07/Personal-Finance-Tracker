@@ -14,11 +14,13 @@ because what is being tested is the schema, not the endpoints. The
 endpoint-level version of the second point is in test_uploads.py.
 """
 
+import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from typing import Any
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -33,8 +35,9 @@ from app.models import (
     UploadStatus,
     User,
 )
-from app.models.statement_upload import FILE_HASH_INDEX
+from app.models.statement_upload import FILE_HASH_INDEX, NOT_FAILED_SQL, USER_UPLOADS_INDEX
 from app.parsers.base import FileType
+from app.services import imports as imports_service
 
 pytestmark = pytest.mark.integration
 
@@ -260,3 +263,140 @@ def test_the_same_file_from_two_users_is_two_uploads(
         )
     )
     db.commit()  # no IntegrityError
+
+
+# --- Index use under prepared ("generic") plans ---------------------------
+#
+# psycopg prepares a query once it has run 5 times on a connection, and
+# Postgres may then plan it once for ALL parameter values (a generic plan),
+# without knowing what they are. A partial index can only be used when the
+# query's condition provably implies the index's WHERE clause, so a value
+# that arrives as a parameter is invisible to that proof. These tests force
+# a generic plan and switch sequential scans off, which shows which indexes
+# the query CAN use (the table is far too small for the planner to bother
+# otherwise).
+
+
+def _sql_with_numbered_params(statement: str, parameters: dict[str, Any]) -> tuple[str, list[str]]:
+    """psycopg's `%(name)s` placeholders -> `$1, $2, ...` for PREPARE."""
+    names: list[str] = []
+
+    def number(match: re.Match[str]) -> str:
+        names.append(match.group(1))
+        return f"${len(names)}"
+
+    sql = re.sub(r"%\((\w+)\)s", number, statement)
+    return sql, [str(parameters[name]) for name in names]
+
+
+def duplicate_check_sql(db: Session, user_id: uuid.UUID) -> tuple[str, dict[str, Any]]:
+    """Run the service's duplicate check; return the SQL it sent, and its params.
+
+    An event listener sees each statement on its way to the driver, so this
+    is exactly what the import service executes, not a hand-written copy.
+    """
+    captured: list[tuple[str, dict[str, Any]]] = []
+
+    def capture(_conn: Any, _cursor: Any, statement: str, parameters: Any, *_args: Any) -> None:
+        captured.append((statement, parameters))
+
+    engine = db.get_bind()
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        imports_service._already_uploaded(db, user_id, FILE_SHA256)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    [single] = captured
+    return single
+
+
+@pytest.fixture
+def generic_plans(db: Session) -> Iterator[Callable[[str, list[str]], str]]:
+    """EXPLAIN a statement as a prepared, generic plan; returns the plan text.
+
+    PREPAREd statements belong to the CONNECTION, not the transaction, so
+    each one is DEALLOCATEd again - otherwise the next test that gets this
+    pooled connection would find the name already taken.
+    """
+    db.execute(text("SET LOCAL plan_cache_mode = force_generic_plan"))
+    db.execute(text("SET LOCAL enable_seqscan = off"))
+    prepared: list[str] = []
+
+    def explain(sql: str, args: list[str]) -> str:
+        name = f"probe_{len(prepared)}"
+        # The statement text is built from our own SQL (no user input), and
+        # the arguments are passed as quoted literals of known-safe values.
+        db.execute(text(f"PREPARE {name} AS {sql}"))
+        prepared.append(name)
+        literals = ", ".join(f"'{arg}'" for arg in args)
+        plan = db.execute(text(f"EXPLAIN EXECUTE {name}({literals})")).scalars().all()
+        return "\n".join(plan)
+
+    yield explain
+    for name in prepared:
+        db.execute(text(f"DEALLOCATE {name}"))
+
+
+def test_the_duplicate_check_sends_the_index_condition_as_literal_sql(
+    db: Session, account: Account
+) -> None:
+    """`_already_uploaded` must not send 'failed' as a bound parameter."""
+    statement, parameters = duplicate_check_sql(db, account.user_id)
+    assert NOT_FAILED_SQL in statement
+    assert "failed" not in [str(value) for value in parameters.values()]
+
+
+def test_the_duplicate_check_uses_the_partial_index_in_a_generic_plan(
+    db: Session, account: Account, generic_plans: Callable[[str, list[str]], str]
+) -> None:
+    """The real service query, prepared: an Index Scan on the partial index."""
+    plan = generic_plans(*_sql_with_numbered_params(*duplicate_check_sql(db, account.user_id)))
+
+    assert f"Index Scan using {FILE_HASH_INDEX}" in plan
+    assert "Seq Scan" not in plan
+
+
+def test_a_bound_status_would_not_use_the_partial_index(
+    db: Session, account: Account, generic_plans: Callable[[str, list[str]], str]
+) -> None:
+    """The control experiment: why the condition must be literal SQL.
+
+    The same query with 'failed' as a parameter cannot use the partial
+    index, even with sequential scans switched off. Since migration 0007
+    it falls back to the user index and FILTERS the hash and status row by
+    row (before 0007 it was a full sequential scan of the table). If this
+    ever fails, Postgres got smarter and the comment on `NOT_FAILED_SQL`
+    in app/models/statement_upload.py can be revisited.
+    """
+    plan = generic_plans(
+        "SELECT id FROM statement_uploads WHERE user_id = $1 AND file_sha256 = $2 AND status <> $3",
+        [str(account.user_id), FILE_SHA256, "failed"],
+    )
+
+    assert FILE_HASH_INDEX not in plan
+    assert "Filter" in plan
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # The lookup behind ON DELETE CASCADE from users (DELETE /me).
+        "SELECT id FROM statement_uploads WHERE user_id = $1",
+        # The upload list (GET /uploads, Step 2): newest first.
+        "SELECT id FROM statement_uploads WHERE user_id = $1 ORDER BY created_at DESC",
+    ],
+    ids=["cascade_lookup", "upload_list"],
+)
+def test_a_users_uploads_are_found_through_the_user_index(
+    account: Account, generic_plans: Callable[[str, list[str]], str], sql: str
+) -> None:
+    """Every upload of a user, failed ones included, without a full scan.
+
+    No Sort node for the list: the index already holds the rows in
+    `created_at DESC` order.
+    """
+    plan = generic_plans(sql, [str(account.user_id)])
+
+    assert USER_UPLOADS_INDEX in plan
+    assert "Seq Scan" not in plan
+    assert "Sort" not in plan

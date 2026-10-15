@@ -153,7 +153,7 @@ the list of files to stage, and a proposed commit. Then I stop for review.
   when all dates are equal), `reconcile(statement) -> list[Issue(row_number, kind)]`.
   The kinds are a broken per-row link `prev ± amount ≠ balance` and
   opening + credits − debits ≠ closing. No balance column → no check
-- Migration `0007`: `transactions.statement_seq` int. Back-fill existing rows with
+- Migration `0008`: `transactions.statement_seq` int. Back-fill existing rows with
   `row_number() OVER (PARTITION BY upload_id ORDER BY txn_date, id)`, then
   NOT NULL. The keyset index is rebuilt as
   `(user_id, txn_date DESC, statement_seq DESC, id DESC)`.
@@ -177,7 +177,7 @@ the list of files to stage, and a proposed commit. Then I stop for review.
   (pure): `detect_channel`, `extract_vpa`, VPA-aware `merchant_key`
   (P2P VPAs no longer yield the bank handle "YBL"). `NormalizedRow` gains
   `channel`, `counterparty_vpa`
-- Migration `0008`: `transactions.merchant_key` text nullable +
+- Migration `0009`: `transactions.merchant_key` text nullable +
   `(user_id, merchant_key)` index. `store_transactions` writes channel, VPA,
   merchant_key
 - Merchant seed extended with merchants found in the real narrations (businesses
@@ -205,7 +205,7 @@ the list of files to stage, and a proposed commit. Then I stop for review.
 - ADR 015 *Categorizer chain*
 
 ### Step 7: User rules + `apply_to_similar` (`phase-2/step-7-rules`)
-- Migration `0009`: `category_rules` (SPEC §5; unique `(user_id, match_type, pattern)`;
+- Migration `0010`: `category_rules` (SPEC §5; unique `(user_id, match_type, pattern)`;
   `category_id` CASCADE, `created_from_transaction_id` SET NULL)
 - `backend/app/models/category_rule.py`, `schemas/rule.py`, `services/rules.py`,
   `api/v1/rules.py`: `GET/POST/PATCH/DELETE /rules` (category must be usable by
@@ -269,4 +269,15 @@ and Step 5's narration rules).
 - Step 11 runs the full acceptance checklist against the real files
 
 ## Change log
-- (none yet)
+- **Step 1 (done):** the code review of the PR (5 findings, all fixed on the branch) added
+  **migration 0007**, so the later steps' migrations move up by one (Step 4 → 0008,
+  Step 5 → 0009, Step 7 → 0010). The partial unique index of 0006 had replaced the only
+  index starting with `user_id`, which left the CASCADE from `users` and the Step 2 upload
+  list on sequential scans; 0007 adds `(user_id, created_at DESC)`. Migration 0006 was
+  already committed, so the index is a new migration (rule 7). Also from the review:
+  - the "not failed" condition is one literal-SQL constant shared by the index and the
+    duplicate check, because a bound `'failed'` stops Postgres from using the partial
+    index in a prepared plan (measured, and tested);
+  - `decrypt_file` reports a damaged nonce as `FileDecryptionError`;
+  - stale `unique(user_id, file_sha256)` references were updated, and ADR 006 got an
+    amendment note.

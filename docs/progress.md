@@ -179,7 +179,14 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   `uq_statement_uploads_user_id_file_sha256_not_failed`, `WHERE status <> 'failed'`),
   `app/core/crypto.py` (AES-256-GCM, upload id as associated data, 32-byte key enforced),
   `_already_uploaded` ignores failed rows, `fail_under = 100` (909 tests, 100%);
-  ADR 011 (supersedes 008) + ADR 012. Blobs are not written yet — Step 2 does that
+  ADR 011 (supersedes 008) + ADR 012. Blobs are not written yet — Step 2 does that.
+  Review of the PR (5 findings, all fixed): migration 0007 adds
+  `ix_statement_uploads_user_id_created_at` (the partial index had left the user CASCADE
+  and the Step 2 list on seq scans); `NOT_FAILED_SQL` is one literal-SQL predicate shared
+  by the index and the duplicate check (a bound 'failed' defeats the partial index in a
+  prepared/generic plan — measured); `decrypt_file` maps a bad nonce to
+  `FileDecryptionError`; stale constraint references fixed. Later Phase 2 migrations shift
+  by one (plan change log)
 
 ## In progress
 - (nothing)
