@@ -61,6 +61,24 @@ MAX_FILENAME_LENGTH = 255
 # service needs the name: Postgres reports it when the index rejects an
 # INSERT, and that is how a duplicate file is told apart from other errors.
 FILE_HASH_INDEX = "uq_statement_uploads_user_id_file_sha256_not_failed"
+# Which uploads count as "already uploaded": every one except a failed one
+# (ADR 011). Written ONCE, as literal SQL, and used both as the index's
+# WHERE clause and in the import service's duplicate check, for two reasons:
+#
+# - The two must agree, or the friendly 409 and the database disagree on
+#   what a duplicate is. One constant means they cannot drift apart (and
+#   `alembic check` would not notice if they did: it does not compare an
+#   index's WHERE clause).
+# - Postgres only uses a partial index when it can PROVE the query's
+#   condition implies the index's. With `'failed'` sent as a bound
+#   parameter, a prepared ("generic") plan does not know the value, so it
+#   cannot prove that, and falls back to a sequential scan. Measured: the
+#   bound version cannot use the index even with sequential scans switched
+#   off; this literal version does. psycopg prepares a query after it has
+#   run 5 times on a connection, so the API would hit this in normal use.
+NOT_FAILED_SQL = "status <> 'failed'"
+# "This user's uploads", newest first (see the index below).
+USER_UPLOADS_INDEX = "ix_statement_uploads_user_id_created_at"
 
 
 class UploadStatus(StrEnum):
@@ -88,16 +106,26 @@ class StatementUpload(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         # WHERE clause; a unique index can, and it enforces uniqueness in
         # exactly the same way.
         #
-        # It also indexes "this user's uploads", because it starts with
-        # user_id - but only the non-failed ones, so a query that must see
-        # failed rows too (the upload list) cannot rely on it.
+        # Being partial, it only covers the non-failed rows, so it cannot
+        # serve a query that is about ALL of a user's uploads.
         Index(
             FILE_HASH_INDEX,
             "user_id",
             "file_sha256",
             unique=True,
-            postgresql_where=text("status <> 'failed'"),
+            postgresql_where=text(NOT_FAILED_SQL),
         ),
+        # Every upload of a user, failed ones included, newest first. Two
+        # queries need it (migration 0007):
+        # - the CASCADE when a user is deleted (`DELETE ... WHERE user_id = ?`
+        #   behind DELETE /me); without it that is a sequential scan of
+        #   every user's uploads;
+        # - the upload list (`GET /uploads`, Phase 2 Step 2), which reads the
+        #   index in order and needs no sort step.
+        # Named by hand, like the transactions indexes: the naming
+        # convention would call it ix_statement_uploads_user_id, which says
+        # nothing about the second column.
+        Index(USER_UPLOADS_INDEX, "user_id", text("created_at DESC")),
         # Defence in depth: the column can only ever hold lowercase hex of
         # the right length, so a bug that stored something else (a filename,
         # a truncated hash) fails loudly instead of silently breaking dedupe.

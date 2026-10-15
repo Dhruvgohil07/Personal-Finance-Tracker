@@ -35,8 +35,17 @@ CREATE UNIQUE INDEX uq_statement_uploads_user_id_file_sha256_not_failed
 *constraint*, only on a unique *index*. Both enforce uniqueness the same way.)
 
 - The service's "already uploaded?" check (`_already_uploaded` in
-  `app/services/imports.py`) uses the **same condition**, so the friendly 409
-  and the database agree on what a duplicate is. The database is still the
+  `app/services/imports.py`) uses the **same condition**, literally the same
+  SQL: one constant, `NOT_FAILED_SQL` in `app/models/statement_upload.py`,
+  is both the index's WHERE clause and part of the query. So the friendly 409
+  and the database agree on what a duplicate is. It is literal SQL, not
+  `status != :param`, because of how Postgres handles partial indexes. The
+  planner may only use one when it can prove the query's condition implies
+  the index's. In a prepared (generic) plan, which psycopg switches to after
+  5 runs of a query on a connection, a bound parameter's value is unknown, so
+  the proof fails and the index is skipped. Measured with a forced generic plan:
+  the bound version never touches the partial index, and the literal version
+  uses it. Tested in `tests/integration/test_upload_storage.py`. The database is still the
   final word. Two simultaneous uploads of one file both pass the check, and
   the index rejects the second. The service recognises the index by name
   (Postgres reports an index's name in the same `constraint_name` field it uses
@@ -90,9 +99,13 @@ a constraint is the kind of trick that is hard to explain later.
   `tests/integration/test_upload_storage.py`.
 - The index follows **status changes**, not only inserts: when the worker sets
   a `pending` row to `failed`, the file becomes uploadable at that moment.
-- The index no longer covers *every* row of a user. A query that must also see
-  failed uploads (the upload list in Step 2) cannot be answered from it alone.
-  That is fine at a user's scale (tens of uploads).
+- The partial index no longer covers *every* row of a user, and the old
+  constraint's index had been the only index starting with `user_id`. Without a
+  replacement, two queries become sequential scans of every user's uploads: the
+  ON DELETE CASCADE from `users` (DELETE /me) and the upload list (Step 2).
+  Migration 0007 therefore adds `ix_statement_uploads_user_id_created_at`
+  `(user_id, created_at DESC)`, which serves both. The list reads it in order,
+  with no sort step. Found in the code review of Step 1.
 - `downgrade()` of migration 0006 fails if a user has a failed row and a later
   live row for the same file, which the old constraint forbids. The failed row
   must be deleted first. This is noted in the migration.

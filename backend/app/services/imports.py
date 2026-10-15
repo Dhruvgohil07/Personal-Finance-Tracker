@@ -44,7 +44,7 @@ from functools import lru_cache
 from pathlib import PurePosixPath
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -53,7 +53,7 @@ from app.core.config import get_settings
 from app.core.errors import ConflictError, InvalidStatementError, PayloadTooLargeError
 from app.db.errors import violates_constraint
 from app.models import Account, StatementUpload, Transaction, UploadStatus
-from app.models.statement_upload import FILE_HASH_INDEX, MAX_FILENAME_LENGTH
+from app.models.statement_upload import FILE_HASH_INDEX, MAX_FILENAME_LENGTH, NOT_FAILED_SQL
 from app.parsers.base import FileType, ParsedStatement, ParseError, StatementParser
 from app.parsers.fingerprint import fingerprints_for
 from app.parsers.generic_csv import ColumnMapping, GenericCsvParser
@@ -338,14 +338,19 @@ def _already_uploaded(db: Session, user_id: uuid.UUID, file_sha256: str) -> bool
     to learn what another has uploaded.
 
     A `failed` upload does not count: it is exactly the case where the user
-    should be able to try the same file again (ADR 011). The condition is
-    the same as the unique index's WHERE clause, so this check and the
-    database agree on what a duplicate is.
+    should be able to try the same file again (ADR 011).
+
+    The "not failed" condition is the index's own WHERE clause, the same
+    literal SQL (`NOT_FAILED_SQL`), not `status != UploadStatus.FAILED`.
+    That way this check and the database cannot disagree on what a
+    duplicate is, and Postgres can see that the query matches the partial
+    index even in a prepared plan, where a bound parameter's value is
+    unknown (see the constant in app/models/statement_upload.py).
     """
     stmt = select(StatementUpload.id).where(
         StatementUpload.user_id == user_id,
         StatementUpload.file_sha256 == file_sha256,
-        StatementUpload.status != UploadStatus.FAILED,
+        text(NOT_FAILED_SQL),
     )
     return db.scalar(stmt) is not None
 
