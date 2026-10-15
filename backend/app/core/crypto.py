@@ -44,6 +44,8 @@ NONCE_BYTES = 12
 # (AES-128/192), so the length is checked here rather than trusted.
 KEY_BYTES = 32
 
+_DECRYPTION_FAILED = "The stored file could not be decrypted."
+
 
 class FileDecryptionError(Exception):
     """The stored file could not be decrypted.
@@ -89,15 +91,26 @@ def decrypt_file(
 
     `upload_id` must be the id the file was encrypted for. Passing any
     other id fails, which is the point of the associated data.
+
+    Every problem with the STORED data is a `FileDecryptionError`, so the
+    worker can treat "this file is unusable" as one case and fail the
+    upload at once instead of retrying. A wrong-length key is different:
+    that is a programming error in the caller, so its `ValueError` is
+    raised before the `try` and is not disguised as a bad file.
     """
+    aesgcm = AESGCM(_key(key))
+    # A stored nonce of the wrong length is a damaged row (the table's CHECK
+    # makes it rare, not impossible: a restored backup, raw SQL). AESGCM
+    # would raise ValueError for it, or quietly accept other lengths, so it
+    # is checked here and reported like any other unusable file.
+    if len(encrypted.nonce) != NONCE_BYTES:
+        raise FileDecryptionError(_DECRYPTION_FAILED)
     try:
-        return AESGCM(_key(key)).decrypt(
-            encrypted.nonce, encrypted.ciphertext, _associated_data(upload_id)
-        )
+        return aesgcm.decrypt(encrypted.nonce, encrypted.ciphertext, _associated_data(upload_id))
     except InvalidTag:
         # `from None`: the original exception adds nothing a reader of the
         # log could use, so it is not chained.
-        raise FileDecryptionError("The stored file could not be decrypted.") from None
+        raise FileDecryptionError(_DECRYPTION_FAILED) from None
 
 
 def _key(key: bytes | None) -> bytes:
