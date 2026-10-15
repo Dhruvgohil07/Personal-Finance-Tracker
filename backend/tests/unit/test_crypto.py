@@ -112,6 +112,20 @@ def test_the_wrong_key_is_detected() -> None:
         decrypt_file(encrypted, UPLOAD_ID, key=OTHER_KEY)
 
 
+@pytest.mark.parametrize("length", [0, 8, 11, 13, 16, 200])
+def test_a_stored_nonce_of_the_wrong_length_is_a_decryption_error(length: int) -> None:
+    """A damaged nonce is an unusable file, like any other bad blob.
+
+    Without the explicit check, 0 or 200 bytes would make AESGCM raise
+    ValueError (which the worker would treat as unexpected and retry),
+    and 8 or 16 bytes would be accepted and only fail at the tag.
+    """
+    encrypted = encrypt_file(CONTENT, UPLOAD_ID, key=KEY)
+
+    with pytest.raises(FileDecryptionError):
+        decrypt_file(EncryptedFile(bytes(length), encrypted.ciphertext), UPLOAD_ID, key=KEY)
+
+
 def test_the_error_message_carries_no_detail() -> None:
     encrypted = encrypt_file(CONTENT, UPLOAD_ID, key=KEY)
 
@@ -147,3 +161,12 @@ def test_a_key_that_is_not_32_bytes_is_refused(length: int) -> None:
     """
     with pytest.raises(ValueError, match="32 bytes"):
         encrypt_file(CONTENT, UPLOAD_ID, key=bytes(length))
+
+
+def test_a_wrong_key_length_on_decrypt_is_not_disguised_as_a_bad_file() -> None:
+    """A short key is the caller's bug, not damaged data: ValueError, not
+    FileDecryptionError, so it is never mistaken for "this upload is broken"."""
+    encrypted = encrypt_file(CONTENT, UPLOAD_ID, key=KEY)
+
+    with pytest.raises(ValueError, match="32 bytes"):
+        decrypt_file(encrypted, UPLOAD_ID, key=bytes(16))
