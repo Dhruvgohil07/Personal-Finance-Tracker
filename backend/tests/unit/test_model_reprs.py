@@ -30,6 +30,7 @@ from app.models import (
     CategoryKind,
     Merchant,
     RefreshToken,
+    UploadBlob,
     User,
 )
 
@@ -42,6 +43,7 @@ CATEGORY_ID = uuid.UUID("55555555-5555-4555-8555-555555555555")
 MERCHANT_ID = uuid.UUID("66666666-6666-4666-8666-666666666666")
 TOKEN_ID = uuid.UUID("77777777-7777-4777-8777-777777777777")
 FAMILY_ID = uuid.UUID("88888888-8888-4888-8888-888888888888")
+UPLOAD_ID = uuid.UUID("99999999-9999-4999-8999-999999999999")
 
 # The values that must never show up in a repr.
 EMAIL = "dhruv@example.com"
@@ -50,7 +52,19 @@ HOLDER_NAME = "Dhruv Gohil"
 NICKNAME = "Salary account"
 MASKED_NUMBER = "4321"
 TOKEN_HASH = "9e107d9d372bb6826bd81d3542a419d6" * 2
-SENSITIVE = (EMAIL, PASSWORD_HASH, HOLDER_NAME, NICKNAME, MASKED_NUMBER, TOKEN_HASH)
+# A blob's bytes. Encrypted in real life, but a repr must not show them in
+# any form, so the test uses readable ones that would be easy to spot.
+BLOB_CONTENT = b"UPI/RAMESHKUMAR/PAY 250.00"
+SENSITIVE = (
+    EMAIL,
+    PASSWORD_HASH,
+    HOLDER_NAME,
+    NICKNAME,
+    MASKED_NUMBER,
+    TOKEN_HASH,
+    "RAMESHKUMAR",
+    str(BLOB_CONTENT),
+)
 
 
 def make_user() -> User:
@@ -102,6 +116,10 @@ def make_refresh_token() -> RefreshToken:
     )
 
 
+def make_upload_blob() -> UploadBlob:
+    return UploadBlob(upload_id=UPLOAD_ID, encrypted_content=BLOB_CONTENT, nonce=bytes(12))
+
+
 # --- The exact text of each repr ------------------------------------------
 
 
@@ -133,6 +151,10 @@ def test_merchant_repr_names_the_key() -> None:
     assert repr(make_merchant()) == "Merchant(normalized_key='ZOMATO')"
 
 
+def test_upload_blob_repr_is_the_upload_id_alone() -> None:
+    assert repr(make_upload_blob()) == f"UploadBlob(upload_id={UPLOAD_ID})"
+
+
 # --- The rule itself ------------------------------------------------------
 
 
@@ -145,8 +167,17 @@ def test_merchant_repr_names_the_key() -> None:
         make_user_category(),
         make_merchant(),
         make_refresh_token(),
+        make_upload_blob(),
     ],
-    ids=["user", "account", "system_category", "user_category", "merchant", "refresh_token"],
+    ids=[
+        "user",
+        "account",
+        "system_category",
+        "user_category",
+        "merchant",
+        "refresh_token",
+        "upload_blob",
+    ],
 )
 def test_no_repr_leaks_a_sensitive_value(model: Base) -> None:
     text = repr(model)

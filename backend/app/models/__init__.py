@@ -11,6 +11,7 @@ from app.models.merchant import Merchant
 from app.models.refresh_token import RefreshToken
 from app.models.statement_upload import StatementUpload, UploadStatus
 from app.models.transaction import CategorySource, Channel, Transaction
+from app.models.upload_blob import UploadBlob
 from app.models.user import DEFAULT_USER_SETTINGS, User
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "RefreshToken",
     "StatementUpload",
     "Transaction",
+    "UploadBlob",
     "UploadStatus",
     "User",
 ]

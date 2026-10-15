@@ -25,18 +25,14 @@ Order of checks in `import_statement`, and why that order:
 6. **normalize -> fingerprint -> insert**, all in ONE database transaction.
 
 What happens when an import fails: the request answers 4xx and **no row is
-written**. `statement_uploads` therefore only ever holds successful imports
-in Phase 1. That is on purpose and worth being able to explain:
-
-- The import runs inside the request here, so the caller learns the reason
-  from the response; nothing has to poll for it.
-- `unique(user_id, file_sha256)` means a recorded failure would block the
-  user from ever uploading that file again - so after we fixed a parser bug
-  or added PDF support, their file would still be refused.
+written** (ADR 008). The import still runs inside the request, so the
+caller learns the reason from the response; nothing has to poll for it.
 
 Phase 2 moves parsing into a worker, where the client cannot be told
 synchronously any more; the row is then created first, and the `pending` /
-`processing` / `failed` statuses start being used (see
+`processing` / `failed` statuses start being used. ADR 011 prepares for
+that: the file-hash index now skips `failed` rows, so a recorded failure
+does not stop the user from uploading the same file again (see
 `app/models/statement_upload.py`).
 """
 
@@ -57,7 +53,7 @@ from app.core.config import get_settings
 from app.core.errors import ConflictError, InvalidStatementError, PayloadTooLargeError
 from app.db.errors import violates_constraint
 from app.models import Account, StatementUpload, Transaction, UploadStatus
-from app.models.statement_upload import MAX_FILENAME_LENGTH
+from app.models.statement_upload import FILE_HASH_INDEX, MAX_FILENAME_LENGTH
 from app.parsers.base import FileType, ParsedStatement, ParseError, StatementParser
 from app.parsers.fingerprint import fingerprints_for
 from app.parsers.generic_csv import ColumnMapping, GenericCsvParser
@@ -92,9 +88,6 @@ WRONG_ACCOUNT_NUMBER_MESSAGE = (
 # `test_a_statement_larger_than_one_chunk_is_fully_imported`, which reads
 # the number from here - so tuning it keeps the test honest.
 _INSERT_CHUNK_SIZE = 500
-
-# Name given by our naming convention (app/db/base.py), see migration 0005.
-UPLOADS_FILE_HASH_CONSTRAINT = "uq_statement_uploads_user_id_file_sha256"
 
 
 @dataclass(frozen=True)
@@ -325,7 +318,9 @@ def import_statement(
         # The check above already answers 409 for a file we have seen. This
         # is the race: two uploads of the same file at the same time, where
         # both passed the check and the database rejected the second.
-        if violates_constraint(exc, UPLOADS_FILE_HASH_CONSTRAINT):
+        # For a unique INDEX (not a constraint) Postgres reports the
+        # index's name in the same field, so the same check works.
+        if violates_constraint(exc, FILE_HASH_INDEX):
             raise ConflictError(DUPLICATE_FILE_MESSAGE) from None
         raise
 
@@ -341,10 +336,16 @@ def _already_uploaded(db: Session, user_id: uuid.UUID, file_sha256: str) -> bool
     Scoped by user_id like every other query (rule 2): two users uploading
     the same file are two separate imports, and one user must not be able
     to learn what another has uploaded.
+
+    A `failed` upload does not count: it is exactly the case where the user
+    should be able to try the same file again (ADR 011). The condition is
+    the same as the unique index's WHERE clause, so this check and the
+    database agree on what a duplicate is.
     """
     stmt = select(StatementUpload.id).where(
         StatementUpload.user_id == user_id,
         StatementUpload.file_sha256 == file_sha256,
+        StatementUpload.status != UploadStatus.FAILED,
     )
     return db.scalar(stmt) is not None
 
