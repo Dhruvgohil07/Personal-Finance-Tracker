@@ -7,21 +7,25 @@ also the unit of undo.
 
 Two things about the columns are worth knowing before reading them:
 
-1. **`unique(user_id, file_sha256)` is dedupe level 1** (SPEC §6.3). The
-   hash is of the file's bytes, so uploading the *exact same file* twice is
-   refused by the database, not by a check in Python that two parallel
-   requests could both pass. It is scoped per user: two users may well
-   upload the same file, and that is two separate imports.
-2. **Most of the status values are not used yet.** Phase 1 imports
-   synchronously inside the request, so an import either finishes
-   (`completed`) or the request fails with an error and *no row is written*
-   at all - which keeps the file's hash free, so the user can simply try
-   again once we fix the parser. `pending`, `processing`, `needs_password`
-   and `failed` exist because Phase 2 moves the work into an RQ worker: the
-   row is then created first and the client polls it, so a failure has to
-   be recorded somewhere. `needs_review` arrives with balance
-   reconciliation (SPEC §6.4). The whole enum is here now so that Phase 2
-   needs no migration (the same reasoning as ADR 002).
+1. **A unique index on `(user_id, file_sha256)` is dedupe level 1** (SPEC
+   §6.3). The hash is of the file's bytes, so uploading the *exact same
+   file* twice is refused by the database, not by a check in Python that
+   two parallel requests could both pass. It is scoped per user: two users
+   may well upload the same file, and that is two separate imports.
+
+   The index is **partial: it skips `failed` rows** (ADR 011, which
+   replaces ADR 008). From Phase 2 a worker parses the file after the
+   request has ended, so the row must exist first and a failure has to be
+   recorded on it. If a failed row still counted as "already uploaded",
+   the user could never retry that file, even after we fixed the parser
+   that failed on it.
+2. **Some status values are not used yet.** Phase 1 imported synchronously
+   inside the request, so only `completed` rows exist so far. Phase 2 moves
+   the work into an RQ worker, which brings in `pending`, `processing` and
+   `failed`; `needs_password` arrives with password-protected PDFs, and
+   `needs_review` with balance reconciliation (SPEC §6.4). The whole enum
+   was created up front so that none of this needs a migration (the same
+   reasoning as ADR 002).
 """
 
 import uuid
@@ -33,10 +37,11 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
-    UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -52,6 +57,10 @@ SHA256_HEX_LENGTH = 64
 # Long enough for any real name, short enough that a hostile 10 MB "filename"
 # cannot be stored. The service truncates to this before inserting.
 MAX_FILENAME_LENGTH = 255
+# Dedupe level 1 (see the module docstring). Named here because the import
+# service needs the name: Postgres reports it when the index rejects an
+# INSERT, and that is how a duplicate file is told apart from other errors.
+FILE_HASH_INDEX = "uq_statement_uploads_user_id_file_sha256_not_failed"
 
 
 class UploadStatus(StrEnum):
@@ -73,9 +82,22 @@ class UploadStatus(StrEnum):
 class StatementUpload(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "statement_uploads"
     __table_args__ = (
-        # Dedupe level 1 (SPEC §6.3). It also indexes "this user's uploads",
-        # because it starts with user_id.
-        UniqueConstraint("user_id", "file_sha256"),
+        # Dedupe level 1 (SPEC §6.3), as a PARTIAL unique index: rows whose
+        # status is `failed` are left out of it, so a failed file can be
+        # uploaded again (ADR 011). A plain UNIQUE constraint cannot have a
+        # WHERE clause; a unique index can, and it enforces uniqueness in
+        # exactly the same way.
+        #
+        # It also indexes "this user's uploads", because it starts with
+        # user_id - but only the non-failed ones, so a query that must see
+        # failed rows too (the upload list) cannot rely on it.
+        Index(
+            FILE_HASH_INDEX,
+            "user_id",
+            "file_sha256",
+            unique=True,
+            postgresql_where=text("status <> 'failed'"),
+        ),
         # Defence in depth: the column can only ever hold lowercase hex of
         # the right length, so a bug that stored something else (a filename,
         # a truncated hash) fails loudly instead of silently breaking dedupe.
@@ -98,8 +120,8 @@ class StatementUpload(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     original_filename: Mapped[str] = mapped_column(String(MAX_FILENAME_LENGTH))
     file_type: Mapped[FileType] = mapped_column(str_enum_column(FileType, "file_type"))
     # sha256 of the file's bytes, lowercase hex. NOT the file itself: the
-    # bytes are never stored in Phase 1 (SPEC §7.3 - they live in memory for
-    # the length of the request and are then gone).
+    # bytes are kept only in `upload_blobs`, encrypted, until the Phase 2
+    # worker has processed them, and then deleted (SPEC §7.3).
     file_sha256: Mapped[str] = mapped_column(String(SHA256_HEX_LENGTH))
     status: Mapped[UploadStatus] = mapped_column(str_enum_column(UploadStatus, "upload_status"))
 

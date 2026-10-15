@@ -1,6 +1,6 @@
 # ADR 008 — A failed import writes no `statement_uploads` row (Phase 1)
 
-- Status: accepted
+- Status: superseded by ADR 011 (2026-10-15, Phase 2 Step 1)
 - Date: 2026-10-05 (Phase 1, Step 7)
 
 ## Context

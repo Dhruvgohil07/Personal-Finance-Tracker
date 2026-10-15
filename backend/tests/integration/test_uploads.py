@@ -17,6 +17,7 @@ The tests that matter most, and the rules they defend:
 """
 
 import datetime
+import hashlib
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
@@ -33,8 +34,8 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.errors import PayloadTooLargeError
-from app.models import Account, StatementUpload, Transaction
-from app.parsers.base import Direction
+from app.models import Account, StatementUpload, Transaction, UploadStatus
+from app.parsers.base import Direction, FileType
 from app.services import imports as imports_service
 from tests.fixtures.icici_xls import build_icici_xls
 
@@ -326,7 +327,7 @@ def test_a_filename_with_a_path_is_stored_as_a_plain_name(
 def test_reuploading_the_same_file_is_rejected(
     client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path, db: Session
 ) -> None:
-    """Dedupe level 1: the same bytes, rejected by unique(user_id, file_sha256)."""
+    """Dedupe level 1: the same bytes, rejected by the file-hash index (ADR 011)."""
     content = statement_bytes(tmp_path)
     assert post_upload(client, alice, content=content, account_id=account_id).status_code == 201
 
@@ -337,6 +338,40 @@ def test_reuploading_the_same_file_is_rejected(
     # Nothing was added a second time, and no second upload row was written.
     assert count_transactions(db) == 5
     assert db.scalar(select(func.count()).select_from(StatementUpload)) == 1
+
+
+def test_a_failed_upload_does_not_block_the_same_file(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path, db: Session
+) -> None:
+    """ADR 011: a `failed` row is not "already uploaded".
+
+    Phase 1 never writes a failed row, so it is inserted directly here, the
+    way the Phase 2 worker will leave one behind. The same file must then
+    import normally - otherwise a user whose file hit a parser bug could
+    never retry it after the fix.
+    """
+    content = statement_bytes(tmp_path)
+    account = db.scalars(select(Account).where(Account.id == uuid.UUID(account_id))).one()
+    db.add(
+        StatementUpload(
+            user_id=account.user_id,
+            account_id=account.id,
+            original_filename="statement.xls",
+            file_type=FileType.XLS,
+            file_sha256=hashlib.sha256(content).hexdigest(),
+            status=UploadStatus.FAILED,
+            error_message="We could not read this statement.",
+        )
+    )
+    db.commit()
+
+    response = post_upload(client, alice, content=content, account_id=account_id)
+
+    assert response.status_code == 201
+    assert response.json()["rows_inserted"] == 5
+    # The failed attempt is kept alongside the successful one.
+    statuses = db.scalars(select(StatementUpload.status)).all()
+    assert sorted(statuses) == [UploadStatus.COMPLETED, UploadStatus.FAILED]
 
 
 def test_an_overlapping_statement_inserts_only_new_rows(

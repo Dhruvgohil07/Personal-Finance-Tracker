@@ -174,14 +174,21 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
 - [x] Step 0: Phase 2 plan approved and saved — docs/plans/phase-2.md (11 steps; P2P
   detection pulled forward from Phase 4; password PDFs unlocked in the request with
   `pypdf`; `q=` search/trigram index deferred to Phase 3)
+- [x] Step 1: Upload lifecycle schema + file encryption — migration 0006 (`upload_blobs`;
+  dedupe level 1 is now the partial unique index
+  `uq_statement_uploads_user_id_file_sha256_not_failed`, `WHERE status <> 'failed'`),
+  `app/core/crypto.py` (AES-256-GCM, upload id as associated data, 32-byte key enforced),
+  `_already_uploaded` ignores failed rows, `fail_under = 100` (909 tests, 100%);
+  ADR 011 (supersedes 008) + ADR 012. Blobs are not written yet — Step 2 does that
 
 ## In progress
 - (nothing)
 
 ## Next up
-- Phase 2 Step 1: upload lifecycle schema + file encryption — migration 0006
-  (`upload_blobs`, partial unique index on `file_sha256` excluding `failed`),
-  `app/core/crypto.py` (AES-256-GCM), `fail_under = 100`, ADRs 011 + 012
+- Phase 2 Step 2: RQ worker + asynchronous uploads — Dockerfile + `worker` service,
+  `app/workers/` (queue dependency, `process_statement`), `imports.py` split into
+  `create_upload` / `process_upload`, `POST /uploads` → 202, `GET /uploads`,
+  `GET /uploads/{id}`, `DELETE /uploads/{id}`
 - Steps 9–10 (ICICI PDF, password PDFs) are blocked until the ICICI PDF is in `samples/`
 
 ## Open decisions / questions
@@ -243,7 +250,9 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   X-Forwarded-For); general limit counted across the whole API; /health exempt;
   Redis down = fail open (ADR 007)
 
-- Step 7 → decided (ADR 008): a FAILED import writes no `statement_uploads` row in Phase 1.
+- Step 7 → decided (ADR 008, SUPERSEDED by ADR 011 in Phase 2 Step 1: failed rows are now
+  recorded and the partial file-hash index skips them): a FAILED import writes no
+  `statement_uploads` row in Phase 1.
   The import runs inside the request, so the caller already gets the reason; and because
   `unique(user_id, file_sha256)` would then block that file forever, a recorded failure
   would stop the user retrying after we add PDF support or fix a parser. Only `completed`
@@ -392,12 +401,10 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   `POST /categories` must preserve it; adding
   `AND (c.user_id IS NULL OR c.user_id = :user_id)` to the join would make the query
   self-defending instead
-- Coverage gate in CI → decided in the Phase 2 plan: `fail_under = 100` lands in Phase 2
-  Step 1. Background: the suite is at 100% (statements + branches) as of
-  2026-10-13, but nothing enforces it — CI runs `pytest --cov --cov-report=term-missing`
-  with no threshold. `fail_under = 100` in `[tool.coverage.report]` would hold the line,
-  at the cost of a red build for every new defensive branch until it is tested. Decide
-  when planning Phase 2
+- Coverage gate in CI → DONE (Phase 2 Step 1): `fail_under = 100` in
+  `[tool.coverage.report]`, so CI's `pytest --cov` goes red below 100% (statements +
+  branches). Only applies when `--cov` is passed: a partial local run WITH `--cov`
+  (e.g. one test file) now fails on coverage even though its tests pass — expected
 
 ## Tasks Dhruv implemented (historical — the practice ended 2026-10-12)
 From 2026-10-12 Claude completes every task in full; no new `TODO(dhruv)` items are
