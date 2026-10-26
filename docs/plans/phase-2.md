@@ -311,3 +311,14 @@ and Step 5's narration rules).
   `reconciliation_issues` is NULL for "not checked" and [] for "checked, clean", and at
   most 100 issues are stored (the full count is in `reconciliation_errors`). The plan's
   "3-part cursor" means `(txn_date, statement_seq, id)`; old 2-part cursors get a 422.
+- **Step 5:** done as migration **0011** and **ADR 015**. Four rules were confirmed with
+  Dhruv after profiling the real narrations (shapes only):
+  - the VPA is stored as printed even when ICICI cut it short;
+  - the merchant key is the whole name field joined;
+  - unseen channels are first-word keywords only, with no interest/charges guesses;
+  - the merchant seed is **not** extended.
+
+  The plan's "merchant seed extended with merchants found in the real narrations" was
+  dropped: the businesses are local shops and campus vendors, which a global dictionary
+  should not hold (ADR 015 §8). `merchant_key_candidate` moved from `normalize.py` to
+  `narration.py`.
