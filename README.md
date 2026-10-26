@@ -33,12 +33,20 @@ the placeholders (on purpose).
 > **Windows:** keep `127.0.0.1` in the URLs. `localhost` tries IPv6 first,
 > which Docker doesn't answer, and the connection hangs.
 
-### 2. Start Postgres and Redis
+### 2. Start Postgres, Redis and the worker
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 This also creates a separate `kharcha_test` database, so tests never touch
 your development data.
+
+The `worker` service imports uploaded statements in the background (RQ
+needs `fork()`, so it runs in Docker, not on Windows — [ADR
+013](docs/decisions/013-upload-processing-worker.md)). It reads the same
+`.env` as the API, so both use the same `FILE_ENCRYPTION_KEY`. After
+changing backend code, rebuild it with `docker compose up -d --build worker`;
+read its logs with `docker compose logs -f worker`. Without a running
+worker, uploads stay `pending`.
 
 ### 3. Install, migrate, seed
 ```bash
@@ -101,7 +109,7 @@ the httpOnly cookie login already set).
 - `masked_number`: **the last 4 digits only** — the full number is never
   stored (SPEC §7.3). Use the real last 4 digits of the account the
   statement came from: the import checks them against the statement and
-  refuses a mismatch with a `400`.
+  a mismatch ends as a `failed` upload.
 
 Keep the `id` from the response — that is your `account_id`.
 
@@ -116,25 +124,34 @@ picker:
 | `account_id` | the id from step 2 |
 | `column_mapping` | leave empty |
 
-Answers `201` with what the import did:
+Answers `202 Accepted` with the upload still `pending`: the worker imports
+it in the background. Copy its `id` and poll `GET /api/v1/uploads/{id}`
+until `status` is final (a statement takes a second or two):
 
 ```json
 { "status": "completed", "period_start": "2026-08-01", "period_end": "2026-08-31",
   "rows_parsed": 175, "rows_inserted": 175, "rows_duplicate": 0, ... }
 ```
 
-`rows_parsed = rows_inserted + rows_duplicate`, always.
+`rows_parsed = rows_inserted + rows_duplicate`, always. If the file cannot
+be imported, `status` is `failed` and `error_message` says why (an
+unreadable row, a statement for a different account). The same file can
+then be uploaded again.
+
+`GET /api/v1/uploads` lists your uploads, newest first.
+`DELETE /api/v1/uploads/{id}` undoes an import: the upload and every
+transaction it added are removed (`409` while it is still processing).
 
 Things worth trying here:
 
 - **Upload the same file again** → `409 CONFLICT`. The file's sha256 is
   unique per user, so the identical file is refused outright.
 - **Upload an overlapping statement** (e.g. July–September when you already
-  have August) → `201`, with the August rows counted in `rows_duplicate`
+  have August) → `202`, then `completed` with the August rows counted in `rows_duplicate`
   and only the new ones in `rows_inserted`. That is dedupe by fingerprint
   ([ADR 006](docs/decisions/006-dedupe-fingerprint.md)) and it is what makes
   imports idempotent.
-- **Upload a PDF** → `400 INVALID_STATEMENT`. PDF parsing is Phase 2.
+- **Upload a PDF** → `400 INVALID_STATEMENT`. PDF parsing arrives later in Phase 2.
 - `column_mapping` is only for a CSV that no bank parser recognises. It
   names the columns by their **header label**, so a headerless CSV is not
   supported in Phase 1. `/docs` shows the exact example:
@@ -229,7 +246,7 @@ so a salary credit never appears there
 |---|---|
 | PDF statements, password-protected files | Phase 2 |
 | Automatic categorization, merchants, UPI/VPA and channel detection | Phase 2 |
-| Balance reconciliation, `GET /uploads`, deleting an upload | Phase 2 |
+| Balance reconciliation | Phase 2 |
 | `apply_to_similar` on a PATCH (answers `422` today) | Phase 2 |
 | `/insights/trend`, `/insights/top-merchants` | Phase 2 |
 | Creating your own categories, `/me`, `DELETE /me`, CSV export | Phase 2 |

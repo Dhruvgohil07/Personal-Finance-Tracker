@@ -281,3 +281,18 @@ and Step 5's narration rules).
   - `decrypt_file` reports a damaged nonce as `FileDecryptionError`;
   - stale `unique(user_id, file_sha256)` references were updated, and ADR 006 got an
     amendment note.
+- **Step 2:** three changes to the plan as written.
+  - **Migration 0008** (`statement_uploads.column_mapping` jsonb, nullable). A generic
+    CSV's mapping has to reach the worker, and a job's only argument is the upload id,
+    so it is stored on the row (decided with Dhruv: kept on the upload row, not on
+    `upload_blobs`, not in the job). The later migrations move up again: Step 4 → 0009,
+    Step 5 → 0010, Step 7 → 0011.
+  - **ADR 013** *Uploads are imported by an RQ worker* records the step's decisions, so
+    the planned ADRs move up by one: Step 4 → 014, Step 5 → 015, Step 6 → 016,
+    Step 8 → 017, Step 9 → 018, Step 10 → 019.
+  - **`on_failure` runs after every failed attempt**, not only the last one, in RQ 2.12
+    (found in RQ's source). The callback checks `job.should_retry` and only marks the
+    upload `failed` when no retry is coming. The worker is started with
+    `python -m app.workers.worker` rather than `rq worker`, so that our log redaction
+    is configured in the worker process (ADR 013). PDFs are refused in the request
+    (400) until Step 9, since the signature already says what they are.
