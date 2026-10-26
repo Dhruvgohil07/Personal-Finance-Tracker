@@ -28,15 +28,17 @@ statement have exactly this layout:
 Each field is CUT to its width, so a name reads "MOON CAFE " -> "MOON CAFE"
 and a 15-character VPA loses its "@handle" completely. Because the layout is
 fixed, the name and the VPA are read by POSITION, which is far more reliable
-than searching the text for something that looks like a VPA. The RRN in the
-sixth field is what confirms the layout; a narration that does not fit falls
-back to the generic first-word rules.
+than searching the text for something that looks like a VPA. The RRN, second
+from the end, is what confirms the layout (so a "/" inside the free-text
+remark does not break it); a narration that does not fit falls back to the
+generic first-word rules.
 
 Everything here is pure string work (no database, no logging), like the
 rest of `app/parsers/`.
 """
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 
 from app.parsers.base import Channel
@@ -82,55 +84,74 @@ _COMPANY_FILLER = frozenset(
     {"PVT", "PRIVATE", "LTD", "LIMITED", "LLP", "INC", "CORP", "INDIA", "ONLINE", "WWW", "COM"}
 )
 
+# Channel words that SHOULD still become a merchant key in the generic
+# fallback. "UPL/<RRN>/UPI Lite/.../ICICI/...": the only name-like word left
+# after the channel words is the bank, so ICICI's own code "UPL" is the most
+# useful key for a UPI Lite top-up (a rule can match it).
+_KEY_WORTHY_CHANNEL_WORDS = frozenset({"UPL"})
+
 # Words that appear in narrations because of HOW the money moved, not WHO
 # received it. Used only by the generic first-word fallback below.
-_NOISE_WORDS = _COMPANY_FILLER | frozenset(
-    {
-        # Payment channels and instrument types
-        "UPI",
-        "MMT",  # ICICI's IMPS prefix (real statement)
-        "NEFT",
-        "IMPS",
-        "RTGS",
-        "ATM",
-        "ATW",
-        "ACH",
-        "NACH",
-        "ECS",
-        "POS",
-        "CHQ",
-        "CHEQUE",
-        "CARD",
-        "DEBIT",
-        "CREDIT",
-        # Bookkeeping words around the actual counterparty
-        "TXN",
-        "TRF",
-        "TRANSFER",
-        "PAYMENT",
-        "PAYMENTS",
-        "PMT",
-        "PAID",
-        "PURCHASE",
-        "REF",
-        "REFNO",
-        "REFERENCE",
-        "REMARK",  # ICICI: "NO REMARK" / "remarks" (real statement)
-        "REMARKS",
-        "FROM",
-        "WITHDRAWAL",
-        "DEPOSIT",
-        "BANK",
-        "MERCHANT",
-    }
+#
+# Every channel word of `_CHANNEL_BY_FIRST_WORD` is DERIVED into this set, so
+# a channel added there can never become a merchant key by accident (that
+# happened once: "MMT" was added as a channel and briefly keyed IMPS rows).
+_NOISE_WORDS = (
+    (frozenset(_CHANNEL_BY_FIRST_WORD) - _KEY_WORTHY_CHANNEL_WORDS)
+    | _COMPANY_FILLER
+    | frozenset(
+        {
+            # Payment instruments that are not a first-word channel rule
+            "ECS",
+            "CHQ",
+            "CHEQUE",
+            "CARD",
+            "DEBIT",
+            "CREDIT",
+            # Bookkeeping words around the actual counterparty
+            "TXN",
+            "TRF",
+            "TRANSFER",
+            "PAYMENT",
+            "PAYMENTS",
+            "PMT",
+            "PAID",
+            "PURCHASE",
+            "REF",
+            "REFNO",
+            "REFERENCE",
+            "REMARK",  # ICICI: "NO REMARK" / "remarks" (real statement)
+            "REMARKS",
+            "FROM",
+            "WITHDRAWAL",
+            "DEPOSIT",
+            "BANK",
+            "MERCHANT",
+        }
+    )
 )
+
+# A seeded merchant key may match a LONGER merchant key as a prefix only when
+# it is at least this long (`dictionary_key`). Shorter seeded keys are common
+# starts of Indian names and words: AMUL/"Amulya", UBER/"Uberoi", JIO/"Jiothsna".
+_MIN_PREFIX_MATCH = 5
 
 # --- VPA ------------------------------------------------------------------
 
 # SPEC §6.5's VPA pattern, for narrations that are NOT in ICICI's fixed
 # layout. It needs the "@handle", so it cannot find a VPA ICICI has cut
 # short - which is why the ICICI layout is read by position instead.
-_VPA = re.compile(r"[a-zA-Z0-9.\-_]+@[a-zA-Z]+")
+#
+# One addition to SPEC's pattern: the handle must END there (`(?![\w.])`).
+# A UPI handle is one word ("ybl", "okaxis"), so "asha@gmail.com" in a remark
+# is an email address, not a VPA, and must not be stored as one.
+_VPA = re.compile(r"[a-zA-Z0-9.\-_]+@[a-zA-Z]+(?![\w.])")
+
+# A VPA whose name part is only digits is a phone number (10 digits, or 12
+# with the country code 91) or a bank ACCOUNT number ("<account>@<ifsc>",
+# 9-18 digits). Account numbers are never stored in full (CLAUDE.md §7.3), so
+# only the two phone shapes are kept.
+_PHONE = re.compile(r"(?:91)?\d{10}")
 
 # Anything around an "@" up to the next space or "/": what is left of a VPA
 # after normalization ("9876543210@YBL" -> " @YBL"). Removed before picking
@@ -142,6 +163,9 @@ _VPA_CHUNK = re.compile(r"[^\s/]*@[^\s/]*")
 
 # A UPI reference number (RRN) is exactly 12 digits.
 _RRN = re.compile(r"\d{12}")
+
+# The first word of a narration, for `detect_channel`.
+_FIRST_WORD = re.compile(r"[^A-Za-z0-9]*([A-Za-z0-9]+)")
 
 
 @dataclass(frozen=True)
@@ -171,10 +195,13 @@ def read_narration(raw_description: str, normalized_description: str) -> Narrati
     channel = detect_channel(raw_description)
     fields = _fields(raw_description)
 
+    # ICICI's layouts are anchored at BOTH ends: the name and VPA at the
+    # start, the RRN near the end. The free-text remark in between may
+    # itself contain a "/", which must not shift the fields being read.
     if channel is Channel.UPI and _is_icici_upi(fields):
-        return Narration(channel, _printed_vpa(fields[2]), name_key(fields[1]))
+        return Narration(channel, _safe_vpa(fields[2]), name_key(fields[1]))
     if channel is Channel.IMPS and _is_icici_imps(fields):
-        return Narration(channel, None, name_key(fields[4]))
+        return Narration(channel, None, name_key(fields[-2]))
     if channel is Channel.ATM:
         return Narration(channel, None, None)
 
@@ -190,10 +217,10 @@ def detect_channel(raw_description: str) -> Channel:
     "ATW-48291 Cash Withdrawal"  -> ATM
     "Int.Pd:..."                 -> OTHER  (no rule yet, see above)
     """
-    for word in _NOT_KEY_CHARS.split(raw_description.upper()):
-        if word:
-            return _CHANNEL_BY_FIRST_WORD.get(word, Channel.OTHER)
-    return Channel.OTHER
+    match = _FIRST_WORD.match(raw_description)
+    if match is None:
+        return Channel.OTHER
+    return _CHANNEL_BY_FIRST_WORD.get(match.group(1).upper(), Channel.OTHER)
 
 
 def extract_vpa(raw_description: str) -> str | None:
@@ -201,9 +228,11 @@ def extract_vpa(raw_description: str) -> str | None:
 
     For narrations outside ICICI's fixed layout. Lowercased because UPI ids
     are case-insensitive, so "Asha@OKAXIS" and "asha@okaxis" are one person.
+    An email address is not a VPA, and an account-number VPA is not kept
+    (see `_PHONE`).
     """
     match = _VPA.search(raw_description)
-    return match.group(0).lower() if match else None
+    return _safe_vpa(match.group(0)) if match else None
 
 
 def name_key(name: str) -> str | None:
@@ -211,21 +240,57 @@ def name_key(name: str) -> str | None:
 
         "MOON CAFE"   -> "MOONCAFE"
         "MOONCAFE"    -> "MOONCAFE"   (the same shop, printed both ways)
-        "Zomato Ltd"  -> "ZOMATO"     (company filler dropped)
+        "Zomato Ltd"  -> "ZOMATO"     (trailing company filler dropped)
+        "INDIA GATE"  -> "INDIAGATE"  (filler only counts at the END)
         "9876543210"  -> None         (digits only: a phone number, not a name)
 
     The WHOLE field rather than its first word (decided with Dhruv, ADR 015):
-    the real statement prints one shop as both "SHINE STAR" and "SHINESTAR",
-    which only joining turns into one key. Digit-only words are dropped so a
-    phone number printed as a name never becomes a key.
+    the real statement prints one shop both with and without the space
+    between its two words, which only joining turns into one key. Digit-only
+    words are dropped so a phone number printed as a name never becomes a key.
+
+    ICICI cuts the field at 10 characters, so a key can end in part of a word
+    ("Swiggy Lim" -> "SWIGGYLIM"). That is kept: dropping a possibly-cut
+    last word would split the shop above again. `dictionary_key` matches
+    such keys against the merchant dictionary instead.
     """
-    words = [
-        word
-        for word in _NOT_KEY_CHARS.split(name.upper())
-        if word and not word.isdigit() and word not in _COMPANY_FILLER
-    ]
+    words = [word for word in _NOT_KEY_CHARS.split(name.upper()) if word and not word.isdigit()]
+    # Company filler is a SUFFIX ("ZOMATO PVT LTD"). Removed only from the
+    # end, and never the last remaining word, so "INDIA GATE" and a shop
+    # called "ONLINE" keep their names.
+    while len(words) > 1 and words[-1] in _COMPANY_FILLER:
+        words.pop()
     key = "".join(words)
     return key if len(key) >= _MIN_KEY_LENGTH else None
+
+
+def dictionary_key(merchant_key: str | None, known_keys: Collection[str]) -> str | None:
+    """The merchant-dictionary key a merchant key belongs to, if any.
+
+    For the categorizer's dictionary step (Step 6), which passes in the
+    seeded `merchants.normalized_key` values:
+
+        "ZOMATO"     -> "ZOMATO"   exact match
+        "SWIGGYLIM"  -> "SWIGGY"   ICICI cut "Swiggy Limited" at 10 characters
+        "NESCAFEDA"  -> "NESCAFE"  a branch name after the brand
+        "AMULYAK"    -> None       AMUL is too short to match as a prefix
+
+    An exact match always wins. Otherwise the LONGEST known key the merchant
+    key starts with, if that known key has at least `_MIN_PREFIX_MATCH`
+    characters (short keys start too many names). Measured on the real
+    statement: 16 rows match the dictionary this way, as many as Phase 1's
+    first-word keys did, while the stored key keeps the whole name.
+    """
+    if not merchant_key:
+        return None
+    if merchant_key in known_keys:
+        return merchant_key
+    prefixes = [
+        known
+        for known in known_keys
+        if len(known) >= _MIN_PREFIX_MATCH and merchant_key.startswith(known)
+    ]
+    return max(prefixes, key=len, default=None)
 
 
 def merchant_key_candidate(normalized_description: str) -> str | None:
@@ -271,26 +336,44 @@ def _fields(raw_description: str) -> list[str]:
 
 
 def _is_icici_upi(fields: list[str]) -> bool:
-    """`UPI/<name>/<vpa>/<remark>/<payer bank>/<RRN>/<txn id>`, seven fields."""
-    return len(fields) == 7 and fields[0].upper() == "UPI" and bool(_RRN.fullmatch(fields[5]))
+    """`UPI/<name>/<vpa>/<remark>/<payer bank>/<RRN>/<txn id>`.
+
+    Seven fields, or more when the remark contains a "/": the RRN is found
+    second from the END, so extra fields in the middle are tolerated.
+    """
+    return len(fields) >= 7 and fields[0].upper() == "UPI" and bool(_RRN.fullmatch(fields[-2]))
 
 
 def _is_icici_imps(fields: list[str]) -> bool:
-    """`MMT/IMPS/<RRN>/<remark>/<name>/<bank>`, six fields."""
+    """`MMT/IMPS/<RRN>/<remark>/<name>/<bank>`.
+
+    Six fields, or more when the remark contains a "/": the name is read
+    second from the END.
+    """
     return (
-        len(fields) == 6
+        len(fields) >= 6
         and fields[0].upper() == "MMT"
         and fields[1].upper() == "IMPS"
         and bool(_RRN.fullmatch(fields[2]))
     )
 
 
-def _printed_vpa(field: str) -> str | None:
-    """The VPA field exactly as printed, lowercased; None when blank.
+def _safe_vpa(vpa: str) -> str | None:
+    """A VPA as printed, lowercased; None when blank or an account number.
 
-    Stored even when ICICI cut it short and the "@handle" is gone
+    Kept even when ICICI cut it short and the "@handle" is gone
     ("gpay-123456789"): one counterparty is always cut the same way, so the
     value still identifies it for P2P detection and VPA rules (decided with
     Dhruv, ADR 015). It is not guaranteed to be a complete, payable VPA.
+
+    A name part made only of digits is kept only when it is a phone number
+    (`_PHONE`). Anything else all-digit is a bank account number - the real
+    statement has 14-digit ones, cut before their "@ifsc" - and only the last
+    4 digits of an account number may be stored (CLAUDE.md §7.3). The full
+    number still sits in `raw_description`, which is shown, never matched.
     """
-    return field.lower() or None
+    vpa = vpa.strip().lower()
+    local_part = vpa.partition("@")[0]
+    if local_part.isdigit() and not _PHONE.fullmatch(local_part):
+        return None
+    return vpa or None
