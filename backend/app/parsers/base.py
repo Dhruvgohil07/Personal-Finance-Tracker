@@ -84,6 +84,32 @@ class Direction(StrEnum):
     CREDIT = "credit"
 
 
+class Channel(StrEnum):
+    """How the money moved (SPEC §5), read from the narration.
+
+    Detected by `app/parsers/narration.py` (Phase 2 Step 5, ADR 015) and
+    stored in `transactions.channel`. It lives here for the same reason as
+    `Direction`: the parser layer decides it, and the model imports it from
+    here, never the other way round.
+
+    Every value exists in the database CHECK already (migration 0005), so a
+    rule for a new channel needs no migration. A narration that matches no
+    rule is `OTHER` - "we do not know", not an error.
+    """
+
+    UPI = "upi"
+    CARD = "card"
+    NEFT = "neft"
+    IMPS = "imps"
+    RTGS = "rtgs"
+    ATM = "atm"
+    CHEQUE = "cheque"
+    ACH_NACH = "ach_nach"
+    INTEREST = "interest"
+    CHARGES = "charges"
+    OTHER = "other"
+
+
 class ParseError(Exception):
     """A statement we cannot read, with the row number when we know it.
 
@@ -241,14 +267,23 @@ class NormalizedRow:
         row.raw.amount_paise        # what the statement said
         row.normalized_description  # derived, goes into the fingerprint
         row.merchant_key            # derived, used by categorization
+        row.channel                 # derived: UPI, IMPS, ATM, ...
+        row.counterparty_vpa        # derived: the other side's UPI id
+
+    Only `normalized_description` goes into the dedupe fingerprint. The
+    other three are read from the narration by `app/parsers/narration.py`
+    and can be improved later without changing a single fingerprint (Phase 2
+    hard constraint 1, ADR 015).
 
     `merchant_key` is None when the narration holds nothing merchant-like
-    (for example only a reference number).
+    (for example only a reference number, or a cash withdrawal).
     """
 
     raw: RawRow
     normalized_description: str
     merchant_key: str | None = None
+    channel: Channel = Channel.OTHER
+    counterparty_vpa: str | None = None
 
 
 @dataclass(frozen=True)

@@ -43,7 +43,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.errors import PayloadTooLargeError
 from app.models import Account, StatementUpload, Transaction, UploadBlob, UploadStatus
-from app.parsers.base import Direction, FileType
+from app.parsers.base import Channel, Direction, FileType
 from app.services import imports as imports_service
 from tests.fixtures.icici_xls import build_icici_xls
 
@@ -327,8 +327,17 @@ def test_the_stored_rows_match_the_statement(
     # Not categorized yet: that is Step 8 (by hand) and Phase 4 (automatic).
     assert all(row.category_id is None for row in rows)
     assert all(row.category_source.value == "none" for row in rows)
-    assert all(row.channel.value == "other" for row in rows)
     assert all(row.is_self_transfer is False for row in rows)
+    # Read from the narration (Phase 2 Step 5). These fixture narrations
+    # are short, not ICICI's full layout, so the generic first-word rules
+    # apply; `test_narration_facts_are_stored` covers the real layout.
+    assert [(row.channel, row.merchant_key) for row in rows] == [
+        (Channel.UPI, "TESTSHOP"),
+        (Channel.UPI, "CHAISTALL"),
+        (Channel.UPI, "CHAISTALL"),
+        (Channel.NEFT, "SALARY"),
+        (Channel.IMPS, "ACME"),
+    ]
     # A fingerprint per row, all different (sha256 hex is 64 characters).
     fingerprints = {row.fingerprint for row in rows}
     assert len(fingerprints) == 5
@@ -336,6 +345,60 @@ def test_the_stored_rows_match_the_statement(
     # Same rule as the upload's repr: ids only, no amount and no narration.
     assert "7000" not in repr(first)
     assert "TESTSHOP" not in repr(first)
+
+
+# Narrations in the layouts found in the real ICICI statement (ADR 015), with
+# invented names, VPAs and reference numbers (CLAUDE.md rule 8).
+ICICI_LAYOUT_ROWS = (
+    (
+        "1", "01/08/2026", "01/08/2026", "",
+        "UPI/MOON CAFE/Q123456789@ybl/NO REMARK/YES BANK L/512345678901/"
+        "ICI4f2a9c1e7b3d5f6a8c0e2b4d6f8a1c3e",
+        "120.00", "0.00", "111421.33",
+    ),
+    (
+        "2", "02/08/2026", "02/08/2026", "",
+        "UPI/GREEN LEAF/gpay-123456789/UPI/AXIS BANK/512345678902/"
+        "AXI4f2a9c1e7b3d5f6a8c0e2b4d6f8a1c3e/",
+        "80.00", "0.00", "111341.33",
+    ),
+    (
+        "3", "03/08/2026", "03/08/2026", "",
+        "MMT/IMPS/612345678912/Refund of fee/ASHA TRADE/State Bank of I",
+        "0.00", "1000.00", "112341.33",
+    ),
+    (
+        "4", "04/08/2026", "04/08/2026", "",
+        "NFS/CASH WDL/612345678913/12345678/MUMBAI CEN/04-08-261430",
+        "2000.00", "0.00", "110341.33",
+    ),
+)  # fmt: skip
+
+
+def test_narration_facts_are_stored(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path, db: Session
+) -> None:
+    """Channel, VPA and merchant key reach the database and the API (Step 5)."""
+    content = statement_bytes(tmp_path, rows=ICICI_LAYOUT_ROWS)
+
+    body = import_file(client, alice, content=content, account_id=account_id)
+    rows = transactions_of(db, body["id"])
+
+    assert body["status"] == "completed"
+    assert [(row.channel, row.counterparty_vpa, row.merchant_key) for row in rows] == [
+        (Channel.UPI, "q123456789@ybl", "MOONCAFE"),
+        # Cut at 14 characters by the bank, stored as printed
+        (Channel.UPI, "gpay-123456789", "GREENLEAF"),
+        (Channel.IMPS, None, "ASHATRADE"),
+        # Cash: no counterparty
+        (Channel.ATM, None, None),
+    ]
+
+    # The list endpoint shows channel and VPA (it already had the fields;
+    # until now they were always "other" and null).
+    listed = client.get("/api/v1/transactions", headers=alice).json()["items"]
+    by_vpa = {item["counterparty_vpa"]: item["channel"] for item in listed}
+    assert by_vpa["q123456789@ybl"] == "upi"
 
 
 def test_the_upload_row_is_recorded(
