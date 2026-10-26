@@ -286,12 +286,21 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   7. company filler is dropped only as a suffix (`INDIA GATE` keeps its name)
   8. `detect_channel` matches the first word instead of splitting the whole narration
 
+- [x] Step 6: Categorizer chain — new pure package `app/categorizer/` (`base.py`: `TxnFacts`,
+  `Decision`, `Handler`, `categorize`, `CategorySource` moved here; `handlers.py`: user
+  rules, merchant dictionary via `dictionary_key`, keywords, P2P, `build_chain`; purity
+  test), `app/services/categorization.py` (`categorize_upload`, same DB transaction as
+  the import, only `none` rows, also sets `merchant_id`), `rows_categorized` in the
+  import log, insights null bucket renamed "Not categorized yet"; ADR 016. No migration.
+  1220 tests, 100% coverage. **Real statement: 89/175 = 50.9% categorized without an
+  LLM** (49 Transfers to People, 19 Other Income, 14 dictionary, 6 Refunds, 1 Cash)
+
 ## In progress
 - (nothing)
 
 ## Next up
-- Phase 2 Step 6: categorizer chain (`app/categorizer/`, keyword rules, P2P heuristic,
-  `services/categorization.py`, "Not categorized yet" bucket, ADR 016)
+- Phase 2 Step 7: user rules + `apply_to_similar` (`category_rules` table, `/rules`
+  CRUD, re-categorize job; the Step 6 rule handler is ready for it)
 - Steps 9–10 (ICICI PDF, password PDFs) are blocked until the ICICI PDF is in `samples/`
 
 ## Open decisions / questions
@@ -359,6 +368,11 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   file, `IMPS`/`NEFT`/`RTGS`/`ACH`/`NACH`/`ATM`/`ATW`/`POS` from SPEC §6.5 (not seen in
   real data yet). Interest and charges stay `other` until a real ICICI sample shows
   their wording
+- Categorizer → decided (ADR 016, with Dhruv): P2P credits = Other Income; a merchant
+  credit = Refunds; SPEC §8 keyword examples built and marked unseen. Step 9's
+  `LEFT JOIN categories` invariant still holds: the categorizer only writes SYSTEM
+  category ids (`user_id IS NULL`); Step 7 must check a rule's category belongs to its
+  user before the rule handler can write it
 - Merchant seed → decided (ADR 015, with Dhruv): NOT extended from the real file. Its
   businesses are local shops/campus vendors; user rules (Step 7) learn them per user
 - Parsing core (Step 5) → decided: `FileType` = csv/xls/pdf (SPEC §5 lists only csv/pdf;
