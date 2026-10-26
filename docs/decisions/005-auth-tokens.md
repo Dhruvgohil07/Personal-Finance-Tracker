@@ -79,3 +79,23 @@ rotation on every refresh and family-based reuse detection.
 - Browsers treat `http://localhost` / `127.0.0.1` as secure, so the `Secure`
   cookie works in local development and in `/docs`; tests use an
   `https://testserver` base URL.
+
+## Amendment — Phase 2 Step 3 (2026-10-26): deleting old tokens
+The consequence above ("a cleanup job can delete expired rows") arrived early,
+with the hourly `cleanup()` job. It does **not** delete every expired token.
+It deletes a **family** only once **every** token in it has expired
+(`max(expires_at) < now`).
+
+Why: reuse detection depends on old, revoked rows. A thief refreshes with a
+stolen T1 and holds T2. The real user comes back with T1 after T1 has
+expired. While T1 is stored, the replay is recognised as reuse and the whole
+family, including the thief's T2, is revoked. With expired rows deleted one by
+one, T1 would be an unknown token (a plain 401) and the thief would keep the
+session. While any token of a family is still valid, someone can refresh in
+it, so its old rows are kept as evidence. After that, nobody can refresh in it,
+and the whole family goes. Tested end to end in
+`tests/integration/test_cleanup.py::test_reuse_detection_still_works_after_cleanup`.
+
+Cost: an active family keeps all its rotated rows until its newest token
+expires (one row per refresh, at most `REFRESH_TOKEN_TTL` = 30 days after the
+last one). That is fine at this app's size.
