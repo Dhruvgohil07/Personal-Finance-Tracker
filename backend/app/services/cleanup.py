@@ -3,11 +3,13 @@
 Three things that nothing else would ever tidy up:
 
 1. **Stale uploads.** An upload still `pending` or `processing` an hour
-   after it was created has no job working on it any more: the API died
-   between commit and enqueue, or the worker never came back. Left alone,
-   it would sit there forever, and the user's polling would never end. It
-   is marked `failed` (which also frees the file for a new upload, ADR 011)
-   and its stored file is deleted.
+   after it was created, with no job of it left in Redis, will never
+   finish: the API died between commit and enqueue, or the job was lost.
+   Left alone, it would sit there forever and the user's polling would
+   never end. It is marked `failed` (which also frees the file for a new
+   upload, ADR 011) and its stored file is deleted. The rule itself lives
+   in app/services/imports.py (`fail_stale_uploads`), because re-uploading
+   the same file applies it too.
 2. **Old stored files** (`upload_blobs`). A file is kept only until its
    import is over (SPEC §7.3). Anything older than 24 hours is deleted, and
    an upload still waiting for it is failed as expired. In practice that is
@@ -18,20 +20,21 @@ Three things that nothing else would ever tidy up:
    token is deleted only once its whole family has expired, so reuse
    detection keeps working.
 
-Each rule is ONE set-based statement (`UPDATE ... WHERE ... RETURNING`,
-`DELETE ... WHERE ...`), not a loop over rows. Besides being fewer round
-trips, that is what makes the rules safe next to a running import: if the
-worker holds an upload's row lock, the UPDATE waits for it and then checks
-its WHERE clause again against the row as the worker left it (Postgres
-does this in READ COMMITTED). An upload the worker just completed no longer
-matches `status IN ('pending', 'processing')`, so it is not failed.
+Each rule is a set-based statement (`UPDATE ... WHERE ... RETURNING`,
+`DELETE ... WHERE ...`), not a loop over rows, which is also what makes
+them safe next to a running import (see `fail_uploads_where`).
 
-Everything happens in one transaction and is safe to run again: a second
-run finds nothing left to do. That matters, because the scheduler will run
-it every hour no matter what happened the hour before.
+**Each rule commits on its own.** One transaction for all three would hold
+the row locks of the uploads failed by rule 1 until rule 3 was done too -
+and a locked upload looks "busy" to `DELETE /uploads/{id}` (it answers
+"being imported right now") and makes a re-upload of the same file wait.
+Committing per rule keeps every lock short. Nothing is lost by it: every
+rule is safe to run again, so if the job dies between two rules, the next
+run simply does the rest. The scheduler runs it every hour regardless.
 
-Like the other services, this knows nothing about RQ; the job in
-app/workers/jobs.py gives it a session and the time.
+Like the other services, this knows nothing about RQ: the job in
+app/workers/jobs.py gives it a session, the time, and the function that
+asks Redis whether an upload's job is still waiting.
 """
 
 import uuid
@@ -39,17 +42,28 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import structlog
-from sqlalchemy import delete, func, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, delete, select
+from sqlalchemy.orm import Session, aliased
 
 from app.models import RefreshToken, StatementUpload, UploadBlob, UploadStatus
-from app.services.imports import STALE_UPLOAD_AFTER, STALE_UPLOAD_MESSAGE, UNFINISHED_STATUSES
+from app.services.imports import (
+    UNFINISHED_STATUSES,
+    JobIsWaiting,
+    fail_stale_uploads,
+    fail_uploads_where,
+)
 
 log = structlog.get_logger()
 
 # SPEC §5 `upload_blobs`: "a cleanup job also deletes any blob older than 24h".
 BLOB_MAX_AGE = timedelta(hours=24)
 UPLOAD_EXPIRED_MESSAGE = "This upload expired before it could be imported. Please upload it again."
+
+# A token family counts as dead only once its newest token expired at least
+# this long ago. Without the margin, a refresh checked a moment before the
+# newest token expired could commit a new token into a family this run is
+# deleting (see `_delete_dead_token_families`). No request takes an hour.
+DEAD_FAMILY_GRACE = timedelta(hours=1)
 
 # Uploads that may still be waiting for their stored file. Everything else
 # (completed, needs_review, failed) is final and has no use for one.
@@ -66,68 +80,43 @@ class CleanupCounts:
     refresh_tokens_deleted: int
 
 
-def run_cleanup(db: Session, *, now: datetime) -> CleanupCounts:
-    """Apply the three rules (see the module docstring) and commit.
+def run_cleanup(db: Session, *, now: datetime, job_is_waiting: JobIsWaiting) -> CleanupCounts:
+    """Apply the three rules (see the module docstring), committing after each.
 
     `now` is passed in rather than read here, so a test can say exactly
-    what time it is; the job passes the real time. The rules run in this
-    order on purpose: the stale rule deletes the files of the uploads it
-    fails, so the file rule only finds what is left.
+    what time it is; the job passes the real time. `job_is_waiting` answers
+    "is this upload's job still in Redis?" (the job passes
+    `statement_job_waiting_check`). The order matters: the stale rule
+    deletes the files of the uploads it fails, so the file rule only finds
+    what is left.
     """
-    stale_ids, stale_blobs = _fail_stale_uploads(db, now)
-    expired_ids, old_blobs = _expire_old_files(db, now)
+    stale_ids, stale_files = fail_stale_uploads(db, now=now, job_is_waiting=job_is_waiting)
+    db.commit()
+
+    expired_ids, expired_files = _expire_old_files(db, now)
+    db.commit()
+
     tokens = _delete_dead_token_families(db, now)
     db.commit()
 
     counts = CleanupCounts(
         stale_uploads_failed=len(stale_ids),
         expired_uploads_failed=len(expired_ids),
-        blobs_deleted=stale_blobs + old_blobs,
+        blobs_deleted=stale_files + expired_files,
         refresh_tokens_deleted=tokens,
     )
     # Counts only. The ids of the failed uploads are not logged: there may
     # be many, and each one is already visible as `failed` in the database.
+    # (A count may have "token" in its name: the redaction lets integer
+    # counts through, see app/core/logging.py.)
     log.info(
         "cleanup_finished",
         stale_uploads_failed=counts.stale_uploads_failed,
         expired_uploads_failed=counts.expired_uploads_failed,
         blobs_deleted=counts.blobs_deleted,
-        # Not "refresh_tokens_deleted": the log redaction hides every key
-        # containing "token" (app/core/logging.py), and would hide the count.
-        refresh_rows_deleted=counts.refresh_tokens_deleted,
+        refresh_tokens_deleted=counts.refresh_tokens_deleted,
     )
     return counts
-
-
-def _fail_stale_uploads(db: Session, now: datetime) -> tuple[list[uuid.UUID], int]:
-    """Rule 1: fail `pending`/`processing` uploads older than STALE_UPLOAD_AFTER.
-
-    Returns the ids it failed and the number of stored files it deleted.
-    The threshold is the same one `create_upload` uses when a user uploads
-    the same file again, so the two can never disagree about "stale".
-    """
-    failed_ids = list(
-        db.scalars(
-            update(StatementUpload)
-            .where(
-                StatementUpload.status.in_(UNFINISHED_STATUSES),
-                StatementUpload.created_at < now - STALE_UPLOAD_AFTER,
-            )
-            .values(status=UploadStatus.FAILED, error_message=STALE_UPLOAD_MESSAGE)
-            .returning(StatementUpload.id)
-            # The ORM must not try to apply this UPDATE to objects already
-            # loaded in the session; there are none, and it is set-based.
-            .execution_options(synchronize_session=False)
-        )
-    )
-    if not failed_ids:
-        return failed_ids, 0
-    deleted = db.execute(
-        delete(UploadBlob)
-        .where(UploadBlob.upload_id.in_(failed_ids))
-        .returning(UploadBlob.upload_id)
-    )
-    return failed_ids, len(deleted.all())
 
 
 def _expire_old_files(db: Session, now: datetime) -> tuple[list[uuid.UUID], int]:
@@ -139,19 +128,15 @@ def _expire_old_files(db: Session, now: datetime) -> tuple[list[uuid.UUID], int]
     """
     cutoff = now - BLOB_MAX_AGE
     old_files = select(UploadBlob.upload_id).where(UploadBlob.created_at < cutoff)
-    failed_ids = list(
-        db.scalars(
-            update(StatementUpload)
-            .where(StatementUpload.id.in_(old_files), StatementUpload.status.in_(_WAITING_FOR_FILE))
-            .values(status=UploadStatus.FAILED, error_message=UPLOAD_EXPIRED_MESSAGE)
-            .returning(StatementUpload.id)
-            .execution_options(synchronize_session=False)
-        )
+    failed_ids, failed_files = fail_uploads_where(
+        db,
+        and_(StatementUpload.id.in_(old_files), StatementUpload.status.in_(_WAITING_FOR_FILE)),
+        UPLOAD_EXPIRED_MESSAGE,
     )
-    deleted = db.execute(
+    leftovers = db.execute(
         delete(UploadBlob).where(UploadBlob.created_at < cutoff).returning(UploadBlob.upload_id)
     )
-    return failed_ids, len(deleted.all())
+    return failed_ids, failed_files + len(leftovers.all())
 
 
 def _delete_dead_token_families(db: Session, now: datetime) -> int:
@@ -167,18 +152,32 @@ def _delete_dead_token_families(db: Session, now: datetime) -> int:
 
     So a family is kept while ANY of its tokens is still valid: as long as
     someone could refresh in it, its old tokens are evidence. Once the
-    newest token has expired too, nobody can refresh in the family any
-    more, the evidence protects nothing, and the whole family goes.
-    Returns the number of tokens deleted.
+    newest token has expired too (plus DEAD_FAMILY_GRACE), the whole family
+    goes. Returns the number of tokens deleted.
+
+    The statement reads only rows that can actually be deleted:
+
+        DELETE FROM refresh_tokens t
+        WHERE t.expires_at < :cutoff                      -- index on expires_at
+          AND NOT EXISTS (SELECT 1 FROM refresh_tokens u  -- index on family_id
+                          WHERE u.family_id = t.family_id
+                            AND u.expires_at >= :cutoff)
+
+    Every token of a dead family is itself older than the cutoff, so "the
+    expired rows whose family has no live token" is exactly "all rows of
+    the dead families". The grace margin closes a race: without it, a
+    refresh that validated the newest token just before it expired could
+    commit a new token, invisible to this DELETE's snapshot, into a family
+    whose old rows (the evidence) are being deleted.
     """
-    dead_families = (
-        select(RefreshToken.family_id)
-        .group_by(RefreshToken.family_id)
-        .having(func.max(RefreshToken.expires_at) < now)
+    cutoff = now - DEAD_FAMILY_GRACE
+    sibling = aliased(RefreshToken)
+    live_sibling = select(sibling.id).where(
+        sibling.family_id == RefreshToken.family_id, sibling.expires_at >= cutoff
     )
     deleted = db.execute(
         delete(RefreshToken)
-        .where(RefreshToken.family_id.in_(dead_families))
+        .where(RefreshToken.expires_at < cutoff, ~live_sibling.exists())
         .returning(RefreshToken.id)
     )
     return len(deleted.all())

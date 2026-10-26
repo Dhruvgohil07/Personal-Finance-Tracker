@@ -34,7 +34,9 @@ class RefreshToken(UUIDPrimaryKeyMixin, Base):
     token_hash: Mapped[str] = mapped_column(unique=True)
     # Indexed for "revoke the whole family" on reuse detection.
     family_id: Mapped[uuid.UUID] = mapped_column(index=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Indexed for the hourly cleanup, which looks for expired tokens
+    # (app/services/cleanup.py, migration 0009).
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     # NULL = still usable. Set when rotated, on logout, or on reuse detection.
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # No updated_at (unlike TimestampMixin): the only change a row ever gets

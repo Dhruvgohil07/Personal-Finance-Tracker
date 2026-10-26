@@ -36,8 +36,8 @@ REDACTED = "[REDACTED]"
 # A key is sensitive if it CONTAINS any of these parts (after normalizing,
 # see `_normalize_key`). Substring matching means "token" also catches
 # "access_token" and "refresh_token", and "amount" catches "amount_paise".
-# It may over-redact a harmless key like "token_count"; hiding too much is
-# the safe way to fail, hiding too little is a data leak.
+# Hiding too much is the safe way to fail, hiding too little is a data leak
+# - with one exception, `_is_count` below.
 SENSITIVE_KEY_PARTS: tuple[str, ...] = (
     # Money (amounts are stored as paise, e.g. amount_paise)
     "amount",
@@ -74,6 +74,33 @@ def is_sensitive_key(key: object) -> bool:
     return any(part in normalized for part in SENSITIVE_KEY_PARTS)
 
 
+# Name endings that mark a value as a COUNT of things, e.g.
+# "refresh_tokens_deleted" or "token_count".
+_COUNT_SUFFIXES = ("_count", "_deleted", "_failed")
+
+
+def _is_count(key: object, value: object) -> bool:
+    """Is this a count of rows - never sensitive, whatever its name contains?
+
+    A number of deleted tokens says nothing about any token, but substring
+    matching would hide `refresh_tokens_deleted` like a token. Before this
+    rule, such a key had to be renamed to dodge the redaction (and every
+    future one would have been hidden without anyone noticing).
+
+    BOTH conditions must hold, so a real secret cannot slip through by
+    name alone: the key ends in a count suffix AND the value is an `int`
+    (not a bool, which is an int in Python). A token or password is a
+    string, so `refresh_token_count="abc..."` is still redacted. An amount
+    is an int too, so an amount must never be named like a count - nothing
+    in this codebase is, and the suffixes are chosen to keep it that way.
+    """
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and str(key).lower().endswith(_COUNT_SUFFIXES)
+    )
+
+
 def _redact(value: Any) -> Any:
     """Return a copy of `value` with sensitive keys redacted, at any depth.
 
@@ -84,7 +111,8 @@ def _redact(value: Any) -> Any:
     """
     if isinstance(value, dict):
         return {
-            key: REDACTED if is_sensitive_key(key) else _redact(item) for key, item in value.items()
+            key: REDACTED if is_sensitive_key(key) and not _is_count(key, item) else _redact(item)
+            for key, item in value.items()
         }
     if isinstance(value, list | tuple):
         return [_redact(item) for item in value]

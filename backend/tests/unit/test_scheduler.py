@@ -5,6 +5,7 @@ it holds, and the registered function is then called by hand: no test
 waits for an hour, or for anything.
 """
 
+import signal
 from typing import Any
 
 import pytest
@@ -66,22 +67,53 @@ def test_redis_being_down_is_logged_not_raised() -> None:
     scheduler.enqueue_cleanup_now(FakeQueue(fail=True))  # type: ignore[arg-type]
 
 
+class FakeScheduler:
+    """Records start() and shutdown() instead of running a clock."""
+
+    built: list["FakeScheduler"] = []
+
+    def __init__(self, queue: Any) -> None:
+        self.queue = queue
+        self.started = False
+        self.shutdown_calls: list[dict[str, Any]] = []
+        FakeScheduler.built.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+    def shutdown(self, **kwargs: Any) -> None:
+        self.shutdown_calls.append(kwargs)
+
+
 def test_main_starts_the_scheduler_on_the_workers_queue(monkeypatch: pytest.MonkeyPatch) -> None:
-    started: list[Any] = []
-
-    class FakeScheduler:
-        def __init__(self, queue: Any) -> None:
-            self.queue = queue
-
-        def start(self) -> None:
-            started.append(self.queue)
-
+    FakeScheduler.built.clear()
     monkeypatch.setattr(scheduler, "build_scheduler", FakeScheduler)
+    monkeypatch.setattr(scheduler.signal, "signal", lambda *_args: None)
 
     scheduler.main()
 
-    [queue] = started
-    assert queue.name == QUEUE_NAME
+    [built] = FakeScheduler.built
+    assert built.started
+    assert built.queue.name == QUEUE_NAME
+
+
+def test_sigterm_stops_the_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """As PID 1 in its container, the process would ignore SIGTERM without a
+    handler, and every `docker compose stop` would end in a SIGKILL after
+    10 seconds. The handler is captured instead of really installed, so the
+    test process keeps its own SIGTERM behaviour."""
+    FakeScheduler.built.clear()
+    handlers: dict[int, Any] = {}
+    monkeypatch.setattr(scheduler, "build_scheduler", FakeScheduler)
+    monkeypatch.setattr(
+        scheduler.signal, "signal", lambda signum, handler: handlers.__setitem__(signum, handler)
+    )
+
+    scheduler.main()
+    handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+    [built] = FakeScheduler.built
+    assert built.shutdown_calls == [{"wait": False}]
 
 
 def test_the_cleanup_job_name_resolves_to_the_job() -> None:

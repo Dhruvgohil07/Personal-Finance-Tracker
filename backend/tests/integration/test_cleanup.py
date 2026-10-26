@@ -43,6 +43,13 @@ NOW = datetime.now(UTC)
 JUST_STALE = NOW - STALE_UPLOAD_AFTER - timedelta(minutes=1)
 NOT_YET_STALE = NOW - STALE_UPLOAD_AFTER + timedelta(minutes=5)
 JUST_EXPIRED_FILE = NOW - cleanup_service.BLOB_MAX_AGE - timedelta(minutes=1)
+# Beyond the grace margin for dead token families.
+LONG_EXPIRED = NOW - cleanup_service.DEAD_FAMILY_GRACE - timedelta(minutes=1)
+
+
+def no_job_waits(upload_id: uuid.UUID) -> bool:
+    """Redis has no job for any upload: every stale-looking upload is lost."""
+    return False
 
 
 # --- Fixtures and helpers ---------------------------------------------------
@@ -139,13 +146,35 @@ def test_an_upload_unfinished_for_over_an_hour_is_failed(
         db, account, status=status, created_at=JUST_STALE, file_created_at=JUST_STALE
     )
 
-    counts = cleanup_service.run_cleanup(db, now=NOW)
+    counts = cleanup_service.run_cleanup(db, now=NOW, job_is_waiting=no_job_waits)
 
     upload = reload(db, upload_id)
     assert upload.status is UploadStatus.FAILED
     assert upload.error_message == STALE_UPLOAD_MESSAGE
     assert not has_file(db, upload_id)
     assert (counts.stale_uploads_failed, counts.blobs_deleted) == (1, 1)
+
+
+def test_an_old_upload_whose_job_still_waits_is_left_alone(db: Session, account: Account) -> None:
+    """Over an hour old, but its job is still queued in Redis - e.g. the
+    worker was down and has just come back. Failing it now would make the
+    user upload again a file that is about to import."""
+    upload_id = add_upload(
+        db, account, status=UploadStatus.PENDING, created_at=JUST_STALE, file_created_at=JUST_STALE
+    )
+    asked: list[uuid.UUID] = []
+
+    def its_job_waits(candidate: uuid.UUID) -> bool:
+        asked.append(candidate)
+        return True
+
+    counts = cleanup_service.run_cleanup(db, now=NOW, job_is_waiting=its_job_waits)
+
+    assert reload(db, upload_id).status is UploadStatus.PENDING
+    assert has_file(db, upload_id)
+    assert counts.stale_uploads_failed == 0
+    # Only the stale-looking upload was looked up in Redis.
+    assert asked == [upload_id]
 
 
 def test_a_recent_unfinished_upload_is_left_alone(db: Session, account: Account) -> None:
@@ -158,7 +187,7 @@ def test_a_recent_unfinished_upload_is_left_alone(db: Session, account: Account)
         file_created_at=NOT_YET_STALE,
     )
 
-    counts = cleanup_service.run_cleanup(db, now=NOW)
+    counts = cleanup_service.run_cleanup(db, now=NOW, job_is_waiting=no_job_waits)
 
     assert reload(db, upload_id).status is UploadStatus.PENDING
     assert has_file(db, upload_id)
@@ -174,7 +203,7 @@ def test_an_old_finished_upload_is_left_alone(
     """Age alone never touches a finished import."""
     upload_id = add_upload(db, account, status=status, created_at=NOW - timedelta(days=90))
 
-    cleanup_service.run_cleanup(db, now=NOW)
+    cleanup_service.run_cleanup(db, now=NOW, job_is_waiting=no_job_waits)
 
     upload = reload(db, upload_id)
     assert upload.status is status
@@ -198,7 +227,7 @@ def test_an_upload_waiting_for_its_password_expires_after_a_day(
         file_created_at=JUST_EXPIRED_FILE,
     )
 
-    counts = cleanup_service.run_cleanup(db, now=NOW)
+    counts = cleanup_service.run_cleanup(db, now=NOW, job_is_waiting=no_job_waits)
 
     upload = reload(db, waiting)
     assert upload.status is UploadStatus.FAILED
@@ -219,7 +248,7 @@ def test_an_upload_waiting_for_its_password_for_two_hours_is_left_alone(
         file_created_at=two_hours_ago,
     )
 
-    cleanup_service.run_cleanup(db, now=NOW)
+    cleanup_service.run_cleanup(db, now=NOW, job_is_waiting=no_job_waits)
 
     assert reload(db, waiting).status is UploadStatus.NEEDS_PASSWORD
     assert has_file(db, waiting)
@@ -236,7 +265,7 @@ def test_a_leftover_file_of_a_finished_upload_is_deleted(db: Session, account: A
         file_created_at=JUST_EXPIRED_FILE,
     )
 
-    counts = cleanup_service.run_cleanup(db, now=NOW)
+    counts = cleanup_service.run_cleanup(db, now=NOW, job_is_waiting=no_job_waits)
 
     assert reload(db, upload_id).status is UploadStatus.COMPLETED
     assert not has_file(db, upload_id)
@@ -252,10 +281,10 @@ def test_a_second_run_finds_nothing_to_do(db: Session, account: Account) -> None
         db, account, status=UploadStatus.PENDING, created_at=JUST_STALE, file_created_at=JUST_STALE
     )
     add_token(db, account, family_id=uuid.uuid4(), expires_at=NOW - timedelta(days=1))
-    first = cleanup_service.run_cleanup(db, now=NOW)
+    first = cleanup_service.run_cleanup(db, now=NOW, job_is_waiting=no_job_waits)
     assert first != cleanup_service.CleanupCounts(0, 0, 0, 0)
 
-    second = cleanup_service.run_cleanup(db, now=NOW)
+    second = cleanup_service.run_cleanup(db, now=NOW, job_is_waiting=no_job_waits)
 
     assert second == cleanup_service.CleanupCounts(0, 0, 0, 0)
 
@@ -277,13 +306,35 @@ def test_the_job_cleans_up_and_logs_counts_only(
     assert str(upload_id) not in str(events)
 
 
+def test_each_rule_commits_on_its_own(
+    db: Session,
+    account: Account,
+    job_sessions: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rule 1's work is committed before rule 3 runs, so its row locks are
+    short - and a failure in a later rule does not undo it."""
+    upload_id = add_upload(
+        db, account, status=UploadStatus.PENDING, created_at=JUST_STALE, file_created_at=JUST_STALE
+    )
+
+    def token_rule_breaks(*_args: object) -> int:
+        raise RuntimeError("token rule failed")
+
+    monkeypatch.setattr(cleanup_service, "_delete_dead_token_families", token_rule_breaks)
+    with job_sessions() as session, pytest.raises(RuntimeError):
+        cleanup_service.run_cleanup(session, now=NOW, job_is_waiting=no_job_waits)
+
+    assert reload(db, upload_id).status is UploadStatus.FAILED
+
+
 def test_the_counts_survive_log_redaction(db: Session, account: Account) -> None:
     """`capture_logs` skips our processors, so it cannot see redaction.
     The real processor is applied by hand: a count named like a secret
-    ("refresh_tokens_deleted" contains "token") would come out as
-    [REDACTED] and the log line would be useless. Found in the live run."""
+    ("refresh_tokens_deleted" contains "token") came out as [REDACTED] in
+    the live run, until the redaction learned to let integer counts through."""
     with structlog.testing.capture_logs() as events:
-        cleanup_service.run_cleanup(db, now=NOW)
+        cleanup_service.run_cleanup(db, now=NOW, job_is_waiting=no_job_waits)
 
     [finished] = [event for event in events if event["event"] == "cleanup_finished"]
     assert redact_sensitive_fields(None, "info", dict(finished)) == finished
@@ -295,9 +346,9 @@ def test_the_counts_survive_log_redaction(db: Session, account: Account) -> None
 def test_a_family_whose_every_token_expired_is_deleted(db: Session, account: Account) -> None:
     family = uuid.uuid4()
     add_token(db, account, family_id=family, expires_at=NOW - timedelta(days=40))
-    add_token(db, account, family_id=family, expires_at=NOW - timedelta(days=2))
+    add_token(db, account, family_id=family, expires_at=LONG_EXPIRED)
 
-    counts = cleanup_service.run_cleanup(db, now=NOW)
+    counts = cleanup_service.run_cleanup(db, now=NOW, job_is_waiting=no_job_waits)
 
     assert counts.refresh_tokens_deleted == 2
     assert count_tokens(db) == 0
@@ -312,7 +363,7 @@ def test_an_expired_token_is_kept_while_its_family_is_alive(db: Session, account
     other_dead_family = uuid.uuid4()
     add_token(db, account, family_id=other_dead_family, expires_at=NOW - timedelta(days=1))
 
-    counts = cleanup_service.run_cleanup(db, now=NOW)
+    counts = cleanup_service.run_cleanup(db, now=NOW, job_is_waiting=no_job_waits)
 
     assert counts.refresh_tokens_deleted == 1
     remaining = set(db.scalars(select(RefreshToken.family_id)))
@@ -348,10 +399,31 @@ def test_reuse_detection_still_works_after_cleanup(client: TestClient, db: Sessi
     )
     db.commit()
 
-    cleanup_service.run_cleanup(db, now=datetime.now(UTC))
+    cleanup_service.run_cleanup(db, now=datetime.now(UTC), job_is_waiting=no_job_waits)
     # The expired T1 survived the cleanup, because T2 keeps the family alive.
     assert count_tokens(db) == 2
 
     assert refresh(token_1).status_code == 401
     # Recognised as reuse, so the whole family was revoked: T2 is dead too.
     assert refresh(token_2).status_code == 401
+
+
+def test_a_family_that_only_just_expired_is_kept_for_the_grace_period(
+    db: Session, account: Account
+) -> None:
+    """Its newest token expired ten minutes ago: a refresh checked just
+    before that moment could still be committing a new token into it, so
+    the family waits out DEAD_FAMILY_GRACE before it is deleted."""
+    family = uuid.uuid4()
+    add_token(db, account, family_id=family, expires_at=NOW - timedelta(days=3))
+    add_token(db, account, family_id=family, expires_at=NOW - timedelta(minutes=10))
+
+    counts = cleanup_service.run_cleanup(db, now=NOW, job_is_waiting=no_job_waits)
+
+    assert counts.refresh_tokens_deleted == 0
+    assert count_tokens(db) == 2
+
+    later = NOW + cleanup_service.DEAD_FAMILY_GRACE
+    assert cleanup_service.run_cleanup(db, now=later, job_is_waiting=no_job_waits) == (
+        cleanup_service.CleanupCounts(0, 0, 0, 2)
+    )

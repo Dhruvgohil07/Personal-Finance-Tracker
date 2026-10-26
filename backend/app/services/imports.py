@@ -36,6 +36,7 @@ upload the same file again at once.
 import dataclasses
 import hashlib
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
@@ -45,7 +46,7 @@ from typing import NoReturn
 import structlog
 from redis.exceptions import RedisError
 from rq import Queue
-from sqlalchemy import delete, select, text
+from sqlalchemy import ColumnElement, and_, delete, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -68,7 +69,7 @@ from app.parsers.normalize import normalize_row
 from app.parsers.readers import READABLE_FILE_TYPES, detect_file_type, read_statement_as
 from app.parsers.registry import ParserRegistry, build_default_registry
 from app.services import accounts as accounts_service
-from app.workers.queue import enqueue_statement_processing
+from app.workers.queue import enqueue_statement_processing, statement_job_waiting_check
 
 log = structlog.get_logger()
 
@@ -107,10 +108,15 @@ UNEXPECTED_FAILURE_MESSAGE = (
 STALE_UPLOAD_MESSAGE = "This import did not finish. Please upload the file again."
 
 # How long an upload may stay `pending`/`processing` before it is presumed
-# lost: the API died between commit and enqueue, or the worker was down.
-# A real import takes seconds; RQ's retries add at most ~6 minutes. Phase 2
-# Step 3's cleanup job will use the same threshold.
+# lost: the API died between commit and enqueue, or its job is gone. A real
+# import takes seconds; RQ's retries add at most ~6 minutes. Age alone is
+# not enough, though: see `fail_stale_uploads`.
 STALE_UPLOAD_AFTER = timedelta(hours=1)
+
+# "Is this upload's job still waiting in Redis (queued, scheduled, running)?"
+# Given to `fail_stale_uploads` by its caller; see
+# `statement_job_waiting_check` in app/workers/queue.py.
+JobIsWaiting = Callable[[uuid.UUID], bool]
 
 # The statuses in which an upload still has work to do. `processing` is in
 # it because a worker that crashed half-way leaves the row `processing`,
@@ -186,8 +192,9 @@ def create_upload(
        someone else (rule 2, IDOR).
     3. **sha256 of the bytes** -> was this exact file already uploaded by
        this user? Dedupe level 1 (SPEC §6.3). An earlier upload of it that
-       is stuck unfinished for over `STALE_UPLOAD_AFTER` is failed first,
-       so a lost job cannot block the file (`_fail_if_stale`).
+       is stale (`fail_stale_uploads`: unfinished for over an hour, and no
+       job waiting for it) is failed first, so a lost job cannot block the
+       file.
     4. **file type, from the file's signature** ("magic bytes"), so a
        Word document renamed to `.xls` is refused here, not in the worker.
 
@@ -205,7 +212,28 @@ def create_upload(
 
     file_sha256 = hashlib.sha256(content).hexdigest()
     existing = _live_upload(db, user_id, file_sha256)
-    if existing is not None and not _fail_if_stale(db, existing):
+    if existing is not None and existing.status in UNFINISHED_STATUSES:
+        # Fail it if it is stale - the same rule, in the same SQL, as the
+        # hourly cleanup - and then LOOK AGAIN rather than trusting what
+        # this request did. The cleanup job or the worker may have failed
+        # it a moment earlier (this UPDATE then waits for their lock and
+        # matches nothing), and either way the file is free.
+        failed, _files = fail_stale_uploads(
+            db,
+            now=datetime.now(UTC),
+            job_is_waiting=statement_job_waiting_check(queue.connection),
+            upload_id=existing.id,
+        )
+        db.commit()
+        if failed:
+            log.info(
+                "statement_import_failed",
+                user_id=str(user_id),
+                upload_id=str(existing.id),
+                reason="stale",
+            )
+        existing = _live_upload(db, user_id, file_sha256)
+    if existing is not None:
         _raise_duplicate(existing)
 
     file_type = _supported_file_type(filename, content)
@@ -423,6 +451,87 @@ def fail_upload(db: Session, upload_id: uuid.UUID, message: str, *, reason: str)
         reason=reason,
     )
     return True
+
+
+def stale_upload_condition(now: datetime) -> ColumnElement[bool]:
+    """SQL condition: unfinished, and created more than STALE_UPLOAD_AFTER ago.
+
+    The one definition of "stale by age", used by the hourly cleanup and by
+    `create_upload` alike, so the two cannot disagree.
+    """
+    return and_(
+        StatementUpload.status.in_(UNFINISHED_STATUSES),
+        StatementUpload.created_at < now - STALE_UPLOAD_AFTER,
+    )
+
+
+def fail_uploads_where(
+    db: Session, condition: ColumnElement[bool], message: str
+) -> tuple[list[uuid.UUID], int]:
+    """Fail every upload matching `condition` and delete their stored files.
+
+    The set-based form of `fail_upload`: one `UPDATE ... RETURNING`, then
+    one DELETE of the files. Returns (failed ids, files deleted). Does NOT
+    commit; the caller decides when.
+
+    Safe next to a running import: if the worker holds an upload's row
+    lock, the UPDATE waits for it and then checks `condition` again against
+    the row as the worker left it (Postgres does this in READ COMMITTED),
+    so an upload that has just completed no longer matches.
+    """
+    failed_ids = list(
+        db.scalars(
+            update(StatementUpload)
+            .where(condition)
+            .values(status=UploadStatus.FAILED, error_message=message)
+            .returning(StatementUpload.id)
+            # Set-based: the ORM must not try to apply this to objects
+            # loaded in the session (`_live_upload` re-reads with
+            # populate_existing instead).
+            .execution_options(synchronize_session=False)
+        )
+    )
+    if not failed_ids:
+        return failed_ids, 0
+    deleted = db.execute(
+        delete(UploadBlob)
+        .where(UploadBlob.upload_id.in_(failed_ids))
+        .returning(UploadBlob.upload_id)
+    )
+    return failed_ids, len(deleted.all())
+
+
+def fail_stale_uploads(
+    db: Session,
+    *,
+    now: datetime,
+    job_is_waiting: JobIsWaiting,
+    upload_id: uuid.UUID | None = None,
+) -> tuple[list[uuid.UUID], int]:
+    """Fail stale uploads (all of them, or just `upload_id`); no commit.
+
+    Stale = unfinished for over an hour (`stale_upload_condition`) AND no
+    job of it still waiting in Redis. Age alone would be wrong after
+    downtime: the uploads' jobs are still queued (Redis keeps its data),
+    and failing them just as the worker comes back would make the user
+    upload again a file that was about to import. Only the candidates are
+    asked about, so this is one Redis lookup per stale-looking upload.
+
+    Returns (failed ids, files deleted).
+    """
+    candidates = select(StatementUpload.id).where(stale_upload_condition(now))
+    if upload_id is not None:
+        candidates = candidates.where(StatementUpload.id == upload_id)
+    lost = [candidate for candidate in db.scalars(candidates) if not job_is_waiting(candidate)]
+    if not lost:
+        return [], 0
+    # The age condition again, in the UPDATE itself, so a row that changed
+    # since the SELECT above is re-checked under its lock.
+    return fail_uploads_where(
+        db,
+        and_(StatementUpload.id.in_(lost), stale_upload_condition(now)),
+        STALE_UPLOAD_MESSAGE,
+    )
 
 
 # --- Step 1: bytes -> a parsed statement (no database) --------------------
@@ -647,27 +756,19 @@ def _live_upload(db: Session, user_id: uuid.UUID, file_sha256: str) -> Statement
     index even in a prepared plan, where a bound parameter's value is
     unknown (see the constant in app/models/statement_upload.py).
     """
-    stmt = select(StatementUpload).where(
-        StatementUpload.user_id == user_id,
-        StatementUpload.file_sha256 == file_sha256,
-        text(NOT_FAILED_SQL),
+    stmt = (
+        select(StatementUpload)
+        .where(
+            StatementUpload.user_id == user_id,
+            StatementUpload.file_sha256 == file_sha256,
+            text(NOT_FAILED_SQL),
+        )
+        # Re-read the row's columns even if this session already holds the
+        # object: `create_upload` asks twice, and the second answer must
+        # reflect what was committed in between, not a copy from the first.
+        .execution_options(populate_existing=True)
     )
     return db.scalar(stmt)
-
-
-def _fail_if_stale(db: Session, upload: StatementUpload) -> bool:
-    """Fail an upload stuck unfinished for too long; True if that freed its file.
-
-    A `pending` or `processing` upload older than `STALE_UPLOAD_AFTER` has
-    no job working on it any more (the job was lost, or its worker died
-    for good). Without this, uploading the same file again would be refused
-    until the cleanup job ran. A finished upload is never touched.
-    """
-    if upload.status not in UNFINISHED_STATUSES:
-        return False
-    if upload.created_at > datetime.now(UTC) - STALE_UPLOAD_AFTER:
-        return False
-    return fail_upload(db, upload.id, STALE_UPLOAD_MESSAGE, reason="stale")
 
 
 def _raise_duplicate(existing: StatementUpload) -> NoReturn:

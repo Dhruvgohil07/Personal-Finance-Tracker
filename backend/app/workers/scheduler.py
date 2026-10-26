@@ -18,7 +18,9 @@ That is harmless (the job is idempotent) but pointless; docker-compose
 starts one.
 """
 
+import signal
 from datetime import UTC, datetime
+from types import FrameType
 
 import structlog
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -82,8 +84,23 @@ def main() -> None:
     # The app's shared client: its 2 s timeouts suit a process that sends
     # one short command an hour (unlike the worker, which blocks waiting).
     queue = Queue(QUEUE_NAME, connection=get_redis())
+    scheduler = build_scheduler(queue)
+
+    def stop(signum: int, frame: FrameType | None) -> None:
+        """SIGTERM (`docker compose stop`): stop the clock and exit cleanly.
+
+        Needed because this process is PID 1 in its container, and Linux
+        IGNORES a signal sent to PID 1 unless the process installed a
+        handler for it. Without this, every stop would hang for Docker's
+        10-second grace period and then end in a SIGKILL. (The worker needs
+        nothing like this: RQ installs its own handlers.)
+        """
+        log.info("scheduler_stopping")
+        scheduler.shutdown(wait=False)
+
+    signal.signal(signal.SIGTERM, stop)
     log.info("scheduler_started", every_seconds=int(CLEANUP_INTERVAL.total_seconds()))
-    build_scheduler(queue).start()
+    scheduler.start()
 
 
 if __name__ == "__main__":

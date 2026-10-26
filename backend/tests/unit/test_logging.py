@@ -51,6 +51,29 @@ def test_safe_key_is_kept(key: str) -> None:
     assert redact({key: 42}) == {key: 42}
 
 
+@pytest.mark.parametrize("key", ["refresh_tokens_deleted", "token_count", "password_reset_failed"])
+def test_an_integer_count_is_kept_even_with_a_sensitive_word_in_its_name(key: str) -> None:
+    """A number of rows says nothing about any row (found in Step 3's live
+    run, where `refresh_tokens_deleted` was hidden)."""
+    assert redact({key: 3}) == {key: 3}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        # The count name alone is not enough: a string is still redacted...
+        ("refresh_token_count", "eyJhbGciOi..."),
+        # ...a bool is not a count (bool is a subclass of int in Python)...
+        ("tokens_deleted", True),
+        # ...and an amount does not end in a count suffix, so it stays hidden.
+        ("amount_paise", 7000),
+        ("balance_after_paise", 11147133),
+    ],
+)
+def test_only_integer_counts_get_through(key: str, value: object) -> None:
+    assert redact({key: value}) == {key: REDACTED}
+
+
 def test_nested_dicts_and_lists_are_redacted() -> None:
     event = {
         "user_id": 1,
