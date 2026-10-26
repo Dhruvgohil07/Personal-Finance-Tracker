@@ -246,6 +246,17 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   (data kept), `GET /uploads/{id}` returns them (null = not checked, [] = clean), 3-part
   cursor (old 2-part cursors → 422); ADR 014. 1047 tests, 100% coverage. **Real ICICI
   statement: 175 rows, 0 issues**
+- [x] Step 4 code review (`/code-review high` on PR #19, 7 findings) — 6 fixed, 1 skipped:
+  1+4. parsers no longer derive opening/closing (ICICI swapped them for a one-day
+       newest-first file); they mean "printed on the statement" only
+  2. rows without a balance are carried forward and checked at the next printed balance
+     (no false `needs_review` for once-a-day balances; `missing_balance` kind removed)
+  3. each day is ordered by its balance chain (days oldest-first, transactions newest-first)
+  5. `RawRow.signed_paise` replaces two copies of the sign logic
+  6. SKIPPED: migration 0010 rewrites every row + rebuilds the index in one transaction;
+     it is committed (rule 7), no production DB exists yet; the pattern for large tables
+     is recorded in ADR 014
+  7. the reconcile loop's `first` flag is gone (`_balance_checks` generator)
 
 ## In progress
 - (nothing)
@@ -285,8 +296,9 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
 - Step 4 → decided: `reconciliation_issues` is NULL when nothing could be checked (no
   balance column) and [] when checked and clean; at most 100 stored, full count in
   `reconciliation_errors`. Issues carry the FILE row number and a kind, never amounts
-- Step 4 → decided: issue kinds `balance_mismatch`, `missing_balance`,
-  `opening_balance_mismatch`, `closing_balance_mismatch`
+- Step 4 → decided: issue kinds `balance_mismatch`, `opening_balance_mismatch`,
+  `closing_balance_mismatch` (`missing_balance` was dropped in the review: a blank
+  balance is carried forward, not an error)
 - Step 3 → note: the stale-upload rule scans `statement_uploads` without an index on
   `status` (hourly; fine at personal scale). A partial index `WHERE status IN
   ('pending','processing')` is the fix if it ever shows up
