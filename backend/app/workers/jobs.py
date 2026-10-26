@@ -33,6 +33,7 @@ All three end in `_fail_after_last_attempt`.
 """
 
 import uuid
+from datetime import UTC, datetime
 from types import TracebackType
 
 import structlog
@@ -42,6 +43,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal, build_unpooled_engine
+from app.services import cleanup as cleanup_service
 from app.services import imports as imports_service
 from app.workers.queue import PROCESS_STATEMENT
 
@@ -72,6 +74,17 @@ def process_statement(upload_id: str) -> None:
     # closing rolls back anything that was not committed.
     with SessionLocal() as db:
         imports_service.process_upload(db, uuid.UUID(upload_id))
+
+
+def cleanup() -> None:
+    """The hourly cleanup (SPEC §11). Enqueued by app/workers/scheduler.py.
+
+    Takes no arguments: what to clean up is decided by the database and the
+    clock, and the time is read here so the service can be tested with any
+    time it is given.
+    """
+    with SessionLocal() as db:
+        cleanup_service.run_cleanup(db, now=datetime.now(UTC))
 
 
 def on_process_statement_failure(
