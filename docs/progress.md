@@ -267,8 +267,24 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   `app/parsers/base.py`; `NormalizedRow.channel` + `counterparty_vpa`; migration 0011
   (`transactions.merchant_key` + `(user_id, merchant_key)` index); the importer stores
   all three; ADR 015. 1125 tests, 100% coverage. **Real statement: fingerprints
-  identical to before on all 175 rows**; 172 UPI / 2 IMPS / 1 ATM, 170/172 UPI rows
-  with a VPA, 174/175 rows with a merchant key
+  identical to before on all 175 rows**; 172 UPI / 2 IMPS / 1 ATM, 174/175 rows with
+  a merchant key
+- [x] Step 5 code review (`/code-review high` on PR #20, 8 findings) — all 8 fixed:
+  1. whole-name keys matched the seeded dictionary on 2 real rows instead of 16 (ICICI
+     cuts "Swiggy Limited" to `SWIGGYLIM`). New pure `dictionary_key`: exact match, else
+     the longest seeded key of 5+ characters the key starts with → 16 again. **Step 6
+     must use it** for the dictionary lookup
+  2. a real counterparty name had been committed in the `name_key` docstring and
+     ADR 015 (and pasted into the PR description) → replaced with an invented example.
+     The earlier pushed commits still contain it (not rewritable)
+  3. an all-digit VPA that is not a phone number is an account number → NULL
+     (CLAUDE.md §7.3); 5 real rows. Now 165/172 UPI rows have a VPA
+  4. noise words are derived from the channel table (`UPL` the one exception)
+  5. both ICICI layouts are anchored at both ends, so a `/` in the remark no longer
+     changes the key
+  6. the VPA regex requires the handle to end there, so an email is not a VPA
+  7. company filler is dropped only as a suffix (`INDIA GATE` keeps its name)
+  8. `detect_channel` matches the first word instead of splitting the whole narration
 
 ## In progress
 - (nothing)
