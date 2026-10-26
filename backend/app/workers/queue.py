@@ -35,6 +35,7 @@ QUEUE_NAME = "default"
 PROCESS_STATEMENT = "app.workers.jobs.process_statement"
 ON_PROCESS_STATEMENT_FAILURE = "app.workers.jobs.on_process_statement_failure"
 ON_PROCESS_STATEMENT_STOPPED = "app.workers.jobs.on_process_statement_stopped"
+CLEANUP = "app.workers.jobs.cleanup"
 
 # How often, and after how long, an unexpected error is retried: 3 more
 # attempts, 10 s, 1 min and 5 min after the failures before them. Meant for
@@ -49,6 +50,9 @@ RETRY_INTERVALS_SECONDS = [10, 60, 300]
 # Redis, with the traceback. RQ's default is a year; a week is plenty to
 # investigate, and a traceback is not something to keep around for longer.
 FAILURE_TTL = timedelta(days=7)
+
+# The cleanup job is enqueued every hour by app/workers/scheduler.py.
+CLEANUP_INTERVAL = timedelta(hours=1)
 
 
 def get_queue() -> Queue:
@@ -83,5 +87,24 @@ def enqueue_statement_processing(queue: Queue, upload_id: uuid.UUID) -> Job:
         # worker, not the job (see app/workers/jobs.py).
         on_failure=Callback(ON_PROCESS_STATEMENT_FAILURE),
         on_stopped=Callback(ON_PROCESS_STATEMENT_STOPPED),
+        failure_ttl=int(FAILURE_TTL.total_seconds()),
+    )
+
+
+def enqueue_cleanup(queue: Queue) -> Job:
+    """Put a `cleanup()` job on the queue (called hourly by the scheduler).
+
+    No retry: the job is idempotent and the next hour's run does the same
+    work anyway.
+
+    `ttl` is how long the job may WAIT in the queue before RQ throws it
+    away unrun (RQ drops a job whose Redis key has expired). With the
+    worker stopped for a day, this keeps the queue from collecting 24
+    cleanup jobs that would then all run back to back; at most the newest
+    one is still there when the worker returns.
+    """
+    return queue.enqueue(
+        CLEANUP,
+        ttl=int(CLEANUP_INTERVAL.total_seconds()),
         failure_ttl=int(FAILURE_TTL.total_seconds()),
     )

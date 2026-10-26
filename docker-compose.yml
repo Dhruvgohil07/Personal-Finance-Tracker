@@ -1,7 +1,7 @@
-# Local development infrastructure: Postgres + Redis + the RQ worker.
+# Local development infrastructure: Postgres + Redis + the RQ worker + its scheduler.
 # Start:  docker compose up -d        Stop: docker compose down
 # Reset all data (deletes volumes!): docker compose down -v
-# After changing backend code, rebuild the worker:  docker compose up -d --build worker
+# After changing backend code, rebuild:  docker compose up -d --build worker scheduler
 #
 # The API runs outside Docker (`uv run uvicorn ...`). The worker runs inside
 # it because RQ needs fork(), which Windows doesn't have.
@@ -59,6 +59,21 @@ services:
       redis:
         condition: service_healthy
     # Start again after a crash, or after Docker Desktop restarts.
+    restart: unless-stopped
+
+  scheduler:
+    # Same image as the worker, different command: a clock that enqueues the
+    # hourly cleanup job, which the worker then runs (app/workers/scheduler.py).
+    # Run exactly one of these.
+    build: ./backend
+    command: ["python", "-m", "app.workers.scheduler"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://kharcha:kharcha@postgres:5432/kharcha
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
