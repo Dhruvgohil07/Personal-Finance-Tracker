@@ -237,13 +237,23 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   8-9. one `fail_stale_uploads` + `fail_uploads_where` shared by cleanup and re-upload
   1015 tests, 100% coverage. ADR 005 and ADR 013 amended
 
+- [x] Step 4: Statement order + balance reconciliation — `app/parsers/reconcile.py` (pure:
+  `to_chronological` keeps or REVERSES rows, never sorts; `reconcile` checks each row
+  against the balance printed before it + opening/closing when known), migration 0010
+  (`transactions.statement_seq` back-filled + UNIQUE per upload, keyset index
+  `(user_id, txn_date DESC, statement_seq DESC, id DESC)`,
+  `statement_uploads.reconciliation_issues`), worker sets `needs_review` when issues exist
+  (data kept), `GET /uploads/{id}` returns them (null = not checked, [] = clean), 3-part
+  cursor (old 2-part cursors → 422); ADR 014. 1047 tests, 100% coverage. **Real ICICI
+  statement: 175 rows, 0 issues**
+
 ## In progress
 - (nothing)
 
 ## Next up
-- Phase 2 Step 4: statement order + balance reconciliation — `app/parsers/reconcile.py`,
-  migration 0010 (`transactions.statement_seq`, `statement_uploads.reconciliation_issues`),
-  3-part cursor, ADR 014
+- Phase 2 Step 5: channel, VPA and merchant key from real narrations — golden test of
+  `normalize_description` + fingerprints FIRST, then inspect the real narrations with Dhruv,
+  `app/parsers/narration.py`, migration 0011 (`transactions.merchant_key`), ADR 015
 - Steps 9–10 (ICICI PDF, password PDFs) are blocked until the ICICI PDF is in `samples/`
 
 ## Open decisions / questions
@@ -272,6 +282,11 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   review: the redaction lets INTEGER values of keys ending in `_count`/`_deleted`/`_failed`
   through (a string under such a name is still redacted). A test runs the cleanup's log
   line through the real processor (`capture_logs` skips processors)
+- Step 4 → decided: `reconciliation_issues` is NULL when nothing could be checked (no
+  balance column) and [] when checked and clean; at most 100 stored, full count in
+  `reconciliation_errors`. Issues carry the FILE row number and a kind, never amounts
+- Step 4 → decided: issue kinds `balance_mismatch`, `missing_balance`,
+  `opening_balance_mismatch`, `closing_balance_mismatch`
 - Step 3 → note: the stale-upload rule scans `statement_uploads` without an index on
   `status` (hourly; fine at personal scale). A partial index `WHERE status IN
   ('pending','processing')` is the fix if it ever shows up
@@ -549,23 +564,11 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
   (`word_similarity` / `<%`, which does use the index with a parameter) or a tsvector
   column. Until that is decided the index only costs write time. Phase 2 plan: deferred to
   Phase 3, when the frontend has a search box
-- Transactions on the SAME DAY come back in random order: the sort key is
-  `(txn_date DESC, id DESC)` and ids are UUIDv4, so `balance_after_paise` looks
-  non-monotonic when comparing a day against the paper statement. Nothing stores the
-  statement's own row order. `RawRow.row_number` exists in the parser, but storing it needs
-  migration 0006 AND two decisions first: rows of one day can come from two different
-  statements (indexes from different files are not comparable) and a newest-first statement
-  reverses the meaning of the index, so the importer would have to normalize the sequence
-  to chronological. The cursor would also have to carry the third key component (ADR 009).
-  Planned with Phase 2 balance reconciliation (SPEC §6.4), which needs the same ordering.
-  **Upgraded from cosmetic to BLOCKING by the Part B run (2026-10-13).** A balance-chain
-  check (`balance[n] − balance[n−1] == ±amount[n]`) over the real statement read through
-  `GET /transactions` reported 151 of 174 links broken — purely because ~6 rows share each
-  day and came back shuffled. The same check in the parser's file order was 174/174. So the
-  stored `balance_after_paise` column is **unusable for reconciliation today**: SPEC §6.4
-  cannot be built until the row sequence is stored, which makes migration 0006 a
-  PREREQUISITE of §6.4 rather than a nicety alongside it. It also means any future
-  reconciliation test must order by the stored sequence, never by `(txn_date, id)`
+- **SOLVED (Phase 2 Step 4): same-day transactions came back in random order.** The
+  list sorted a day's rows by a random UUID, so the balance column jumped around (151 of
+  174 links looked broken in the Part B run). Now `transactions.statement_seq` stores each
+  row's position in its statement, oldest first, and the list and cursor sort by
+  `(txn_date, statement_seq, id)` (ADR 014). The real statement reconciles with 0 issues
 - **SOLVED (2026-10-13): the "flaky integration tests" are TWO pytest runs sharing one
   test database.** Reproduced while Dhruv was running the suite in his editor and Claude
   ran it too: 8 failures + 7 errors, and the run took **454 s instead of the usual ~62 s**.
