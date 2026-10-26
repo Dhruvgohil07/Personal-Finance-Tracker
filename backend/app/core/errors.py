@@ -131,6 +131,15 @@ class InvalidStatementError(AppError):
     message = "The statement could not be read."
 
 
+class ServiceUnavailableError(AppError):
+    # Something we depend on is down, e.g. Redis, so an upload could not be
+    # handed to the worker. 503 tells the client "try again later": nothing
+    # is wrong with the request itself.
+    status_code = HTTPStatus.SERVICE_UNAVAILABLE
+    code = "SERVICE_UNAVAILABLE"
+    message = "The service is temporarily unavailable. Please try again in a few minutes."
+
+
 # --- Handlers -------------------------------------------------------------
 # A handler receives the request and the exception and returns a response.
 # FastAPI picks the handler registered for the exception's class (or the

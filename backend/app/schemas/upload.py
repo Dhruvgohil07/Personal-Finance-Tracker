@@ -123,11 +123,19 @@ class ColumnMappingRequest(BaseModel):
 
 
 class UploadResponse(BaseModel):
-    """What POST /uploads returns: the upload row and what the import did.
+    """One upload: where its import is, and what it did.
+
+    Returned by every /uploads endpoint. `POST /uploads` returns it while
+    it is still `pending` (202); the client polls `GET /uploads/{id}` until
+    `status` is final:
+
+    - `completed` - the counts below are filled in;
+    - `failed`    - `error_message` says why, in words meant for the user.
 
     `rows_parsed = rows_inserted + rows_duplicate`. A re-uploaded
     overlapping statement therefore shows a high `rows_duplicate` and only
-    the genuinely new rows in `rows_inserted` (SPEC §6.3).
+    the genuinely new rows in `rows_inserted` (SPEC §6.3). All three are 0
+    until the import has completed.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -142,7 +150,7 @@ class UploadResponse(BaseModel):
     rows_parsed: int
     rows_inserted: int
     rows_duplicate: int
-    # Always 0 in Phase 1: balance reconciliation is Phase 2 (SPEC §6.4).
+    # Always 0 until balance reconciliation is built (Phase 2 Step 4, SPEC §6.4).
     reconciliation_errors: int
     error_message: str | None
     created_at: datetime
@@ -150,6 +158,8 @@ class UploadResponse(BaseModel):
 
     # `file_sha256` is deliberately not part of this response: it is an
     # internal dedupe key, and the client already has the file it sent.
+    # `column_mapping` is left out too: the client sent it, and it is only
+    # stored so the worker can read it.
 
 
 def column_mapping_json_example() -> dict[str, Any]:

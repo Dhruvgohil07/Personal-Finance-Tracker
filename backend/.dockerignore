@@ -1,0 +1,15 @@
+# Files Docker must not send to the build (see backend/Dockerfile).
+# The local virtualenv is Windows-specific and large; the image builds its own.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+# The tests run outside the image.
+tests/
+# Never bake secrets into an image: compose passes them in at run time.
+.env
+.env.*
