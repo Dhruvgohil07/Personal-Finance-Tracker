@@ -195,6 +195,24 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   `POST /uploads` → **202**, new `GET /uploads`, `GET /uploads/{id}`, `DELETE /uploads/{id}`
   (409 while `processing`); migration 0008 (`statement_uploads.column_mapping` jsonb);
   503 + `failed` when Redis is down; ADR 013. 963 tests, 100% coverage
+- [x] Step 2 code review (`/code-review high` on PR #17, 8 findings) — all 8 fixed:
+  1. a job whose process died or was stopped now also ends `failed` (`on_stopped` +
+     the worker's `work_horse_killed_handler`; RQ skips `on_failure` for both). The
+     parent-process hooks use an unpooled engine
+  2. DELETE uses `SKIP LOCKED`: 409 at once while an import runs, instead of waiting
+     for it and then deleting it
+  3. DELETE refuses (409) an upload a LATER overlapping upload relies on, since the
+     later one's skipped duplicates belong to it
+  4. the import locks user → account → upload (`FOR KEY SHARE` first), the order
+     DELETE /accounts and DELETE /me use: no deadlock (tested with a concurrent DELETE)
+  5. an enqueue error after the job got through answers 202, not 503
+  6. a duplicate of an unfinished upload says "being imported" and names it; one
+     unfinished for over 1 h (`STALE_UPLOAD_AFTER`) is failed on the spot
+  7. the worker reads by the stored file type (`read_statement_as`,
+     `READABLE_FILE_TYPES`), not a made-up filename
+  8. `GET /uploads/{id}` has its own limit (120/min) and sends `Retry-After: 2` while
+     unfinished (ADR 007 amendment)
+  978 tests, 100% coverage. ADR 013 amended
 
 ## In progress
 - (nothing)
@@ -217,6 +235,10 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
 - Step 2 → found in RQ 2.12's source: `on_failure` runs after EVERY failed attempt, before
   the retry decision, so the callback checks `job.should_retry` and only fails the upload
   when no retry is coming
+- Step 2 review → decided: deleting an earlier upload that a later overlapping one
+  relies on is REFUSED (delete the later one first) rather than allowed. Nothing
+  records which upload a skipped duplicate matched, so the check errs on refusing
+- Step 2 review → decided: `STALE_UPLOAD_AFTER = 1 h` (the Step 3 cleanup reuses it)
 - Step 2 → note: tests run jobs on `Queue(is_async=False)` named `kharcha-tests`, so RQ's
   retries are not exercised end to end; the callback's branches are tested directly and
   the retry options are read back from a job stored in Redis

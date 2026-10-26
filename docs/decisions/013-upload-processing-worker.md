@@ -124,3 +124,42 @@ more thing that can drift from the API's.
   instead of RQ's default of a year.
 - The later Phase 2 migrations and ADRs move up by one (see the Phase 2 plan's
   change log).
+
+## Amendment — code review of PR 17 (2026-10-26)
+Eight findings, all fixed on the same branch:
+
+1. **A job can end in three ways, not one.** RQ calls `on_failure` when the job
+   raises, `on_stopped` when it is stopped, and neither when its child process
+   *dies* (out of memory, a crash). For that, the worker's
+   `work_horse_killed_handler` runs. All three now end in `failed` once no retry
+   is coming (`app/workers/jobs.py`). Two of these hooks run in the worker's
+   parent process, which forks a child for every job, so they use an unpooled
+   engine (`build_unpooled_engine`). No connection is left open to be inherited.
+2. **DELETE no longer waits for a running import.** It locks with
+   `SKIP LOCKED`. A row that exists but is locked is being imported, so the
+   answer is 409 at once. The earlier blocking `FOR UPDATE` queued behind the
+   import and then deleted it.
+3. **DELETE refuses an upload that a later overlapping upload relies on** (409,
+   "delete that later upload first"). Dedupe attaches a skipped row to the
+   upload that inserted it, so deleting the earlier upload would cut a hole in
+   the later statement's period. That file could not be uploaded again either.
+   The check errs on the side of refusing, because nothing records which earlier
+   upload a duplicate matched.
+4. **Fixed lock order.** The import takes `FOR KEY SHARE` on the user and the
+   account rows before the upload row. That is the order in which
+   `DELETE /accounts/{id}` and `DELETE /me` take them, so they now wait for the
+   import instead of deadlocking with it. Tested with a real concurrent DELETE.
+5. **An enqueue error is not trusted blindly.** A reply timeout can arrive after
+   Redis accepted the job. `fail_upload` reports whether it failed the upload. If
+   a worker had already claimed it, the request answers 202, not 503.
+6. **Unfinished duplicates.** The 409 for a file whose upload is still
+   `pending`/`processing` now says so ("being imported") and names the upload in
+   `details`. An unfinished upload older than `STALE_UPLOAD_AFTER` (1 h) is
+   failed on the spot, so a lost job cannot block the file. Step 3's cleanup
+   will reuse the threshold.
+7. **The worker reads by the stored file type** (`read_statement_as`), instead
+   of re-detecting it from a made-up filename. `READABLE_FILE_TYPES` in the
+   readers is the one list that both the request and the worker check.
+8. **Polling has its own rate limit** (`UPLOAD_POLL_LIMIT`, 120/min) and a
+   `Retry-After: 2` hint while the upload is unfinished. Polls no longer use up
+   the shared 100/min budget (ADR 007 amendment).
