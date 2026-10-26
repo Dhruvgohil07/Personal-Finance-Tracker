@@ -8,10 +8,14 @@ rule 8); only the LAYOUT is copied from the real file.
 
 import pytest
 
+from app.db.seed_data import COMMON_MERCHANTS
 from app.parsers.base import Channel
 from app.parsers.narration import (
+    _CHANNEL_BY_FIRST_WORD,
+    _KEY_WORTHY_CHANNEL_WORDS,
     Narration,
     detect_channel,
+    dictionary_key,
     extract_vpa,
     merchant_key_candidate,
     name_key,
@@ -73,8 +77,13 @@ def read(raw: str) -> Narration:
         ),
         # A phone-number VPA, complete: a person-to-person payment
         (icici_upi("ANIL SHAH", "9876543210@upi", "Sent using"), "9876543210@upi", "ANILSHAH"),
-        # A phone number cut short (no "@" left): still stored as printed
-        (icici_upi("NEHA PATEL", "91987654321012"), "91987654321012", "NEHAPATEL"),
+        # A phone number with the country code, cut inside the handle
+        (icici_upi("NEHA PATEL", "919876543210@y"), "919876543210@y", "NEHAPATEL"),
+        # A 14-digit ACCOUNT number cut before its "@ifsc" (5 real rows):
+        # never stored as the VPA (CLAUDE.md §7.3, last 4 digits only)
+        (icici_upi("RAJ MEHTA", "12345678901234"), None, "RAJMEHTA"),
+        # An account number that kept its "@": not stored either
+        (icici_upi("RAJ MEHTA", "12345678901@sb"), None, "RAJMEHTA"),
         # A credit: the name field is the payer. BHIM cashback, real shape
         (
             icici_upi("NPCI BHIM", "npcibhimcash@h", "BHIMCASHBA", "HDFC BANK"),
@@ -87,7 +96,7 @@ def read(raw: str) -> Narration:
         (icici_upi("DESK SHOP", "DESK.SHOP@ICICI"), "desk.shop@icici", "DESKSHOP"),
     ],
 )
-def test_icici_upi_reads_name_and_vpa_by_position(raw: str, vpa: str, key: str) -> None:
+def test_icici_upi_reads_name_and_vpa_by_position(raw: str, vpa: str | None, key: str) -> None:
     assert read(raw) == Narration(Channel.UPI, vpa, key)
 
 
@@ -112,13 +121,23 @@ def test_icici_upi_with_a_blank_vpa_field_has_no_vpa() -> None:
 
 
 def test_a_seven_field_upi_narration_without_an_rrn_is_not_read_by_position() -> None:
-    # The RRN in field six is what confirms the layout. Without it the
-    # generic rules apply: no complete VPA here, so none is invented.
+    # The RRN second from the end is what confirms the layout. Without it
+    # the generic rules apply.
     narration = read("UPI/MOON CAFE/moon@ybl/NO REMARK/YES BANK L/REF/ABC")
 
     assert narration.channel is Channel.UPI
     assert narration.counterparty_vpa == "moon@ybl"  # SPEC's pattern still finds it
     assert narration.merchant_key == "MOON"  # first word, not the joined name
+
+
+@pytest.mark.parametrize("remark", ["Rent/Sept", "a/b/c", "/"])
+def test_a_slash_in_the_remark_does_not_shift_the_fields(remark: str) -> None:
+    # The remark is free text typed by the payer. The layout is anchored at
+    # both ends, so the same shop gets the same key and VPA whatever the
+    # remark says (the review found the 7-field check made it "MOON").
+    narration = read(icici_upi("MOON CAFE", "Q123456789@ybl", remark))
+
+    assert narration == Narration(Channel.UPI, "q123456789@ybl", "MOONCAFE")
 
 
 # --- Other real ICICI shapes ----------------------------------------------
@@ -127,6 +146,12 @@ def test_a_seven_field_upi_narration_without_an_rrn_is_not_read_by_position() ->
 def test_icici_imps_reads_the_name_field() -> None:
     # "MMT/IMPS/<RRN>/<remark>/<name>/<bank>": 2 real rows, both credits
     narration = read("MMT/IMPS/612345678912/Refund of fee/ASHA TRADE/State Bank of I")
+
+    assert narration == Narration(Channel.IMPS, None, "ASHATRADE")
+
+
+def test_a_slash_in_the_imps_remark_does_not_shift_the_name() -> None:
+    narration = read("MMT/IMPS/612345678912/Fee 2026/27/ASHA TRADE/State Bank of I")
 
     assert narration == Narration(Channel.IMPS, None, "ASHATRADE")
 
@@ -215,13 +240,25 @@ def test_unknown_narration_is_other_with_a_first_word_key() -> None:
     [
         ("UPI/9876543210@YBL/RENT", "9876543210@ybl"),
         ("to asha.k-2@okaxis today", "asha.k-2@okaxis"),
+        ("UPI/919876543210@paytm/RENT", "919876543210@paytm"),
         # The handle must have letters: a cut-off "name@" is not found
         ("UPI/ashaverma2001@/RENT", None),
         ("NEFT CR-ACME", None),
+        # An email address is not a VPA: the handle must end at a word end
+        ("UPI/512345678901/bill to asha@gmail.com/YES BANK", None),
+        # An account-number VPA ("<account>@<ifsc>") is not kept (§7.3)
+        ("UPI/123456789012@sbin0001234.ifsc.npci/RENT", None),
+        ("UPI/12345678901234@icici/RENT", None),
     ],
 )
 def test_extract_vpa(raw: str, expected: str | None) -> None:
     assert extract_vpa(raw) == expected
+
+
+def test_a_generic_upi_row_with_an_email_has_no_vpa() -> None:
+    narration = read("UPI/512345678901/bill to asha@gmail.com/YES BANK")
+
+    assert narration.counterparty_vpa is None
 
 
 # --- name_key -------------------------------------------------------------
@@ -234,7 +271,14 @@ def test_extract_vpa(raw: str, expected: str | None) -> None:
         ("Moon Cafe", "MOONCAFE"),
         ("MOON-CAFE.", "MOONCAFE"),
         ("Zomato Pvt", "ZOMATO"),
+        ("AMAZON INDIA PVT", "AMAZON"),  # every trailing filler word goes
+        # Filler counts only as a SUFFIX, and never removes the last word
+        ("INDIA GATE", "INDIAGATE"),
+        ("ONLINE", "ONLINE"),
+        ("INDIA PVT", "INDIA"),
         ("CAFE 42", "CAFE"),  # digit-only words dropped
+        # A cut-off last word stays (see dictionary_key)
+        ("Swiggy Lim", "SWIGGYLIM"),
         ("9876543210", None),
         ("AB", None),  # too short to mean anything
         ("", None),
@@ -242,6 +286,32 @@ def test_extract_vpa(raw: str, expected: str | None) -> None:
 )
 def test_name_key(name: str, expected: str | None) -> None:
     assert name_key(name) == expected
+
+
+# --- dictionary_key ---------------------------------------------------------
+
+KNOWN = frozenset({"ZOMATO", "SWIGGY", "NESCAFE", "AMUL", "JIO", "JIOHOTSTAR", "NETFL", "NETFLIX"})
+
+
+@pytest.mark.parametrize(
+    ("merchant_key", "expected"),
+    [
+        ("ZOMATO", "ZOMATO"),  # exact
+        ("SWIGGYLIM", "SWIGGY"),  # ICICI cut "Swiggy Limited" at 10 characters
+        ("NESCAFEDA", "NESCAFE"),  # a branch name after the brand
+        ("JIOHOTSTAR", "JIOHOTSTAR"),  # exact beats the shorter "JIO"
+        ("NETFLIXENT", "NETFLIX"),  # the LONGEST matching prefix wins
+        # Short known keys never match as a prefix: they start real names
+        ("AMULYAK", None),
+        ("JIOTSNA", None),
+        ("AMUL", "AMUL"),  # ...but still match exactly
+        ("MOONCAFE", None),
+        (None, None),
+        ("", None),
+    ],
+)
+def test_dictionary_key(merchant_key: str | None, expected: str | None) -> None:
+    assert dictionary_key(merchant_key, KNOWN) == expected
 
 
 # --- merchant_key_candidate (the generic fallback) -------------------------
@@ -293,6 +363,15 @@ def test_merchant_key_is_none_when_nothing_looks_like_a_name(narration: str) -> 
     assert merchant_key_candidate(narration) is None
 
 
+def test_no_channel_word_becomes_a_merchant_key() -> None:
+    # The noise words are derived from the channel table, so a channel added
+    # there can never key rows by itself (the review found "MMT" doing that).
+    # UPL is the one deliberate exception (`_KEY_WORTHY_CHANNEL_WORDS`).
+    for word in _CHANNEL_BY_FIRST_WORD:
+        expected = word if word in _KEY_WORTHY_CHANNEL_WORDS else "ACME"
+        assert merchant_key_candidate(f"{word}/ACME") == expected, word
+
+
 def test_merchant_keys_match_the_seeded_merchant_dictionary() -> None:
     # The keys produced here are looked up in `merchants.normalized_key`
     # (SPEC §5), which we seeded as uppercase letters/digits with no
@@ -302,3 +381,23 @@ def test_merchant_keys_match_the_seeded_merchant_dictionary() -> None:
 
     assert generic == by_name == "MAKEMYTRIP"
     assert generic.isalnum() and generic.isupper()
+
+
+@pytest.mark.parametrize(
+    ("printed_name", "seeded"),
+    [
+        # Name fields as ICICI cuts them at 10 characters
+        ("Swiggy Lim", "SWIGGY"),
+        ("NESCAFE DA", "NESCAFE"),
+        ("Flipkart I", "FLIPKART"),
+        ("Netflix En", "NETFLIX"),
+        ("Zomato Ltd", "ZOMATO"),
+    ],
+)
+def test_cut_names_still_find_the_real_seeded_merchant(printed_name: str, seeded: str) -> None:
+    # The regression the review measured: whole-field keys matched the
+    # seeded dictionary on 2 real rows instead of 16. Checked against the
+    # REAL seed list, so a seed change that breaks this shows up here.
+    known = {merchant.normalized_key for merchant in COMMON_MERCHANTS}
+
+    assert dictionary_key(name_key(printed_name), known) == seeded
