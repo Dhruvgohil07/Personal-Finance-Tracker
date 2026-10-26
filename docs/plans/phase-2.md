@@ -322,3 +322,15 @@ and Step 5's narration rules).
   dropped: the businesses are local shops and campus vendors, which a global dictionary
   should not hold (ADR 015 §8). `merchant_key_candidate` moved from `normalize.py` to
   `narration.py`.
+- **Step 5 review:** added `dictionary_key` (ADR 015 §5a). Whole-name keys keep ICICI's
+  cut-off suffixes, so the dictionary is matched by the longest seeded prefix of 5+
+  characters. Step 6's merchant handler uses it.
+- **Step 6:** done as **ADR 016**, with no migration. Three decisions were confirmed
+  with Dhruv after measuring the real statement:
+  - P2P credits are **Other Income**;
+  - SPEC §8's keyword examples are built and marked as unseen;
+  - a merchant credit is **Refunds**.
+
+  The "user manual" step is a guard in `categorize`, not a handler. `CategorySource`
+  moved to `app/categorizer/base.py`. The user-rule handler is built now; it gets an
+  empty rule list until Step 7's table exists. Real share: **89/175 = 50.9%**.
