@@ -93,3 +93,28 @@ their real order.
   rows are imported.
 - A newest-first ICICI export has no derived opening/closing balance (the parser
   refuses to guess). Its rows are still checked link by link after reversal.
+
+## Amendment — code review of PR 19 (2026-10-26)
+1. **Parsers no longer derive opening/closing balances.** The ICICI parser derived
+   both from the first and last row in FILE order, before `to_chronological` had
+   decided the order. A one-day newest-first export passed its "first date > last
+   date" guard, got the two values swapped, and a correct statement ended up in
+   `needs_review`. `ParsedStatement.opening_balance_paise`/`closing_balance_paise`
+   now mean "printed on the statement" only. ICICI prints neither, so neither is
+   set. Only one place, `to_chronological`, decides the order.
+2. **Rows without a balance are not errors.** Statements that print the balance once
+   a day, or leave cells blank, were all `needs_review` (`missing_balance`), and the
+   gaps were never checked. Now the amounts are carried forward, and each printed
+   balance is checked against the previous printed balance plus everything in
+   between. The `missing_balance` kind is gone.
+3. **Each day is ordered by its balance chain**, counting the link from the previous
+   day's last row. This covers exports that list days oldest-first but each day's
+   transactions newest-first. (The single-day case is now just this rule.)
+4. **`RawRow.signed_paise`** replaces the two copies of the debit/credit sign.
+5. **Migration 0010 is not changed**, although the review is right that it rewrites
+   every row and rebuilds the keyset index inside one transaction, blocking writes
+   for its duration. It is committed and has run in CI and on the dev database, so
+   CLAUDE.md rule 7 forbids editing it. No production database exists yet. At this
+   app's size it takes seconds. **For future migrations on large tables:** build
+   indexes with `CREATE INDEX CONCURRENTLY` (which must run outside a transaction:
+   `op.get_context().autocommit_block()`), and back-fill in batches.
