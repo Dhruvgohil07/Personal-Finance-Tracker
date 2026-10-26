@@ -164,39 +164,22 @@ def test_two_continuation_rows_in_a_row_are_both_joined(tmp_path: Path) -> None:
     assert statement.rows[0].raw_description == "UPI/SHOP/PART2/PART3"
 
 
-# --- derived balances -----------------------------------------------------
+# --- balances -------------------------------------------------------------
 
 
-def test_opening_and_closing_balances_are_derived_from_the_rows(tmp_path: Path) -> None:
-    """ICICI prints neither. The first row is a ₹70 debit leaving
-    ₹1,11,471.33, so the account held ₹1,11,541.33 before it; the closing
-    balance is simply the last row's balance."""
+def test_no_opening_or_closing_balance_is_invented(tmp_path: Path) -> None:
+    """ICICI prints neither, so the parser reports neither. Deriving them
+    from the first and last row assumed the rows were oldest-first, which a
+    one-day newest-first export broke; the rows' own balances are checked
+    link by link by app/parsers/reconcile.py instead."""
     statement = parse(tmp_path)
 
-    assert statement.opening_balance_paise == 11154133
-    assert statement.closing_balance_paise == 15993133
+    assert statement.opening_balance_paise is None
+    assert statement.closing_balance_paise is None
+    assert all(row.balance_after_paise is not None for row in statement.rows)
 
 
-def test_the_derived_balances_agree_with_the_rows(tmp_path: Path) -> None:
-    """opening - debits + credits == closing, in exact integer paise."""
-    statement = parse(tmp_path)
-    debits = sum(r.amount_paise for r in statement.rows if r.direction is Direction.DEBIT)
-    credits = sum(r.amount_paise for r in statement.rows if r.direction is Direction.CREDIT)
-
-    assert statement.opening_balance_paise - debits + credits == statement.closing_balance_paise
-
-
-def test_a_credit_as_the_first_row_is_undone_the_other_way(tmp_path: Path) -> None:
-    rows = (("1", "03/08/2026", "03/08/2026", "", "SALARY", "0.00", "50000.00", "161471.33"),)
-
-    statement = parse(tmp_path, rows=rows)
-
-    assert statement.opening_balance_paise == 11147133  # 161471.33 - 50000.00
-    assert statement.closing_balance_paise == 16147133
-
-
-def test_blank_balance_cells_mean_no_derived_balances(tmp_path: Path) -> None:
-    """Nothing is invented when there is no balance to work from."""
+def test_blank_balance_cells_are_read_as_no_balance(tmp_path: Path) -> None:
     rows = (
         ("1", "01/08/2026", "01/08/2026", "", "UPI/SHOP", "70.00", "0.00", ""),
         ("2", "02/08/2026", "02/08/2026", "", "UPI/CHAI", "20.00", "0.00", ""),
@@ -204,9 +187,7 @@ def test_blank_balance_cells_mean_no_derived_balances(tmp_path: Path) -> None:
 
     statement = parse(tmp_path, rows=rows)
 
-    assert statement.rows[0].balance_after_paise is None
-    assert statement.opening_balance_paise is None
-    assert statement.closing_balance_paise is None
+    assert [row.balance_after_paise for row in statement.rows] == [None, None]
 
 
 def test_a_statement_without_a_balance_column_is_not_an_icici_statement(tmp_path: Path) -> None:
@@ -381,9 +362,8 @@ def test_an_export_with_only_the_required_columns_is_read(tmp_path: Path) -> Non
     # No "Value Date" column: the field stays None rather than borrowing the
     # transaction date, which would invent a value the file never gave.
     assert [row.value_date for row in statement.rows] == [None, None]
-    # The balances still line up: 111471.33 + 70.00 opening, 161431.33 closing.
-    assert statement.opening_balance_paise == 11154133
-    assert statement.closing_balance_paise == 16143133
+    # The balance column is still read from its label.
+    assert [row.balance_after_paise for row in statement.rows] == [11147133, 16143133]
 
 
 def test_a_footer_row_without_a_date_ends_the_table(tmp_path: Path) -> None:
@@ -453,9 +433,9 @@ def test_the_legend_block_does_not_trip_the_guard(tmp_path: Path) -> None:
 # --- row order and header metadata (review findings 2 and 4) --------------
 
 
-def test_newest_first_rows_report_no_derived_balances(tmp_path: Path) -> None:
-    """Deriving an opening balance from `rows[0]` only works oldest-first, and
-    ICICI's net banking can sort the list. Refuse rather than invent."""
+def test_newest_first_rows_are_returned_in_file_order(tmp_path: Path) -> None:
+    """The parser reports what the file says, in the file's order; putting
+    the rows oldest-first is `to_chronological`'s job (ADR 014)."""
     rows = (
         ("1", "02/08/2026", "02/08/2026", "", "UPI/CHAI", "20.00", "0.00", "111451.33"),
         ("2", "01/08/2026", "01/08/2026", "", "UPI/SHOP", "70.00", "0.00", "111471.33"),
@@ -463,9 +443,7 @@ def test_newest_first_rows_report_no_derived_balances(tmp_path: Path) -> None:
 
     statement = parse(tmp_path, rows=rows)
 
-    assert len(statement.rows) == 2
-    assert statement.opening_balance_paise is None
-    assert statement.closing_balance_paise is None
+    assert [row.txn_date.day for row in statement.rows] == [2, 1]
 
 
 def test_a_reversed_period_is_reported_as_unknown(tmp_path: Path) -> None:
