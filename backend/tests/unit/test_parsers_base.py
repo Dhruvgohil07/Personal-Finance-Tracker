@@ -9,6 +9,7 @@ import pytest
 import app.parsers
 from app.parsers.base import (
     MAX_PAISE,
+    Channel,
     Direction,
     FileType,
     NormalizedRow,
@@ -189,6 +190,9 @@ def test_normalized_row_wraps_the_raw_row() -> None:
     # The amount is readable through the wrapper, and stored only once.
     assert row.raw.amount_paise == 125050
     assert row.merchant_key == "ZOMATO"
+    # Not given: "we don't know" (Channel.OTHER is the column's default too)
+    assert row.channel is Channel.OTHER
+    assert row.counterparty_vpa is None
 
 
 # --- ParsedStatement -----------------------------------------------------

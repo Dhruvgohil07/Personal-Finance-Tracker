@@ -654,13 +654,17 @@ def store_transactions(
             "raw_description": row.raw.raw_description,
             "statement_seq": seq,
             "normalized_description": row.normalized_description,
+            # Read from the narration (app/parsers/narration.py, ADR 015).
+            # None of the three is in the fingerprint.
+            "channel": row.channel,
+            "counterparty_vpa": row.counterparty_vpa,
+            "merchant_key": row.merchant_key,
             "fingerprint": fingerprint,
-            # channel, category_source and is_self_transfer keep their
-            # column defaults ("other", "none", false): detecting them is
-            # Phase 2 / Step 8 work. merchant_key is computed by
-            # normalize_row but has nowhere to go yet - transactions link to
-            # a merchant ROW, and looking one up is the categorizer's job
-            # (SPEC §8), not the importer's.
+            # category_source and is_self_transfer keep their column
+            # defaults ("none", false): the categorizer (Step 6) and
+            # self-transfer detection (Step 8) decide them. merchant_id is
+            # also the categorizer's: it links to a merchants ROW, found by
+            # looking merchant_key up in the dictionary.
         }
         # start=1: positions are counted from 1, like row numbers.
         for seq, (row, fingerprint) in enumerate(

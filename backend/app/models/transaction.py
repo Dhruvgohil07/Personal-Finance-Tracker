@@ -10,8 +10,9 @@ Three groups of columns:
   `direction`, `balance_after_paise`, `raw_description`. Written once at
   import and never changed.
 - **What we derived** - `normalized_description`, `channel`,
-  `counterparty_vpa`, `merchant_id`, `fingerprint`. Produced by
-  `app/parsers/` from the row above.
+  `counterparty_vpa`, `merchant_key`, `merchant_id`, `fingerprint`.
+  Produced by `app/parsers/` from the row above (`merchant_id` by the
+  categorizer, Step 6).
 - **What the user or the categorizer decided** - `category_id`,
   `category_source`, `category_confidence`, `is_self_transfer`, `notes`.
   These change over the life of a row.
@@ -51,34 +52,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum_column
 
-# `Direction` lives in the pure parser layer because the parsers are what
-# decide it; a model may import from there, never the other way round
-# (see app/parsers/base.py).
-from app.parsers.base import Direction
+# `Direction` and `Channel` live in the pure parser layer because the
+# parsers are what decide them; a model may import from there, never the
+# other way round (see app/parsers/base.py). `Channel` moved there in
+# Phase 2 Step 5; it is still importable from here and from `app.models`.
+from app.parsers.base import Channel, Direction
 
 # sha256 as hex, same length as statement_uploads.file_sha256.
 FINGERPRINT_LENGTH = 64
-
-
-class Channel(StrEnum):
-    """How the money moved (SPEC §5, detected in Phase 2).
-
-    Phase 1 stores `other` for every row: channel detection needs real
-    narrations to be written against, which is Phase 2 work (SPEC §6.5).
-    The column and its values exist now so that no migration is needed then.
-    """
-
-    UPI = "upi"
-    CARD = "card"
-    NEFT = "neft"
-    IMPS = "imps"
-    RTGS = "rtgs"
-    ATM = "atm"
-    CHEQUE = "cheque"
-    ACH_NACH = "ach_nach"
-    INTEREST = "interest"
-    CHARGES = "charges"
-    OTHER = "other"
 
 
 class CategorySource(StrEnum):
@@ -150,6 +131,13 @@ class Transaction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index("ix_transactions_user_category_date", "user_id", "category_id", "txn_date"),
         # "everything from this merchant" (top merchants, recurring detection).
         Index("ix_transactions_user_merchant", "user_id", "merchant_id"),
+        # "every row with this merchant KEY" (Phase 2 Step 5, migration
+        # 0011). Different from the index above: `merchant_id` is set only
+        # when the key matched the global dictionary, while most real
+        # counterparties are local shops that never will. User rules of type
+        # `merchant` (Step 7) re-categorize by key, and recurring detection
+        # (Phase 4) groups by it.
+        Index("ix_transactions_user_merchant_key", "user_id", "merchant_key"),
         # Trigram GIN index for the `q=` search in Step 8. A normal b-tree
         # index cannot help `ILIKE '%zomato%'` (a leading wildcard), because
         # a b-tree is ordered by the START of the string. pg_trgm indexes
@@ -226,9 +214,18 @@ class Transaction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     channel: Mapped[Channel] = mapped_column(
         str_enum_column(Channel, "channel"), default=Channel.OTHER, server_default="other"
     )
-    # The other side's UPI id ("someone@okaxis"), extracted in Phase 2.
+    # The other side's UPI id ("someone@okaxis"), lowercased, AS THE BANK
+    # PRINTED IT: ICICI cuts it at 14 characters, so it may have lost its
+    # handle ("gpay-123456789") or part of it ("someone@ok"). Stable for one
+    # counterparty, which is what a VPA rule needs (ADR 015).
     # Personal data: it is never sent to the LLM (SPEC §7.4).
     counterparty_vpa: Mapped[str | None] = mapped_column(Text())
+    # A short uppercase key for the counterparty ("ZOMATO", "MOONCAFE"),
+    # read from the narration (SPEC §6.5, Phase 2 Step 5). NULL when the
+    # narration names nobody (a cash withdrawal). For a person-to-person
+    # transfer it holds the person's (truncated) name: it never leaves this
+    # user's rows - P2P is never sent to the LLM or a global cache (§8.3).
+    merchant_key: Mapped[str | None] = mapped_column(Text())
     # SET NULL, not CASCADE: if a merchant row is ever deleted from the
     # global dictionary, the transaction must survive - it only loses the link.
     merchant_id: Mapped[uuid.UUID | None] = mapped_column(
