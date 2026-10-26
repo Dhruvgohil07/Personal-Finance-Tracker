@@ -11,6 +11,7 @@ in two halves, in two different processes (ADR 013):
       statement_uploads row: `pending`        parse_statement()
       commit, then enqueue(upload_id)         does it match the account?
       -> 202 Accepted                         store_transactions()
+                                              categorize_upload()
                                               delete the file -> completed
 
 The client then polls `GET /uploads/{id}` until the status is final.
@@ -70,6 +71,7 @@ from app.parsers.readers import READABLE_FILE_TYPES, detect_file_type, read_stat
 from app.parsers.reconcile import Issue, reconcile, to_chronological
 from app.parsers.registry import ParserRegistry, build_default_registry
 from app.services import accounts as accounts_service
+from app.services import categorization as categorization_service
 from app.workers.queue import enqueue_statement_processing, statement_job_waiting_check
 
 log = structlog.get_logger()
@@ -412,6 +414,10 @@ def process_upload(db: Session, upload_id: uuid.UUID) -> None:
 
     upload.period_start, upload.period_end = _statement_period(statement)
     counts = store_transactions(db, upload, rows)
+    # Same transaction as the insert, so rows appear already categorized
+    # (SPEC §8, ADR 016). The INSERT has already run inside this (still
+    # uncommitted) transaction, so the categorizer's SELECT sees the rows.
+    rows_categorized = categorization_service.categorize_upload(db, upload)
     upload.rows_parsed = counts.rows_parsed
     upload.rows_inserted = counts.rows_inserted
     upload.rows_duplicate = counts.rows_duplicate
@@ -435,6 +441,7 @@ def process_upload(db: Session, upload_id: uuid.UUID) -> None:
         rows_parsed=counts.rows_parsed,
         rows_inserted=counts.rows_inserted,
         rows_duplicate=counts.rows_duplicate,
+        rows_categorized=rows_categorized,
         reconciliation_errors=upload.reconciliation_errors,
         status=upload.status.value,
     )
