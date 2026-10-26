@@ -34,8 +34,11 @@ UPI/<name ≤10>/<vpa ≤14>/<remark ≤10>/<payer bank ≤10>/<12-digit RRN>/<3
 ```
 
 Each field is **cut** to its width. 87 VPAs lost their `@handle` entirely
-(`gpay-123456789`), others keep a cut handle (`…@`, `…@ok`). One shop is printed
-both as `SHINE STAR` and `SHINESTAR`. Some rows end with a `/` and others do not.
+(`gpay-123456789`), others keep a cut handle (`…@`, `…@ok`). Five are a bare
+14-digit number: an account-number VPA (`<account>@<ifsc>`) cut before its `@`.
+One shop is printed both with and without the space between its two words (as if
+`MOON CAFE` and `MOONCAFE`; real counterparty names are not recorded here, see
+point 8). Some rows end with a `/` and others do not.
 75 UPI rows are merchant QR codes, recognisable by their VPA pattern (`Q#########@ybl`,
 `gpay-…`, `paytmqr…`, `vyapar.…`, `paytm-…`).
 
@@ -54,22 +57,45 @@ fail.
 same reason as `Direction`: the parser decides it and the model imports it. It is
 still importable from `app.models`.
 
-**3. ICICI's layouts are read by POSITION, not by searching.** The 12-digit RRN in
-field six confirms the UPI layout; then field two is the name and field three the
-VPA. `MMT/IMPS/<RRN>/<remark>/<name>/<bank>` is read the same way. SPEC §6.5's VPA
+**3. ICICI's layouts are read by POSITION, not by searching, anchored at both
+ends.** The UPI layout is confirmed by the 12-digit RRN second from the END; the
+name and VPA are fields two and three from the START. `MMT/IMPS/<RRN>/<remark>/
+<name>/<bank>` is confirmed by the RRN in field three, and the name is read second
+from the end. The free-text remark sits in the middle of both layouts, so a `/`
+typed into it adds fields without moving the ones being read. SPEC §6.5's VPA
 regex needs the `@handle`, so it would miss the 87 cut VPAs. Narrations outside
 these layouts use the generic rules (point 6).
 
 **4. `counterparty_vpa` = the VPA field AS PRINTED, lowercased** (decided with
 Dhruv). Kept even when it is cut short: one counterparty is always cut the same
 way, so the value still identifies it for P2P detection and VPA rules. It is not
-guaranteed to be a complete, payable VPA.
+guaranteed to be a complete, payable VPA. **Except an account number:** a VPA
+whose name part is only digits is kept only when it is a phone number (10 digits,
+or 12 starting `91`). Any other all-digit name part is a bank account number, and
+only the last 4 digits of an account number may be stored (CLAUDE.md §7.3), so the
+VPA is NULL. The number is still in `raw_description`, which is shown, never
+matched.
 
 **5. `merchant_key` from the name field = the WHOLE field, joined** (decided with
-Dhruv): uppercased, company filler (`PVT`, `LTD`, `INDIA`, …) and digit-only words
-dropped, then the rest joined: `MOON CAFE` and `MOONCAFE` → `MOONCAFE`. This is
-the only rule that turns the real file's two spellings of one shop into one key.
-A name that is only a phone number gives no key.
+Dhruv): uppercased, digit-only words dropped, trailing company filler (`PVT`,
+`LTD`, `INDIA`, …) dropped, then the rest joined: `MOON CAFE` and `MOONCAFE` →
+`MOONCAFE`. This is the only rule that turns the real file's two spellings of one
+shop into one key. Filler is removed only as a SUFFIX and never takes the last
+word, so `INDIA GATE` stays `INDIAGATE`. A name that is only a phone number gives
+no key.
+
+**5a. `dictionary_key` matches cut keys to the merchant dictionary** (added after
+the code review). ICICI cuts the name at 10 characters, so a whole-field key can
+end in part of a word: `Swiggy Lim` → `SWIGGYLIM`, `NESCAFE DA` → `NESCAFEDA`. As
+exact keys, these matched the seeded dictionary on **2** real rows, against **16**
+with Phase 1's first-word keys. The key is NOT shortened, because dropping a
+possibly-cut last word would split the two spellings of point 5 again. Instead,
+`dictionary_key(key, known_keys)` (pure, in `narration.py`) returns the exact
+match, or else the LONGEST known key the merchant key starts with, if that known
+key has at least 5 characters. Shorter seeded keys are common starts of names:
+`AMUL`/"Amulya", `UBER`/"Uberoi", `JIO`/"Jiothsna". On the real statement it
+matches 16 rows again. **Step 6's dictionary handler must use it** rather than an
+exact `merchant_key = normalized_key` lookup.
 
 **6. Generic rules for everything else.**
 - **Channel** = the narration's FIRST word. From the real file: `UPI`, `UPL` → upi,
@@ -78,9 +104,14 @@ A name that is only a phone number gives no key.
   `ATM`/`ATW` → atm, `POS` → card. Interest and charges are NOT guessed: their
   wording is not a first word and differs by bank. They stay `other` until a real
   statement shows ICICI's.
-- **VPA**: SPEC's pattern, on UPI rows only (an email in a NEFT remark is not a VPA).
+- **VPA**: SPEC's pattern, on UPI rows only, with one addition: the handle must END
+  there, so `asha@gmail.com` in a remark is an email, not a VPA. The account-number
+  rule of point 4 applies too.
 - **Merchant key**: Phase 1's first name-like word, now skipping anything around an
-  `@`, so a bank handle (`YBL`) is never the key.
+  `@`, so a bank handle (`YBL`) is never the key. The channel words of the
+  first-word table are DERIVED into the noise words, so a new channel can never
+  become a key (the review found `MMT` doing that). `UPL` is the one deliberate
+  exception: for a UPI Lite top-up it is the most useful key.
 - **ATM rows** get no VPA and no merchant key: cash has no counterparty.
 
 **7. `transactions.merchant_key` is stored** (migration 0011: nullable TEXT +
@@ -102,17 +133,31 @@ Step 7's user rules learn them per user.
 - **SPEC's VPA regex everywhere**: it misses about half of ICICI's VPAs.
 - **`counterparty_vpa` only when an `@` is present**: 87 rows would lose the one
   field that tells a person from a shop.
-- **First word of the name field as the key**: splits `SHINE STAR`/`SHINESTAR` and
+- **First word of the name field as the key**: splits the shop printed two ways and
   merges different people who share a first name (3 such merges on the real file).
+- **Shorten the key when the name field is at its full 10 characters** (to fix the
+  dictionary regression): it splits the two spellings again, because one of them
+  is exactly 10 characters long. Matching by prefix at lookup time keeps both.
+- **Prefix matching for every seeded key**: `AMUL`, `UBER`, `JIO` would match
+  people's names.
 - **A bank-code argument to `read_narration`**: the parser layer does not pass the
   bank through `NormalizedRow`, and the RRN check already confirms the layout. A
   different bank printing the identical 7-field shape would be read the same way,
   which is acceptable.
 
 ## Consequences
-- Real statement: 172 UPI / 2 IMPS / 1 ATM; 170 of 172 UPI rows have a VPA (90
-  complete); 174 of 175 rows have a merchant key (the ATM row has none);
-  normalized descriptions and fingerprints are **identical to before** on all 175.
+- Real statement: 172 UPI / 2 IMPS / 1 ATM; 165 of 172 UPI rows have a VPA (90
+  complete; the 5 account-number VPAs are NULL); 174 of 175 rows have a merchant
+  key (the ATM row has none); 16 rows match the seeded dictionary through
+  `dictionary_key`; normalized descriptions and fingerprints are **identical to
+  before** on all 175.
+- A seeded key of 5+ characters can match a longer, unrelated name that starts
+  with it (`INDIGO` would match an "Indigo Paints" shop). Accepted: the user can
+  correct it, which teaches a rule (Step 7).
+- The first version of this ADR and of `narration.py` quoted a real counterparty
+  name from the statement; both were corrected in the review. The earlier commits
+  of this branch still contain it, and they cannot be rewritten (they are pushed,
+  CLAUDE.md §18).
 - For a person-to-person payment the merchant key is the person's (cut) name. It
   stays in that user's rows. Step 6 must keep P2P out of the global cache and away
   from the LLM (SPEC §8.3), and must not key `merchant_category_cache` by it.
