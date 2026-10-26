@@ -301,3 +301,8 @@ and Step 5's narration rules).
   the stolen token escape reuse detection (ADR 005 amendment). No new migration or ADR,
   so the numbering from Step 2's entry stands. The stale threshold is shared with Step 2
   (`STALE_UPLOAD_AFTER`, 1 h).
+- **Step 3 review:** **migration 0009** (index on `refresh_tokens.expires_at`) was added, so
+  the later migrations move up again: Step 4 → 0010, Step 5 → 0011, Step 7 → 0012. ADR
+  numbers are unchanged (the decisions went into ADR 005 and ADR 013 amendments). Also
+  from the review: "stale" now also requires that no job of the upload is waiting in Redis
+  (fixed job id `process_statement_{upload_id}`).

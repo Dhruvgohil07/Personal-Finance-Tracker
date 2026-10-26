@@ -163,3 +163,18 @@ Eight findings, all fixed on the same branch:
 8. **Polling has its own rate limit** (`UPLOAD_POLL_LIMIT`, 120/min) and a
    `Retry-After: 2` hint while the upload is unfinished. Polls no longer use up
    the shared 100/min budget (ADR 007 amendment).
+
+## Amendment — Phase 2 Step 3 review (2026-10-26): what "stale" means
+An unfinished upload is **stale** when it is over an hour old (`STALE_UPLOAD_AFTER`)
+**and no job of it is still waiting in Redis**. Age alone failed uploads whose jobs
+were merely queued while the worker was down. To make the job findable from the
+upload, `process_statement` jobs now have a fixed id, `process_statement_{upload_id}`.
+`statement_job_waiting_check` reads the job's state (queued, scheduled, started or
+deferred means "waiting") and answers "waiting" when Redis is unreachable, so in
+doubt nothing is failed and the next hourly run decides.
+
+The rule exists once, in `fail_stale_uploads` (app/services/imports.py). Both the
+hourly cleanup and `create_upload` (a re-upload of the same file) use it. After
+applying it, `create_upload` re-reads whether a live upload is left, instead of
+trusting its own UPDATE. If the cleanup failed the upload a moment earlier, the
+file is free, and the answer is 202, not a false "already uploaded".
