@@ -258,13 +258,24 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
      is recorded in ADR 014
   7. the reconcile loop's `first` flag is gone (`_balance_checks` generator)
 
+- [x] Step 5: Channel, VPA and merchant key from real narrations — golden test FIRST
+  (`test_golden_fingerprints.py`: 18 rows, literal normalized strings + fingerprints,
+  verified to fail on a mutated normalizer); real narrations profiled by shape and
+  4 rules confirmed with Dhruv; new pure `app/parsers/narration.py` (ICICI UPI and
+  IMPS layouts read by position, first-word channels, SPEC VPA regex as fallback,
+  `merchant_key_candidate` moved here and now skips VPA chunks); `Channel` moved to
+  `app/parsers/base.py`; `NormalizedRow.channel` + `counterparty_vpa`; migration 0011
+  (`transactions.merchant_key` + `(user_id, merchant_key)` index); the importer stores
+  all three; ADR 015. 1125 tests, 100% coverage. **Real statement: fingerprints
+  identical to before on all 175 rows**; 172 UPI / 2 IMPS / 1 ATM, 170/172 UPI rows
+  with a VPA, 174/175 rows with a merchant key
+
 ## In progress
 - (nothing)
 
 ## Next up
-- Phase 2 Step 5: channel, VPA and merchant key from real narrations — golden test of
-  `normalize_description` + fingerprints FIRST, then inspect the real narrations with Dhruv,
-  `app/parsers/narration.py`, migration 0011 (`transactions.merchant_key`), ADR 015
+- Phase 2 Step 6: categorizer chain (`app/categorizer/`, keyword rules, P2P heuristic,
+  `services/categorization.py`, "Not categorized yet" bucket, ADR 016)
 - Steps 9–10 (ICICI PDF, password PDFs) are blocked until the ICICI PDF is in `samples/`
 
 ## Open decisions / questions
@@ -320,10 +331,20 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   (openssl), none committed; test DB created with the same init SQL as docker-compose
 - Category kinds → open: "Transfers to People", "Investments", "Refunds" and "Uncategorized" kinds
   are a first guess; revisit when building insights (§9.1). Changing them = edit seed_data.py + re-seed
-- Merchant key format → open: confirm against real narrations in Phase 2 (§6.5). Step 5
-  builds a first-pass candidate: drop noise/filler words, pure digits and 1–2 char tokens,
-  take the first token left. Known gap: a P2P VPA yields the bank handle ("YBL") until
-  Phase 2 adds VPA extraction + P2P detection (§8.3) ahead of the merchant lookup
+- Merchant key format → decided in Phase 2 Step 5 (ADR 015, with Dhruv): for ICICI's
+  UPI/IMPS layouts the WHOLE name field joined (`MOON CAFE` → `MOONCAFE`); elsewhere
+  the first name-like word, skipping VPA chunks (no more "YBL"); ATM rows have none.
+  For P2P the key is a person's cut name: Step 6 must keep it out of the LLM and the
+  global cache (§8.3)
+- VPA → decided (ADR 015, with Dhruv): stored AS PRINTED, lowercased, even when ICICI
+  cut it at 14 characters (87 of 171 real UPI rows lost the `@handle`). Open for Step 9:
+  if the PDF prints full VPAs, a VPA rule learned from an `.xls` row won't match it
+- Channels → decided (ADR 015): first word only; `UPI`/`UPL`/`MMT`/`NFS` from the real
+  file, `IMPS`/`NEFT`/`RTGS`/`ACH`/`NACH`/`ATM`/`ATW`/`POS` from SPEC §6.5 (not seen in
+  real data yet). Interest and charges stay `other` until a real ICICI sample shows
+  their wording
+- Merchant seed → decided (ADR 015, with Dhruv): NOT extended from the real file. Its
+  businesses are local shops/campus vendors; user rules (Step 7) learn them per user
 - Parsing core (Step 5) → decided: `FileType` = csv/xls/pdf (SPEC §5 lists only csv/pdf;
   `xls` added for ICICI, ADR 004 — the Step 7 migration uses these three values);
   `Direction` lives in `app/parsers/base.py` and the Step 7 model imports it from there
