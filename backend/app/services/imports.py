@@ -114,8 +114,9 @@ STALE_UPLOAD_AFTER = timedelta(hours=1)
 
 # The statuses in which an upload still has work to do. `processing` is in
 # it because a worker that crashed half-way leaves the row `processing`,
-# and RQ's retry must be able to pick it up again.
-_UNFINISHED = (UploadStatus.PENDING, UploadStatus.PROCESSING)
+# and RQ's retry must be able to pick it up again. Public: the upload routes
+# (Retry-After) and the cleanup job use the same definition.
+UNFINISHED_STATUSES = (UploadStatus.PENDING, UploadStatus.PROCESSING)
 
 # How many transaction rows go into one INSERT statement.
 #
@@ -407,7 +408,7 @@ def fail_upload(db: Session, upload_id: uuid.UUID, message: str, *, reason: str)
     rows, so the user can upload the same file again (ADR 011).
     """
     upload = db.get(StatementUpload, upload_id, with_for_update=True, populate_existing=True)
-    if upload is None or upload.status not in _UNFINISHED:
+    if upload is None or upload.status not in UNFINISHED_STATUSES:
         db.rollback()
         return False
 
@@ -566,7 +567,7 @@ def _claim(db: Session, upload_id: uuid.UUID) -> StatementUpload | None:
     RQ's retry.
     """
     upload = db.get(StatementUpload, upload_id, with_for_update=True)
-    if upload is None or upload.status not in _UNFINISHED:
+    if upload is None or upload.status not in UNFINISHED_STATUSES:
         db.rollback()
         log.info("statement_import_skipped", upload_id=str(upload_id))
         return None
@@ -662,7 +663,7 @@ def _fail_if_stale(db: Session, upload: StatementUpload) -> bool:
     for good). Without this, uploading the same file again would be refused
     until the cleanup job ran. A finished upload is never touched.
     """
-    if upload.status not in _UNFINISHED:
+    if upload.status not in UNFINISHED_STATUSES:
         return False
     if upload.created_at > datetime.now(UTC) - STALE_UPLOAD_AFTER:
         return False
@@ -676,7 +677,7 @@ def _raise_duplicate(existing: StatementUpload) -> NoReturn:
     in `details` either way, so the client can go and look at it.
     """
     details = {"upload_id": str(existing.id)}
-    if existing.status in _UNFINISHED:
+    if existing.status in UNFINISHED_STATUSES:
         raise ConflictError(FILE_BEING_IMPORTED_MESSAGE, details=details)
     raise ConflictError(DUPLICATE_FILE_MESSAGE, details=details)
 
