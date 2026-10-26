@@ -60,7 +60,6 @@ _READ_CHUNK_BYTES = 64 * 1024
 # sent as the standard `Retry-After` header. A statement imports in a second
 # or two, so this keeps a polling client well inside UPLOAD_POLL_LIMIT.
 UPLOAD_POLL_INTERVAL_SECONDS = 2
-_UNFINISHED = (UploadStatus.PENDING, UploadStatus.PROCESSING)
 
 
 @router.post(
@@ -167,7 +166,7 @@ def _ask_to_poll_later(response: Response, status: UploadStatus) -> None:
     (RFC 9110). Sent only while there is something to wait for; a final
     upload has no reason to be polled again.
     """
-    if status in _UNFINISHED:
+    if status in imports_service.UNFINISHED_STATUSES:
         response.headers["Retry-After"] = str(UPLOAD_POLL_INTERVAL_SECONDS)
 
 
