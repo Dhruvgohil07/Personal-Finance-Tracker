@@ -135,8 +135,12 @@ until `status` is final (a statement takes a second or two):
   "rows_parsed": 175, "rows_inserted": 175, "rows_duplicate": 0, ... }
 ```
 
-`rows_parsed = rows_inserted + rows_duplicate`, always. If the file cannot
-be imported, `status` is `failed` and `error_message` says why (an
+`rows_parsed = rows_inserted + rows_duplicate`, always. The balance column
+is checked row by row (SPEC §6.4): if it does not add up, the rows are
+still imported but `status` is `needs_review`, and
+`reconciliation_issues` lists the file's row numbers to look at
+(`null` means the statement had no balance column to check). If the file
+cannot be imported, `status` is `failed` and `error_message` says why (an
 unreadable row, a statement for a different account). The same file can
 then be uploaded again.
 
@@ -254,7 +258,6 @@ so a salary credit never appears there
 |---|---|
 | PDF statements, password-protected files | Phase 2 |
 | Automatic categorization, merchants, UPI/VPA and channel detection | Phase 2 |
-| Balance reconciliation | Phase 2 |
 | `apply_to_similar` on a PATCH (answers `422` today) | Phase 2 |
 | `/insights/trend`, `/insights/top-merchants` | Phase 2 |
 | Creating your own categories, `/me`, `DELETE /me`, CSV export | Phase 2 |

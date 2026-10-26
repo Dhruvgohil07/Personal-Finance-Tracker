@@ -306,3 +306,8 @@ and Step 5's narration rules).
   numbers are unchanged (the decisions went into ADR 005 and ADR 013 amendments). Also
   from the review: "stale" now also requires that no job of the upload is waiting in Redis
   (fixed job id `process_statement_{upload_id}`).
+- **Step 4:** done as planned, as migration **0010** and **ADR 014** (the numbering
+  above). Two details the plan left open, decided in the step:
+  `reconciliation_issues` is NULL for "not checked" and [] for "checked, clean", and at
+  most 100 issues are stored (the full count is in `reconciliation_errors`). The plan's
+  "3-part cursor" means `(txn_date, statement_seq, id)`; old 2-part cursors get a 422.
