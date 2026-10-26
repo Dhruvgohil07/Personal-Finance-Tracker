@@ -187,21 +187,39 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   prepared/generic plan — measured); `decrypt_file` maps a bad nonce to
   `FileDecryptionError`; stale constraint references fixed. Later Phase 2 migrations shift
   by one (plan change log)
+- [x] Step 2: RQ worker + asynchronous uploads — `backend/Dockerfile` + compose `worker`
+  service (`python -m app.workers.worker`, so log redaction is configured), `app/workers/`
+  (`queue.py`, `jobs.py`, `worker.py`), `imports.py` split into `create_upload` (API: size,
+  account, sha256, signature → encrypted blob + `pending` row → enqueue `(upload_id,)`) and
+  `process_upload` (worker: claim → decrypt → parse → account check → insert → `completed`),
+  `POST /uploads` → **202**, new `GET /uploads`, `GET /uploads/{id}`, `DELETE /uploads/{id}`
+  (409 while `processing`); migration 0008 (`statement_uploads.column_mapping` jsonb);
+  503 + `failed` when Redis is down; ADR 013. 963 tests, 100% coverage
 
 ## In progress
 - (nothing)
 
 ## Next up
-- Phase 2 Step 2: RQ worker + asynchronous uploads — Dockerfile + `worker` service,
-  `app/workers/` (queue dependency, `process_statement`), `imports.py` split into
-  `create_upload` / `process_upload`, `POST /uploads` → 202, `GET /uploads`,
-  `GET /uploads/{id}`, `DELETE /uploads/{id}`
+- Phase 2 Step 3: cleanup job + scheduler — `cleanup()` (blobs > 24h, `pending`/`processing`
+  rows > 1h, expired refresh tokens), `app/workers/scheduler.py`, compose `scheduler` service
 - Steps 9–10 (ICICI PDF, password PDFs) are blocked until the ICICI PDF is in `samples/`
 
 ## Open decisions / questions
 - Git workflow → decided: `main` protected (ruleset `protect-main`); every change via a
   feature branch + PR, green `backend` check required, rebase-merge only (CLAUDE.md §18)
-- RQ worker on Windows → decided: run as a Docker service (added in Phase 2)
+- RQ worker on Windows → decided: run as a Docker service (added in Phase 2 Step 2)
+- Step 2 → decided (ADR 013): the request does only the cheap checks (size, ownership,
+  sha256, file signature); parse errors and the wrong-account check are found by the worker
+  and reported as `failed` + `error_message`, no longer as a 400. PDFs are refused in the
+  request (400) until Step 9
+- Step 2 → decided with Dhruv: a CSV's `column_mapping` is stored on the upload row
+  (migration 0008), not in the job args (SPEC §11: upload id only) or on `upload_blobs`
+- Step 2 → found in RQ 2.12's source: `on_failure` runs after EVERY failed attempt, before
+  the retry decision, so the callback checks `job.should_retry` and only fails the upload
+  when no retry is coming
+- Step 2 → note: tests run jobs on `Queue(is_async=False)` named `kharcha-tests`, so RQ's
+  retries are not exercised end to end; the callback's branches are tested directly and
+  the retry options are read back from a job stored in Redis
 - Schema scope → decided: add tables phase by phase
 - Log redaction → decided: substring match on normalized keys; `email` is redacted (log user_id instead)
 - Money parsing → only empty/whitespace cells are blank; "-" as blank is undecided until real statements are seen
