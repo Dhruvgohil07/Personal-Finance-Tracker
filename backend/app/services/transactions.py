@@ -73,10 +73,13 @@ def list_transactions(
 ) -> TransactionList:
     """The user's transactions, newest first, filtered and paginated.
 
-    Ordered by `(txn_date DESC, id DESC)`, which is both what a statement
-    view wants and the key the cursor uses. `id` is not decoration: two
-    transactions on the same day must still have ONE defined order, or a
-    page boundary could repeat a row and skip another.
+    Ordered by `(txn_date DESC, statement_seq DESC, id DESC)`, which is
+    both what a statement view wants and the key the cursor uses.
+    `statement_seq` puts one day's transactions in the order the statement
+    printed them, the day's last transaction first (ADR 014). `id` is the
+    final tie-breaker for two uploads' rows on the same day, whose seqs are
+    not comparable: every row must have ONE defined position, or a page
+    boundary could repeat a row and skip another.
 
     Reads one row more than the client asked for (`limit + 1`). If that
     extra row exists there is a next page, and the cursor is built from the
@@ -92,7 +95,7 @@ def list_transactions(
         categories_service.get_category(db, user_id, filters.category_id)
 
     stmt = _filtered_query(user_id, filters).order_by(
-        Transaction.txn_date.desc(), Transaction.id.desc()
+        Transaction.txn_date.desc(), Transaction.statement_seq.desc(), Transaction.id.desc()
     )
     rows = list(db.scalars(stmt.limit(filters.limit + 1)))
 
@@ -101,7 +104,9 @@ def list_transactions(
 
     page = rows[: filters.limit]
     last = page[-1]
-    return TransactionList(rows=page, next_cursor=encode_cursor(last.txn_date, last.id))
+    return TransactionList(
+        rows=page, next_cursor=encode_cursor(last.txn_date, last.statement_seq, last.id)
+    )
 
 
 def get_transaction(db: Session, user_id: uuid.UUID, transaction_id: uuid.UUID) -> Transaction:
@@ -248,18 +253,20 @@ def _filtered_query(user_id: uuid.UUID, filters: TransactionFilters) -> Select[t
 
     cursor_key = filters.cursor_key()
     if cursor_key is not None:
-        # The keyset condition. Rows are ordered by (txn_date DESC, id
-        # DESC), so "after the cursor" means "smaller than the cursor" -
-        # and SQL can compare the whole pair at once:
+        # The keyset condition. Rows are ordered by (txn_date DESC,
+        # statement_seq DESC, id DESC), so "after the cursor" means
+        # "smaller than the cursor" - and SQL can compare the whole triple
+        # at once (a "row comparison"):
         #
-        #   WHERE (txn_date, id) < ('2026-08-04', '...uuid...')
+        #   WHERE (txn_date, statement_seq, id) < ('2026-08-04', 3, '...uuid...')
         #
-        # which is exactly how the ix_transactions_user_txn_date_id index
-        # is sorted, so Postgres jumps to that position in the index
-        # instead of scanning and sorting. Written as the equivalent
-        # `txn_date < d OR (txn_date = d AND id < i)` it would mean the
-        # same thing but read worse and optimize less reliably.
-        stmt = stmt.where(tuple_(Transaction.txn_date, Transaction.id) < cursor_key)
+        # which is exactly how the ix_transactions_user_txn_date_seq_id
+        # index is sorted, so Postgres jumps to that position in the index
+        # instead of scanning and sorting. Spelled out with AND/OR it would
+        # mean the same thing but read worse and optimize less reliably.
+        stmt = stmt.where(
+            tuple_(Transaction.txn_date, Transaction.statement_seq, Transaction.id) < cursor_key
+        )
 
     return stmt
 

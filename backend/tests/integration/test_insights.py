@@ -20,6 +20,7 @@ The tests that matter most, and the rules they defend:
 """
 
 import datetime
+import itertools
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -114,6 +115,11 @@ def system_categories(db: Session) -> dict[str, Category]:
     return {category.slug: category for category in db.scalars(select(Category))}
 
 
+# Positions for the rows these tests insert by hand, counting up. Every row
+# here belongs to its owner's one upload, where a position may be used once.
+_SEQUENCE = itertools.count(1)
+
+
 def add_transaction(
     db: Session,
     owner: Owner,
@@ -143,6 +149,8 @@ def add_transaction(
         category_id=category_id,
         is_self_transfer=is_self_transfer,
         fingerprint=uuid.uuid4().hex * 2,
+        # Unique per upload (migration 0010); this order is insertion order.
+        statement_seq=next(_SEQUENCE),
     )
     db.add(transaction)
     db.commit()

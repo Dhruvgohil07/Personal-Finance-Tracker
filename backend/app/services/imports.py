@@ -36,7 +36,7 @@ upload the same file again at once.
 import dataclasses
 import hashlib
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
@@ -62,11 +62,12 @@ from app.core.errors import (
 from app.db.errors import violates_constraint
 from app.models import Account, StatementUpload, Transaction, UploadBlob, UploadStatus, User
 from app.models.statement_upload import FILE_HASH_INDEX, MAX_FILENAME_LENGTH, NOT_FAILED_SQL
-from app.parsers.base import FileType, ParsedStatement, ParseError, StatementParser
+from app.parsers.base import FileType, ParsedStatement, ParseError, RawRow, StatementParser
 from app.parsers.fingerprint import fingerprints_for
 from app.parsers.generic_csv import ColumnMapping, GenericCsvParser
 from app.parsers.normalize import normalize_row
 from app.parsers.readers import READABLE_FILE_TYPES, detect_file_type, read_statement_as
+from app.parsers.reconcile import Issue, reconcile, to_chronological
 from app.parsers.registry import ParserRegistry, build_default_registry
 from app.services import accounts as accounts_service
 from app.workers.queue import enqueue_statement_processing, statement_job_waiting_check
@@ -123,6 +124,12 @@ JobIsWaiting = Callable[[uuid.UUID], bool]
 # and RQ's retry must be able to pick it up again. Public: the upload routes
 # (Retry-After) and the cleanup job use the same definition.
 UNFINISHED_STATUSES = (UploadStatus.PENDING, UploadStatus.PROCESSING)
+
+# At most this many reconciliation issues are STORED on an upload (the
+# count in `reconciliation_errors` is always the full number). A statement
+# the parser misread completely can produce one issue per row; a hundred
+# are plenty to see the pattern, and the JSON stays small.
+MAX_STORED_ISSUES = 100
 
 # How many transaction rows go into one INSERT statement.
 #
@@ -392,15 +399,28 @@ def process_upload(db: Session, upload_id: uuid.UUID) -> None:
         fail_upload(db, upload_id, exc.message, reason="invalid_statement")
         return
 
+    # Oldest first, then checked (SPEC §6.4, ADR 014). The check runs on
+    # the rows as the bank printed them - in memory, before anything is
+    # stored - and never stops the import: a statement that does not add
+    # up is still imported, but marked for the user to review.
+    rows = to_chronological(statement.rows)
+    issues = reconcile(
+        rows,
+        opening_balance_paise=statement.opening_balance_paise,
+        closing_balance_paise=statement.closing_balance_paise,
+    )
+
     upload.period_start, upload.period_end = _statement_period(statement)
-    counts = store_transactions(db, upload, statement)
+    counts = store_transactions(db, upload, rows)
     upload.rows_parsed = counts.rows_parsed
     upload.rows_inserted = counts.rows_inserted
     upload.rows_duplicate = counts.rows_duplicate
+    upload.reconciliation_errors = len(issues or [])
+    upload.reconciliation_issues = _issues_to_json(issues)
     # The file has served its purpose: it is deleted in the same commit
     # that stores its transactions (SPEC §7.3).
     db.delete(blob)
-    upload.status = UploadStatus.COMPLETED
+    upload.status = UploadStatus.NEEDS_REVIEW if issues else UploadStatus.COMPLETED
     upload.completed_at = datetime.now(UTC)
     db.commit()
 
@@ -415,6 +435,8 @@ def process_upload(db: Session, upload_id: uuid.UUID) -> None:
         rows_parsed=counts.rows_parsed,
         rows_inserted=counts.rows_inserted,
         rows_duplicate=counts.rows_duplicate,
+        reconciliation_errors=upload.reconciliation_errors,
+        status=upload.status.value,
     )
 
 
@@ -590,12 +612,15 @@ def parse_statement(
 def store_transactions(
     db: Session,
     upload: StatementUpload,
-    statement: ParsedStatement,
+    rows: Sequence[RawRow],
 ) -> ImportCounts:
-    """Insert a parsed statement's rows under an existing upload row.
+    """Insert a statement's rows, OLDEST FIRST, under an existing upload row.
 
     `upload` must already have an id (the caller flushed or committed it),
-    because `transactions.upload_id` points at it.
+    because `transactions.upload_id` points at it. `rows` must be in
+    chronological order (`to_chronological`): a row's position in the list
+    becomes its `statement_seq` (1, 2, 3, ...), which is what orders the
+    transactions of one day (ADR 014).
 
     This is where idempotency actually happens (SPEC §6.3, CLAUDE.md
     rule 5):
@@ -613,7 +638,7 @@ def store_transactions(
     Nothing is committed here. The caller commits, so the upload row and
     its transactions appear together or not at all.
     """
-    normalized = [normalize_row(row) for row in statement.rows]
+    normalized = [normalize_row(row) for row in rows]
     fingerprints = fingerprints_for(upload.account_id, normalized)
 
     values = [
@@ -627,6 +652,7 @@ def store_transactions(
             "direction": row.raw.direction,
             "balance_after_paise": row.raw.balance_after_paise,
             "raw_description": row.raw.raw_description,
+            "statement_seq": seq,
             "normalized_description": row.normalized_description,
             "fingerprint": fingerprint,
             # channel, category_source and is_self_transfer keep their
@@ -636,7 +662,10 @@ def store_transactions(
             # a merchant ROW, and looking one up is the categorizer's job
             # (SPEC §8), not the importer's.
         }
-        for row, fingerprint in zip(normalized, fingerprints, strict=True)
+        # start=1: positions are counted from 1, like row numbers.
+        for seq, (row, fingerprint) in enumerate(
+            zip(normalized, fingerprints, strict=True), start=1
+        )
     ]
 
     inserted = 0
@@ -716,6 +745,19 @@ def _supported_file_type(filename: str, content: bytes) -> FileType:
     if file_type not in READABLE_FILE_TYPES:
         raise InvalidStatementError(PDF_NOT_SUPPORTED_MESSAGE)
     return file_type
+
+
+def _issues_to_json(issues: list[Issue] | None) -> list[dict[str, object]] | None:
+    """Reconciliation issues for the JSONB column; None stays None ("not checked").
+
+    Capped at MAX_STORED_ISSUES; `reconciliation_errors` keeps the full count.
+    """
+    if issues is None:
+        return None
+    return [
+        {"row_number": issue.row_number, "kind": issue.kind.value}
+        for issue in issues[:MAX_STORED_ISSUES]
+    ]
 
 
 def _mapping_to_json(mapping: ColumnMapping | None) -> dict[str, str | None] | None:

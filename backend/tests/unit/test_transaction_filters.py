@@ -236,12 +236,12 @@ def test_page_sizes_outside_the_range_are_rejected(limit: int) -> None:
 
 
 def test_a_cursor_is_kept_and_decoded() -> None:
-    cursor = encode_cursor(A_DATE, AN_ID)
+    cursor = encode_cursor(A_DATE, 3, AN_ID)
 
     result = filters(cursor=cursor)
 
     assert result.cursor == cursor
-    assert result.cursor_key() == (A_DATE, AN_ID)
+    assert result.cursor_key() == (A_DATE, 3, AN_ID)
 
 
 @pytest.mark.parametrize("cursor", ["", "   ", None])

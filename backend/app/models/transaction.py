@@ -40,6 +40,7 @@ from sqlalchemy import (
     Date,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -105,25 +106,32 @@ class Transaction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         # Dedupe level 2 - see the module docstring.
         UniqueConstraint("account_id", "fingerprint"),
         CheckConstraint("amount_paise > 0", name="amount_positive"),
+        # Within one upload, a position in the statement is taken by at
+        # most one row (migration 0010). Not every position is present: a
+        # row skipped as a duplicate keeps the seq of the upload that
+        # inserted it.
+        UniqueConstraint("upload_id", "statement_seq"),
+        CheckConstraint("statement_seq > 0", name="statement_seq_positive"),
         # --- Indexes (SPEC §5) ------------------------------------------
         # These are named by hand. Our naming convention builds an index
         # name from its FIRST column only (ix_%(column_0_label)s, see
         # app/db/base.py), and all three of these start with user_id, so
         # they would all end up wanting the same name.
         #
-        # The keyset-pagination index (Step 8): `GET /transactions` returns
-        # newest first and pages with "give me the rows after this
-        # (date, id)". With the index in exactly that order Postgres walks
-        # it and stops after `limit` rows - no sort step, and no OFFSET that
-        # gets slower the deeper you page.
+        # The keyset-pagination index (Step 8, rebuilt in Phase 2 Step 4):
+        # `GET /transactions` returns newest first and pages with "give me
+        # the rows after this (date, statement_seq, id)". With the index in
+        # exactly that order Postgres walks it and stops after `limit` rows
+        # - no sort step, and no OFFSET that gets slower the deeper you page.
         #
         # `text("txn_date DESC")` is needed because inside this class body
         # the columns are not attributes yet (they are being defined), so
         # `Transaction.txn_date.desc()` cannot be written here.
         Index(
-            "ix_transactions_user_txn_date_id",
+            "ix_transactions_user_txn_date_seq_id",
             "user_id",
             text("txn_date DESC"),
+            text("statement_seq DESC"),
             text("id DESC"),
         ),
         # "One category over a date range": GET /transactions with
@@ -198,6 +206,16 @@ class Transaction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # statement actually said (and so a better parser can re-derive the
     # fields below from it later). Never logged (CLAUDE.md rule 3).
     raw_description: Mapped[str] = mapped_column(Text())
+    # The row's position in its upload, oldest first: 1, 2, 3, ... (Phase 2
+    # Step 4, ADR 014). A statement prints no time of day, so this is the
+    # only thing that orders the transactions of one day - and the balance
+    # column only makes sense in that order. Normalized to chronological
+    # (`to_chronological`), so it means the same for a newest-first export.
+    #
+    # Comparable only within one upload: two uploads' seqs on the same day
+    # (which happens only where two statements overlap) are in an arbitrary
+    # but fixed order. See ADR 014.
+    statement_seq: Mapped[int] = mapped_column(Integer)
 
     # --- What we derived --------------------------------------------------
     # The narration after `normalize_description` (SPEC §6.5). Stored, not

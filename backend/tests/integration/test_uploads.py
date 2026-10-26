@@ -1215,3 +1215,161 @@ def test_a_large_statement_reimports_as_all_duplicates(
         ROWS_JUST_OVER_ONE_CHUNK,
     )
     assert count_transactions(db) == ROWS_JUST_OVER_ONE_CHUNK
+
+
+# --- Statement order and balance reconciliation (SPEC §6.4, ADR 014) ------
+
+# Three debits on one day, oldest first, with balances that add up.
+SAME_DAY_ROWS = (
+    ("1", "05/08/2026", "05/08/2026", "", "UPI/FIRST/PAY", "10.00", "0.00", "990.00"),
+    ("2", "05/08/2026", "05/08/2026", "", "UPI/SECOND/PAY", "20.00", "0.00", "970.00"),
+    ("3", "05/08/2026", "05/08/2026", "", "UPI/THIRD/PAY", "30.00", "0.00", "940.00"),
+)
+
+
+def test_a_statement_that_adds_up_is_completed_and_says_it_was_checked(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path
+) -> None:
+    upload = import_file(client, alice, content=statement_bytes(tmp_path), account_id=account_id)
+
+    assert upload["status"] == "completed"
+    assert upload["reconciliation_errors"] == 0
+    # [] = checked, nothing wrong (null would mean "could not check").
+    assert upload["reconciliation_issues"] == []
+
+
+def test_a_statement_that_does_not_add_up_needs_review_and_names_the_row(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path, db: Session
+) -> None:
+    """The second row's balance is misprinted (₹10 too high). The data is
+    still imported - the user decides - but the upload says which rows to
+    look at: the bad row, and the one after it, whose link to the bad
+    value breaks as well. Row numbers point into the file."""
+    broken = (
+        ("1", "01/08/2026", "01/08/2026", "", "UPI/SHOP/PAY", "70.00", "0.00", "1000.00"),
+        ("2", "02/08/2026", "02/08/2026", "", "UPI/SHOP/PAY", "20.00", "0.00", "990.00"),
+        ("3", "03/08/2026", "03/08/2026", "", "UPI/SHOP/PAY", "30.00", "0.00", "950.00"),
+    )
+
+    upload = import_file(
+        client, alice, content=statement_bytes(tmp_path, rows=broken), account_id=account_id
+    )
+
+    assert upload["status"] == "needs_review"
+    assert upload["rows_inserted"] == 3
+    assert upload["reconciliation_errors"] == 2
+    assert upload["reconciliation_issues"] == [
+        {"row_number": 15, "kind": "balance_mismatch"},
+        {"row_number": 16, "kind": "balance_mismatch"},
+    ]
+    assert count_transactions(db) == 3
+    # No amounts or balances in what is stored or returned (rule 3).
+    assert "990" not in str(upload["reconciliation_issues"])
+
+
+def test_a_statement_needing_review_still_blocks_the_same_file(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path
+) -> None:
+    """Its rows ARE imported, so uploading the same bytes again would only
+    produce duplicates (ADR 011): 409, as for a completed upload."""
+    broken = (
+        ("1", "01/08/2026", "01/08/2026", "", "UPI/SHOP/PAY", "70.00", "0.00", "1000.00"),
+        ("2", "02/08/2026", "02/08/2026", "", "UPI/SHOP/PAY", "20.00", "0.00", "1.00"),
+    )
+    content = statement_bytes(tmp_path, rows=broken)
+    assert import_file(client, alice, content=content, account_id=account_id)["status"] == (
+        "needs_review"
+    )
+
+    again = post_upload(client, alice, content=content, account_id=account_id)
+
+    assert again.status_code == 409
+    assert again.json()["error"]["message"] == imports_service.DUPLICATE_FILE_MESSAGE
+
+
+def test_a_csv_without_a_balance_column_is_not_checked(
+    client: TestClient, alice: dict[str, str], account_id: str
+) -> None:
+    """null, not []: nothing could be checked, so nothing is claimed."""
+    mapping = (
+        '{"date_column": "Date", "description_column": "Narration", '
+        '"date_format": "%d/%m/%Y", "debit_column": "Withdrawal", "credit_column": "Deposit"}'
+    )
+
+    upload = import_file(
+        client,
+        alice,
+        content=GENERIC_CSV,
+        account_id=account_id,
+        filename="export.csv",
+        column_mapping=mapping,
+    )
+
+    assert upload["status"] == "completed"
+    assert upload["reconciliation_issues"] is None
+    assert upload["reconciliation_errors"] == 0
+
+
+def test_the_statement_order_is_stored_oldest_first(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path, db: Session
+) -> None:
+    upload = import_file(
+        client, alice, content=statement_bytes(tmp_path, rows=SAME_DAY_ROWS), account_id=account_id
+    )
+
+    rows = db.scalars(
+        select(Transaction)
+        .where(Transaction.upload_id == uuid.UUID(upload["id"]))
+        .order_by(Transaction.statement_seq)
+    ).all()
+    assert [(row.statement_seq, row.raw_description) for row in rows] == [
+        (1, "UPI/FIRST/PAY"),
+        (2, "UPI/SECOND/PAY"),
+        (3, "UPI/THIRD/PAY"),
+    ]
+
+
+def test_a_newest_first_statement_is_stored_oldest_first_and_reconciles(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path, db: Session
+) -> None:
+    """The same three days, exported newest first. Read as printed, every
+    balance link would be broken; put in time order, it adds up - and the
+    stored positions mean the same as for an oldest-first file."""
+    newest_first = (
+        ("1", "07/08/2026", "07/08/2026", "", "UPI/THIRD/PAY", "30.00", "0.00", "940.00"),
+        ("2", "06/08/2026", "06/08/2026", "", "UPI/SECOND/PAY", "20.00", "0.00", "970.00"),
+        ("3", "05/08/2026", "05/08/2026", "", "UPI/FIRST/PAY", "10.00", "0.00", "990.00"),
+    )
+
+    upload = import_file(
+        client, alice, content=statement_bytes(tmp_path, rows=newest_first), account_id=account_id
+    )
+
+    assert upload["status"] == "completed"
+    assert upload["reconciliation_issues"] == []
+    rows = db.scalars(select(Transaction).order_by(Transaction.statement_seq)).all()
+    assert [row.raw_description for row in rows] == [
+        "UPI/FIRST/PAY",
+        "UPI/SECOND/PAY",
+        "UPI/THIRD/PAY",
+    ]
+
+
+def test_one_days_transactions_are_listed_in_statement_order(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path
+) -> None:
+    """The bug this step exists for: same-day rows came back in random
+    order (ordered by a random UUID), so the balance column jumped around.
+    Newest first means the day's LAST transaction first, and each balance
+    then follows from the one below it."""
+    import_file(
+        client, alice, content=statement_bytes(tmp_path, rows=SAME_DAY_ROWS), account_id=account_id
+    )
+
+    items = client.get("/api/v1/transactions", headers=alice).json()["items"]
+
+    assert [item["raw_description"] for item in items] == [
+        "UPI/THIRD/PAY",
+        "UPI/SECOND/PAY",
+        "UPI/FIRST/PAY",
+    ]

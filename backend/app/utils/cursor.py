@@ -16,8 +16,10 @@ one row too late.
 
 The price is that the client can no longer ask for "page 7": it can only
 ask for "the rows after this position". That position is what a cursor
-holds - here the `(txn_date, id)` of the last row the client received,
-which is exactly the sort key of `GET /transactions`.
+holds - here the `(txn_date, statement_seq, id)` of the last row the
+client received, which is exactly the sort key of `GET /transactions`.
+(`statement_seq` joined in Phase 2 Step 4, ADR 014; a cursor from before
+that has two parts and is refused, so the client starts again from page 1.)
 
 Why base64, and what "opaque" means:
 
@@ -39,9 +41,12 @@ import base64
 import uuid
 from datetime import date
 
-# Separates the two parts inside the encoded string. Neither an ISO date
-# nor a UUID can contain it, so splitting is unambiguous.
+# Separates the parts inside the encoded string. An ISO date, an integer
+# and a UUID cannot contain it, so splitting is unambiguous.
 _SEPARATOR = "|"
+
+# A position in the list: (txn_date, statement_seq, id).
+CursorKey = tuple[date, int, uuid.UUID]
 
 
 class CursorError(ValueError):
@@ -52,22 +57,23 @@ class CursorError(ValueError):
     """
 
 
-def encode_cursor(txn_date: date, row_id: uuid.UUID) -> str:
+def encode_cursor(txn_date: date, statement_seq: int, row_id: uuid.UUID) -> str:
     """Turn the sort key of one row into the cursor string for the next page.
 
     `urlsafe_b64encode` uses `-` and `_` instead of `+` and `/`, so the
     result is safe in a query string. The trailing `=` padding is stripped
     for a tidier URL and put back when decoding.
     """
-    raw = f"{txn_date.isoformat()}{_SEPARATOR}{row_id}"
+    raw = _SEPARATOR.join((txn_date.isoformat(), str(statement_seq), str(row_id)))
     return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
 
 
-def decode_cursor(cursor: str) -> tuple[date, uuid.UUID]:
-    """Read a cursor back into `(txn_date, id)`, or raise `CursorError`.
+def decode_cursor(cursor: str) -> CursorKey:
+    """Read a cursor back into `(txn_date, statement_seq, id)`, or raise `CursorError`.
 
     Every failure mode is one error: not base64, not UTF-8 text, the wrong
-    number of parts, not a date, not a UUID. The client cannot do anything
+    number of parts (an old two-part cursor included), not a date, not a
+    positive whole number, not a UUID. The client cannot do anything
     different about any of them - the fix is always "send the `next_cursor`
     we gave you" - and the message never echoes what was sent.
     """
@@ -85,10 +91,16 @@ def decode_cursor(cursor: str) -> tuple[date, uuid.UUID]:
         raise CursorError(_MESSAGE) from None
 
     parts = raw.split(_SEPARATOR)
-    if len(parts) != 2:
+    if len(parts) != 3:
+        raise CursorError(_MESSAGE)
+    # Checked by hand, because int() is more forgiving than encode_cursor
+    # ever is: it accepts "-5", " 5" and non-ASCII digits. Only plain ASCII
+    # digits, not zero, are a seq this code wrote.
+    seq_text = parts[1]
+    if not (seq_text.isascii() and seq_text.isdigit()) or int(seq_text) == 0:
         raise CursorError(_MESSAGE)
     try:
-        return date.fromisoformat(parts[0]), uuid.UUID(parts[1])
+        return date.fromisoformat(parts[0]), int(seq_text), uuid.UUID(parts[2])
     except ValueError:
         raise CursorError(_MESSAGE) from None
 
