@@ -33,7 +33,6 @@ Two invariants the DATABASE enforces, not just our code:
 import uuid
 from datetime import date
 from decimal import Decimal
-from enum import StrEnum
 
 from sqlalchemy import (
     BigInteger,
@@ -50,35 +49,18 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum_column
-
 # `Direction` and `Channel` live in the pure parser layer because the
 # parsers are what decide them; a model may import from there, never the
 # other way round (see app/parsers/base.py). `Channel` moved there in
 # Phase 2 Step 5; it is still importable from here and from `app.models`.
+# `CategorySource` likewise lives in the pure categorizer that decides it
+# (moved in Phase 2 Step 6).
+from app.categorizer.base import CategorySource
+from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum_column
 from app.parsers.base import Channel, Direction
 
 # sha256 as hex, same length as statement_uploads.file_sha256.
 FINGERPRINT_LENGTH = 64
-
-
-class CategorySource(StrEnum):
-    """WHO decided this row's category (SPEC §5, §8).
-
-    Stored next to `category_id` because the answer changes what we are
-    allowed to do with it: a `user_manual` category must never be
-    overwritten by the categorizer, and it is also what teaches a
-    `category_rules` row (SPEC §8.1). `none` means "not categorized yet",
-    which is every row in Phase 1 until the user edits it (Step 8).
-    """
-
-    USER_MANUAL = "user_manual"  # the user chose it by hand
-    USER_RULE = "user_rule"  # one of the user's own rules matched
-    MERCHANT = "merchant"  # the merchants dictionary matched
-    KEYWORD = "keyword"  # a keyword rule matched
-    LLM = "llm"  # the LLM suggested it
-    HEURISTIC = "heuristic"  # a fallback guess (e.g. a credit = income)
-    NONE = "none"  # not categorized
 
 
 class Transaction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
