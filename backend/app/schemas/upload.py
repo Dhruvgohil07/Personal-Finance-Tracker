@@ -122,6 +122,20 @@ class ColumnMappingRequest(BaseModel):
         )
 
 
+class ReconciliationIssue(BaseModel):
+    """One row whose balance does not add up (SPEC §6.4).
+
+    `row_number` is the row in the statement FILE, so the user can find it
+    there; it is null for a problem with the statement as a whole (the
+    closing balance). `kind` is one of `balance_mismatch`,
+    `missing_balance`, `opening_balance_mismatch`,
+    `closing_balance_mismatch`. No amounts, by design.
+    """
+
+    row_number: int | None
+    kind: str
+
+
 class UploadResponse(BaseModel):
     """One upload: where its import is, and what it did.
 
@@ -129,8 +143,10 @@ class UploadResponse(BaseModel):
     it is still `pending` (202); the client polls `GET /uploads/{id}` until
     `status` is final:
 
-    - `completed` - the counts below are filled in;
-    - `failed`    - `error_message` says why, in words meant for the user.
+    - `completed`    - the counts below are filled in;
+    - `needs_review` - imported, but the balances do not add up:
+                       `reconciliation_issues` lists the rows to look at;
+    - `failed`       - `error_message` says why, in words meant for the user.
 
     `rows_parsed = rows_inserted + rows_duplicate`. A re-uploaded
     overlapping statement therefore shows a high `rows_duplicate` and only
@@ -150,8 +166,11 @@ class UploadResponse(BaseModel):
     rows_parsed: int
     rows_inserted: int
     rows_duplicate: int
-    # Always 0 until balance reconciliation is built (Phase 2 Step 4, SPEC §6.4).
+    # How many balance problems were found (SPEC §6.4), and the first
+    # hundred of them. `reconciliation_issues` is null when nothing could
+    # be checked (no balance column), and [] when everything adds up.
     reconciliation_errors: int
+    reconciliation_issues: list[ReconciliationIssue] | None
     error_message: str | None
     created_at: datetime
     completed_at: datetime | None

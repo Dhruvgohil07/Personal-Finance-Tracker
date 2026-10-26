@@ -17,7 +17,9 @@ The tests that matter most, and the rules they defend:
 - `test_a_blank_filter_is_not_a_filter`               blank = not sent
 """
 
+import base64
 import datetime
+import itertools
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -121,6 +123,11 @@ def bob(client: TestClient, db: Session, make_auth_headers: AuthHeadersFactory) 
     return make_owner(client, db, make_auth_headers, "bob@example.com")
 
 
+# Positions for the rows these tests insert by hand, counting up. Every row
+# here belongs to its owner's one upload, where a position may be used once.
+_SEQUENCE = itertools.count(1)
+
+
 def add_transaction(
     db: Session,
     owner: Owner,
@@ -151,6 +158,8 @@ def add_transaction(
         normalized_description=description.upper(),
         category_id=category_id,
         fingerprint=uuid.uuid4().hex * 2,
+        # Unique per upload (migration 0010); this order is insertion order.
+        statement_seq=next(_SEQUENCE),
     )
     db.add(transaction)
     db.commit()
@@ -636,7 +645,7 @@ def test_a_cursor_never_reaches_another_users_rows(
         db, bob, txn_date=AUGUST.replace(day=4), amount_paise=100, description="BOB NEW"
     )
 
-    stolen_cursor = encode_cursor(alice_row.txn_date, alice_row.id)
+    stolen_cursor = encode_cursor(alice_row.txn_date, alice_row.statement_seq, alice_row.id)
     items, _ = get_page(client, bob, cursor=stolen_cursor)
 
     assert descriptions(items) == ["BOB OLD"]
@@ -904,3 +913,27 @@ def test_an_empty_patch_changes_nothing(
     assert response.json()["category_id"] == str(system_categories["salary"].id)
     # Not touched, so the source the importer/categorizer set stays.
     assert response.json()["category_source"] == "none"
+
+
+def test_one_days_rows_are_listed_by_their_statement_position(
+    client: TestClient, db: Session, alice: Owner
+) -> None:
+    """Same day: the higher `statement_seq` (later in the statement) comes
+    first, whatever order the ids happen to fall in (ADR 014)."""
+    rows = [add_transaction(db, alice, txn_date=AUGUST, amount_paise=100 + i) for i in range(3)]
+
+    items, _cursor = get_page(client, alice)
+
+    assert [item["id"] for item in items] == [str(row.id) for row in reversed(rows)]
+
+
+def test_a_cursor_from_before_statement_order_is_rejected(client: TestClient, alice: Owner) -> None:
+    """Two-part cursors (txn_date|id) were issued before Phase 2 Step 4. A
+    client still holding one gets a 422 and starts from page 1, instead of
+    landing at a position the new sort key does not have."""
+    old_style = base64.urlsafe_b64encode(f"2026-08-04|{uuid.uuid4()}".encode()).decode()
+
+    response = client.get(TRANSACTIONS, params={"cursor": old_style}, headers=alice.headers)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"][0]["field"] == "query.cursor"

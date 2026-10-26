@@ -172,8 +172,16 @@ class StatementUpload(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     rows_parsed: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     rows_inserted: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     rows_duplicate: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    # Rows whose balance column did not add up (SPEC §6.4, Phase 2).
+    # How many problems the balance check found (SPEC §6.4, Phase 2 Step 4).
     reconciliation_errors: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Which ones: `[{"row_number": 14, "kind": "balance_mismatch"}, ...]`
+    # (`app/parsers/reconcile.py`), at most MAX_STORED_ISSUES of them; the
+    # count above is the full number. Row numbers and kinds only - never an
+    # amount or a balance (CLAUDE.md rule 3).
+    #
+    # NULL means NOT CHECKED: the statement has no balance column, or it
+    # was imported before the check existed. `[]` means checked, all fine.
+    reconciliation_issues: Mapped[list[dict[str, object]] | None] = mapped_column(JSONB)
 
     # Why it failed, in words safe to show the user: `ParseError` messages
     # never contain narrations, amounts or balances (CLAUDE.md rule 3).

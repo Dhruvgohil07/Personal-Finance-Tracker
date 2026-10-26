@@ -32,7 +32,7 @@ from pydantic import (
 from app.models import CategorySource, Channel
 from app.parsers.base import MAX_PAISE, Direction
 from app.schemas.common import NO_CONTROL_CHARS, QueryFilters
-from app.utils.cursor import CursorError, decode_cursor
+from app.utils.cursor import CursorError, CursorKey, decode_cursor
 from app.utils.money import format_inr
 
 # How many transactions one page holds. 50 fills a screen; the ceiling
@@ -169,8 +169,8 @@ class TransactionFilters(QueryFilters):
     def max_amount_paise(self) -> int | None:
         return _to_paise(self.max_amount)
 
-    def cursor_key(self) -> tuple[date, uuid.UUID] | None:
-        """The `(txn_date, id)` position to continue from, if any."""
+    def cursor_key(self) -> CursorKey | None:
+        """The `(txn_date, statement_seq, id)` position to continue from, if any."""
         return None if self.cursor is None else decode_cursor(self.cursor)
 
 
