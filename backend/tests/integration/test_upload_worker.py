@@ -42,6 +42,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.redis import get_redis
 from app.models import StatementUpload, Transaction, UploadBlob, UploadStatus
+from app.services import cleanup as cleanup_service
 from app.services import imports as imports_service
 from app.workers import jobs
 from app.workers.queue import (
@@ -51,6 +52,8 @@ from app.workers.queue import (
     RETRY_INTERVALS_SECONDS,
     RETRY_MAX,
     get_queue,
+    process_statement_job_id,
+    statement_job_waiting_check,
 )
 from tests.fixtures.icici_xls import build_icici_xls
 
@@ -181,6 +184,8 @@ def test_the_job_carries_only_the_upload_id(
 
     [job] = held_queue.get_jobs()
     assert job.func_name == PROCESS_STATEMENT
+    # A fixed id, so the stale-upload rule can find the job from the upload.
+    assert job.id == process_statement_job_id(uuid.UUID(upload_id))
     assert job.args == (upload_id,)
     assert job.kwargs == {}
 
@@ -623,13 +628,12 @@ def test_a_stuck_upload_of_the_file_is_failed_and_the_new_one_accepted(
     held_queue: Queue,
     db: Session,
 ) -> None:
-    """An upload `pending` for longer than STALE_UPLOAD_AFTER has no job
-    working on it any more (lost between commit and enqueue, or its worker
-    never came). It must not block the file until a cleanup job runs."""
+    """An upload `pending` for longer than STALE_UPLOAD_AFTER, whose job is
+    gone from Redis (lost between commit and enqueue), will never finish.
+    It must not block the file until a cleanup job runs."""
     stuck_id = queue_upload(client, alice, content=statement, account_id=account_id)
-    stuck = upload_row(db, stuck_id)
-    stuck.created_at = datetime.now(UTC) - imports_service.STALE_UPLOAD_AFTER - timedelta(minutes=1)
-    db.commit()
+    make_old(db, stuck_id)
+    held_queue.empty()  # the job is lost
 
     again = post_upload(client, alice, content=statement, account_id=account_id)
 
@@ -639,6 +643,111 @@ def test_a_stuck_upload_of_the_file_is_failed_and_the_new_one_accepted(
     assert stuck.status is UploadStatus.FAILED
     assert stuck.error_message == imports_service.STALE_UPLOAD_MESSAGE
     assert db.get(UploadBlob, stuck.id) is None
+
+
+def make_old(db: Session, upload_id: str) -> None:
+    """Pretend the upload was created just over STALE_UPLOAD_AFTER ago."""
+    upload = upload_row(db, upload_id)
+    upload.created_at = (
+        datetime.now(UTC) - imports_service.STALE_UPLOAD_AFTER - timedelta(minutes=1)
+    )
+    db.commit()
+
+
+def test_an_old_upload_whose_job_still_waits_is_a_409_not_failed(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    statement: bytes,
+    held_queue: Queue,
+    db: Session,
+) -> None:
+    """Over an hour old, but its job is still queued (the worker was down).
+    It is about to import, so it is not failed: the new upload is refused
+    as "being imported", naming the old one."""
+    old_id = queue_upload(client, alice, content=statement, account_id=account_id)
+    make_old(db, old_id)
+
+    again = post_upload(client, alice, content=statement, account_id=account_id)
+
+    assert again.status_code == 409
+    assert again.json()["error"]["message"] == imports_service.FILE_BEING_IMPORTED_MESSAGE
+    assert upload_row(db, old_id).status is UploadStatus.PENDING
+
+
+def test_a_stuck_upload_failed_by_the_cleanup_meanwhile_still_frees_the_file(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    statement: bytes,
+    held_queue: Queue,
+    db: Session,
+    job_sessions: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The race from the Step 3 review. The request has read the stuck
+    upload as `pending`; the hourly cleanup fails it just before the
+    request's own attempt. The request's attempt then matches nothing - and
+    it must still see that the file is free, not answer "already uploaded".
+    """
+    stuck_id = queue_upload(client, alice, content=statement, account_id=account_id)
+    make_old(db, stuck_id)
+    held_queue.empty()
+    real_fail_stale = imports_service.fail_stale_uploads
+
+    def cleanup_gets_there_first(*args: Any, **kwargs: Any) -> Any:
+        with job_sessions() as other:
+            cleanup_service.run_cleanup(
+                other, now=datetime.now(UTC), job_is_waiting=lambda _upload_id: False
+            )
+        return real_fail_stale(*args, **kwargs)
+
+    monkeypatch.setattr(imports_service, "fail_stale_uploads", cleanup_gets_there_first)
+
+    again = post_upload(client, alice, content=statement, account_id=account_id)
+
+    assert again.status_code == 202
+    assert upload_row(db, stuck_id).status is UploadStatus.FAILED
+
+
+# --- Is an upload's job still waiting? ----------------------------------------
+
+
+def test_the_waiting_check_reads_the_jobs_state_in_redis(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    statement: bytes,
+    held_queue: Queue,
+) -> None:
+    upload_id = uuid.UUID(queue_upload(client, alice, content=statement, account_id=account_id))
+    job_is_waiting = statement_job_waiting_check(get_redis())
+
+    # Queued, nobody has run it yet.
+    assert job_is_waiting(upload_id) is True
+    # Gone from Redis (a lost job). A FINISHED job is the next test.
+    held_queue.empty()
+    assert job_is_waiting(upload_id) is False
+    # An upload that never had a job.
+    assert job_is_waiting(uuid.uuid4()) is False
+
+
+def test_the_waiting_check_assumes_waiting_when_redis_is_down() -> None:
+    """Better to fail nothing this hour than to fail an upload whose job
+    may well be queued: the next run decides."""
+    unreachable = Redis(host="127.0.0.1", port=1, socket_connect_timeout=1)
+
+    assert statement_job_waiting_check(unreachable)(uuid.uuid4()) is True
+
+
+def test_a_job_that_ran_is_no_longer_waiting(
+    client: TestClient, alice: dict[str, str], account_id: str, statement: bytes
+) -> None:
+    """On the synchronous test queue the job has finished by the time POST
+    returns: its state in Redis is `finished`."""
+    upload_id = post_upload(client, alice, content=statement, account_id=account_id).json()["id"]
+
+    assert statement_job_waiting_check(get_redis())(uuid.UUID(upload_id)) is False
 
 
 # --- Lock order ---------------------------------------------------------------

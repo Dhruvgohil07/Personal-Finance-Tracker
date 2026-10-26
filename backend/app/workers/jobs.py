@@ -42,10 +42,11 @@ from rq.job import Job
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import get_settings
+from app.core.redis import get_redis
 from app.db.session import SessionLocal, build_unpooled_engine
 from app.services import cleanup as cleanup_service
 from app.services import imports as imports_service
-from app.workers.queue import PROCESS_STATEMENT
+from app.workers.queue import PROCESS_STATEMENT, statement_job_waiting_check
 
 log = structlog.get_logger()
 
@@ -79,12 +80,16 @@ def process_statement(upload_id: str) -> None:
 def cleanup() -> None:
     """The hourly cleanup (SPEC §11). Enqueued by app/workers/scheduler.py.
 
-    Takes no arguments: what to clean up is decided by the database and the
-    clock, and the time is read here so the service can be tested with any
-    time it is given.
+    Takes no arguments: what to clean up is decided by the database, the
+    clock and Redis. The time and the Redis lookup are supplied here, so the
+    service can be tested with any time and any answer it is given.
     """
     with SessionLocal() as db:
-        cleanup_service.run_cleanup(db, now=datetime.now(UTC))
+        cleanup_service.run_cleanup(
+            db,
+            now=datetime.now(UTC),
+            job_is_waiting=statement_job_waiting_check(get_redis()),
+        )
 
 
 def on_process_statement_failure(

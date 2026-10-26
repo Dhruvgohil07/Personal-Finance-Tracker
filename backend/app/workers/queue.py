@@ -22,10 +22,14 @@ Two rules from the SPEC shape this module:
 """
 
 import uuid
+from collections.abc import Callable
 from datetime import timedelta
 
+from redis import Redis
+from redis.exceptions import RedisError
 from rq import Callback, Queue, Retry
-from rq.job import Job
+from rq.exceptions import NoSuchJobError
+from rq.job import Job, JobStatus
 
 from app.core.redis import get_redis
 
@@ -54,6 +58,48 @@ FAILURE_TTL = timedelta(days=7)
 # The cleanup job is enqueued every hour by app/workers/scheduler.py.
 CLEANUP_INTERVAL = timedelta(hours=1)
 
+# Job states in which a job will still run (or is running). A job that is
+# finished, failed, stopped or gone will not.
+_WILL_STILL_RUN = frozenset(
+    {JobStatus.QUEUED, JobStatus.SCHEDULED, JobStatus.STARTED, JobStatus.DEFERRED}
+)
+
+
+def process_statement_job_id(upload_id: uuid.UUID) -> str:
+    """The RQ job id of an upload's `process_statement` job.
+
+    Fixed, instead of RQ's random one, so that anything holding just the
+    upload id - the stale-upload rule - can find the upload's job in Redis.
+    One upload is enqueued once, so the id never repeats. (RQ allows only
+    letters, digits, "_" and "-" in a job id, hence no ":".)
+    """
+    return f"process_statement_{upload_id}"
+
+
+def statement_job_waiting_check(connection: Redis) -> Callable[[uuid.UUID], bool]:
+    """A function answering "will this upload's job still run?", for that Redis.
+
+    Used by the stale-upload rule (`fail_stale_uploads`), which must not
+    fail an upload whose job is merely waiting in the queue - e.g. after
+    the worker was down for a while.
+
+    If Redis cannot be reached, the answer is "yes, assume it will run":
+    then nothing is failed this time, and the next hourly run decides. Being
+    wrong in that direction costs an hour; the other direction would make
+    the user upload a file again for nothing.
+    """
+
+    def job_is_waiting(upload_id: uuid.UUID) -> bool:
+        try:
+            job = Job.fetch(process_statement_job_id(upload_id), connection=connection)
+            return job.get_status(refresh=False) in _WILL_STILL_RUN
+        except NoSuchJobError:
+            return False
+        except RedisError:
+            return True
+
+    return job_is_waiting
+
 
 def get_queue() -> Queue:
     """FastAPI dependency: the queue that uploads are processed from.
@@ -81,6 +127,7 @@ def enqueue_statement_processing(queue: Queue, upload_id: uuid.UUID) -> Job:
     return queue.enqueue(
         PROCESS_STATEMENT,
         str(upload_id),
+        job_id=process_statement_job_id(upload_id),
         retry=Retry(max=RETRY_MAX, interval=RETRY_INTERVALS_SECONDS),
         # Both end in a `failed` upload once no retry is coming. The third
         # way a job can end - its process dying - is handled by the
