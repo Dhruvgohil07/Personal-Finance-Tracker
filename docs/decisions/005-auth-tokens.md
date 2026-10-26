@@ -99,3 +99,11 @@ and the whole family goes. Tested end to end in
 Cost: an active family keeps all its rotated rows until its newest token
 expires (one row per refresh, at most `REFRESH_TOKEN_TTL` = 30 days after the
 last one). That is fine at this app's size.
+
+Refined in the Step 3 code review: a family counts as dead only when its newest
+token expired more than `DEAD_FAMILY_GRACE` (1 h) ago. Without the margin, a
+refresh validated an instant before expiry could commit a new token, invisible to
+the cleanup's snapshot, into a family whose history was being deleted. The DELETE
+reads only expired rows (`expires_at < cutoff`, new index in migration 0009) and
+keeps any whose family still has a live sibling (`NOT EXISTS`, on the `family_id`
+index), instead of grouping the whole table every hour.

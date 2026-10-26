@@ -222,13 +222,27 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   backlog), `app/workers/scheduler.py` (APScheduler `BlockingScheduler`, only enqueues, runs
   once at start then hourly), compose `scheduler` service; ADR 005 amendment. 999 tests,
   100% coverage. Live: scheduler enqueued at startup, worker ran it in 55 ms
+- [x] Step 3 code review (`/code-review high` on PR #18, 9 findings) — all 9 fixed:
+  1. a re-upload re-reads whether a live upload is left after applying the stale rule, so
+     an upload the cleanup failed a moment earlier frees the file (was a false 409)
+  2. the scheduler handles SIGTERM (PID 1 ignores it otherwise) + `init: true` in compose:
+     `docker compose stop scheduler` 0.6 s instead of 10 s + SIGKILL
+  3. each cleanup rule commits on its own: short row locks
+  4. "stale" also requires that no job of the upload waits in Redis (fixed job id
+     `process_statement_{upload_id}`, `statement_job_waiting_check`; Redis down = waiting)
+  5. dead token family = newest token expired over 1 h ago (`DEAD_FAMILY_GRACE`)
+  6. redaction lets integer counts through (`_count`/`_deleted`/`_failed` suffix AND int),
+     so `refresh_tokens_deleted` is logged under its real name
+  7. token DELETE reads only expired rows (migration 0009 index) + `NOT EXISTS` live sibling
+  8-9. one `fail_stale_uploads` + `fail_uploads_where` shared by cleanup and re-upload
+  1015 tests, 100% coverage. ADR 005 and ADR 013 amended
 
 ## In progress
 - (nothing)
 
 ## Next up
 - Phase 2 Step 4: statement order + balance reconciliation — `app/parsers/reconcile.py`,
-  migration 0009 (`transactions.statement_seq`, `statement_uploads.reconciliation_issues`),
+  migration 0010 (`transactions.statement_seq`, `statement_uploads.reconciliation_issues`),
   3-part cursor, ADR 014
 - Steps 9–10 (ICICI PDF, password PDFs) are blocked until the ICICI PDF is in `samples/`
 
@@ -254,9 +268,10 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   a token FAMILY is deleted only when every token in it has expired. A test proves the naive
   rule would let the thief's token keep working
 - Step 3 → found in the live run: log keys are redacted by substring, so a count named
-  `refresh_tokens_deleted` came out as `[REDACTED]` ("token"). Renamed to
-  `refresh_rows_deleted`; a test now runs the cleanup's log line through the real
-  redaction processor (`capture_logs` skips processors, so it could not catch this)
+  `refresh_tokens_deleted` came out as `[REDACTED]` ("token"). Fixed at the root in the
+  review: the redaction lets INTEGER values of keys ending in `_count`/`_deleted`/`_failed`
+  through (a string under such a name is still redacted). A test runs the cleanup's log
+  line through the real processor (`capture_logs` skips processors)
 - Step 3 → note: the stale-upload rule scans `statement_uploads` without an index on
   `status` (hourly; fine at personal scale). A partial index `WHERE status IN
   ('pending','processing')` is the fix if it ever shows up
