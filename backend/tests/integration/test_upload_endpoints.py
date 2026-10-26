@@ -9,9 +9,13 @@ The rules defended here:
   unknown id (CLAUDE.md rule 2, IDOR)
 - DELETE removes the upload, the transactions it inserted and its stored
   file - and nothing that belongs to another upload
-- DELETE is refused (409) while the worker is processing the upload
+- DELETE is refused (409) while the worker is processing the upload - at
+  once, without waiting for the import - and while a later overlapping
+  upload relies on its rows
+- polling GET /uploads/{id} has its own rate limit and a Retry-After hint
 """
 
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -19,9 +23,10 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import Engine, func, select, text
 from sqlalchemy.orm import Session
 
+from app.api.v1.uploads import UPLOAD_POLL_INTERVAL_SECONDS
 from app.models import StatementUpload, Transaction, UploadBlob, UploadStatus
 from app.services import uploads as uploads_service
 from tests.fixtures.icici_xls import build_icici_xls
@@ -317,3 +322,138 @@ def test_a_pending_upload_can_be_deleted_with_its_file(
 
     assert count(db, StatementUpload) == 0
     assert count(db, UploadBlob) == 0
+
+
+def test_an_upload_locked_by_a_running_import_is_a_409_at_once(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    tmp_path: Path,
+    migrated_engine: Engine,
+) -> None:
+    """The worker holds the upload's row lock for the whole import. DELETE
+    must not queue up behind it (and then delete the finished import); it
+    answers 409 straight away. A second connection holding the lock plays
+    the worker."""
+    upload_id = upload(client, alice, account_id, tmp_path)
+
+    with migrated_engine.connect() as worker:
+        worker.execute(
+            text("SELECT id FROM statement_uploads WHERE id = :id FOR UPDATE"), {"id": upload_id}
+        )
+        started = time.monotonic()
+        response = client.delete(f"{UPLOADS}/{upload_id}", headers=alice)
+        elapsed = time.monotonic() - started
+        worker.rollback()
+
+    assert response.status_code == 409
+    assert response.json()["error"]["message"] == uploads_service.UPLOAD_PROCESSING_MESSAGE
+    assert elapsed < 2, "DELETE waited for the lock instead of answering at once"
+    # Once the import is over, the same DELETE works.
+    assert client.delete(f"{UPLOADS}/{upload_id}", headers=alice).status_code == 204
+
+
+def test_an_upload_a_later_one_relies_on_cannot_be_deleted_first(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path, db: Session
+) -> None:
+    """The later, overlapping upload skipped two rows as duplicates of the
+    first one's. Deleting the first would delete those rows from under the
+    second, so it is refused until the later upload is deleted."""
+    first = upload(client, alice, account_id, tmp_path)
+    second = upload(
+        client,
+        alice,
+        account_id,
+        tmp_path,
+        name="second.xls",
+        rows=OVERLAPPING_ROWS,
+        period_from="03/08/2026",
+        period_to="05/08/2026",
+    )
+
+    refused = client.delete(f"{UPLOADS}/{first}", headers=alice)
+
+    assert refused.status_code == 409
+    assert refused.json()["error"]["message"] == uploads_service.OVERLAPPED_BY_LATER_UPLOAD_MESSAGE
+    assert count(db, Transaction) == 6
+
+    # In the order the message asks for, both go.
+    assert client.delete(f"{UPLOADS}/{second}", headers=alice).status_code == 204
+    assert client.delete(f"{UPLOADS}/{first}", headers=alice).status_code == 204
+    assert count(db, Transaction) == 0
+
+
+def test_a_later_upload_that_does_not_overlap_does_not_block_a_delete(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path
+) -> None:
+    """September after August: no shared days, so nothing relies on August."""
+    august = upload(client, alice, account_id, tmp_path)
+    upload(
+        client,
+        alice,
+        account_id,
+        tmp_path,
+        name="september.xls",
+        rows=(("1", "02/09/2026", "02/09/2026", "", "UPI/SHOP/PAY", "10.00", "0.00", "1.00"),),
+        period_from="01/09/2026",
+        period_to="30/09/2026",
+    )
+
+    assert client.delete(f"{UPLOADS}/{august}", headers=alice).status_code == 204
+
+
+def test_a_failed_upload_can_be_deleted(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path, db: Session
+) -> None:
+    """It imported nothing, so nothing can rely on it."""
+    failed = upload(
+        client,
+        alice,
+        account_id,
+        tmp_path,
+        name="broken.xls",
+        rows=(("1", "01/08/2026", "01/08/2026", "", "UPI/SHOP/PAY", "x", "", "1.00"),),
+    )
+
+    assert client.delete(f"{UPLOADS}/{failed}", headers=alice).status_code == 204
+    assert count(db, StatementUpload) == 0
+
+
+# --- Polling --------------------------------------------------------------------
+
+
+def test_an_unfinished_upload_says_when_to_poll_again(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path, db: Session
+) -> None:
+    """`Retry-After` while there is something to wait for, and not after."""
+    content = build_icici_xls(tmp_path / "statement.xls").read_bytes()
+    accepted = client.post(
+        UPLOADS,
+        headers=alice,
+        files={"file": ("statement.xls", content, "application/octet-stream")},
+        data={"account_id": account_id},
+    )
+    upload_id = accepted.json()["id"]
+    assert accepted.headers["Retry-After"] == str(UPLOAD_POLL_INTERVAL_SECONDS)
+
+    # Finished (the test queue has already run the job): no hint.
+    assert "Retry-After" not in client.get(f"{UPLOADS}/{upload_id}", headers=alice).headers
+
+    row = db.get_one(StatementUpload, uuid.UUID(upload_id))
+    row.status = UploadStatus.PENDING
+    db.commit()
+    polled = client.get(f"{UPLOADS}/{upload_id}", headers=alice)
+    assert polled.headers["Retry-After"] == str(UPLOAD_POLL_INTERVAL_SECONDS)
+
+
+def test_polling_does_not_use_up_the_general_rate_limit(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path
+) -> None:
+    """More polls than the whole general budget (100/min), and every other
+    endpoint still answers: the poll route counts against its own limit."""
+    upload_id = upload(client, alice, account_id, tmp_path)
+
+    for _ in range(101):
+        assert client.get(f"{UPLOADS}/{upload_id}", headers=alice).status_code == 200
+
+    assert client.get(UPLOADS, headers=alice).status_code == 200

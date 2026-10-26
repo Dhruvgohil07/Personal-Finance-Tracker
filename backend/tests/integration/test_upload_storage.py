@@ -303,7 +303,7 @@ def duplicate_check_sql(db: Session, user_id: uuid.UUID) -> tuple[str, dict[str,
     engine = db.get_bind()
     event.listen(engine, "before_cursor_execute", capture)
     try:
-        imports_service._already_uploaded(db, user_id, FILE_SHA256)
+        imports_service._live_upload(db, user_id, FILE_SHA256)
     finally:
         event.remove(engine, "before_cursor_execute", capture)
     [single] = captured
@@ -340,7 +340,7 @@ def generic_plans(db: Session) -> Iterator[Callable[[str, list[str]], str]]:
 def test_the_duplicate_check_sends_the_index_condition_as_literal_sql(
     db: Session, account: Account
 ) -> None:
-    """`_already_uploaded` must not send 'failed' as a bound parameter."""
+    """`_live_upload` must not send 'failed' as a bound parameter."""
     statement, parameters = duplicate_check_sql(db, account.user_id)
     assert NOT_FAILED_SQL in statement
     assert "failed" not in [str(value) for value in parameters.values()]

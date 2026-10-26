@@ -14,10 +14,12 @@ import xlwt
 
 from app.parsers.base import FileType, ParseError
 from app.parsers.readers import (
+    READABLE_FILE_TYPES,
     _cell_to_text,
     detect_file_type,
     read_csv,
     read_statement,
+    read_statement_as,
     read_xls,
 )
 from app.utils.money import parse_amount_to_paise
@@ -252,6 +254,22 @@ def test_read_statement_dispatches_on_the_detected_type() -> None:
 
     assert csv_data.file_type is FileType.CSV
     assert xls_data.file_type is FileType.XLS
+
+
+def test_read_statement_as_trusts_the_type_it_is_given() -> None:
+    """No name needed: the type decided at upload time is enough."""
+    data = read_statement_as(FileType.CSV, b"Date,Narration\n01/08/2026,SHOP\n")
+
+    assert data.file_type is FileType.CSV
+    assert data.rows[1] == ["01/08/2026", "SHOP"]
+
+
+def test_every_readable_type_is_read_and_pdf_is_not_yet() -> None:
+    """READABLE_FILE_TYPES is what the upload request checks against, so it
+    must say exactly what read_statement_as can read."""
+    assert READABLE_FILE_TYPES == {FileType.CSV, FileType.XLS}
+    with pytest.raises(ParseError, match="PDF statements are not supported yet"):
+        read_statement_as(FileType.PDF, b"%PDF-1.7\nrest")
 
 
 def test_read_statement_refuses_a_pdf_for_now() -> None:

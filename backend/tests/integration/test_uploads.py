@@ -415,12 +415,17 @@ def test_reuploading_the_same_file_is_rejected(
 ) -> None:
     """Dedupe level 1: the same bytes, rejected by the file-hash index (ADR 011)."""
     content = statement_bytes(tmp_path)
-    assert post_upload(client, alice, content=content, account_id=account_id).status_code == 202
+    first = post_upload(client, alice, content=content, account_id=account_id)
+    assert first.status_code == 202
 
     again = post_upload(client, alice, content=content, account_id=account_id)
 
     assert again.status_code == 409
-    assert again.json()["error"]["code"] == "CONFLICT"
+    error = again.json()["error"]
+    assert error["code"] == "CONFLICT"
+    assert error["message"] == imports_service.DUPLICATE_FILE_MESSAGE
+    # The existing upload is named, so the client can show it.
+    assert error["details"] == {"upload_id": first.json()["id"]}
     # Nothing was added a second time, and no second upload row was written.
     assert count_transactions(db) == 5
     assert db.scalar(select(func.count()).select_from(StatementUpload)) == 1
@@ -853,7 +858,7 @@ def test_a_simultaneous_duplicate_upload_is_a_conflict(
     content = statement_bytes(tmp_path)
     assert post_upload(client, alice, content=content, account_id=account_id).status_code == 202
 
-    monkeypatch.setattr(imports_service, "_already_uploaded", lambda *_args: False)
+    monkeypatch.setattr(imports_service, "_live_upload", lambda *_args: None)
     second = post_upload(client, alice, content=content, account_id=account_id)
 
     assert second.status_code == 409

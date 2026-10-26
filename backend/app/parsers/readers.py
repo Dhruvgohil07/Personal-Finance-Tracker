@@ -5,8 +5,9 @@ formats*. Everything after it works on the same simple structure - a list
 of rows, each a list of string cells - so a parser never cares whether the
 statement arrived as a CSV or as a legacy Excel file:
 
-    bytes -> [detect_file_type] -> FileType
-    bytes -> [read_statement]   -> ParserInput(file_type, rows)
+    bytes -> [detect_file_type]  -> FileType
+    bytes -> [read_statement]    -> ParserInput(file_type, rows)
+    (FileType, bytes) -> [read_statement_as] -> ParserInput   (type known already)
 
 Three rules shape this module:
 
@@ -47,6 +48,12 @@ _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 # We detect it only so the error message can say something useful.
 _ZIP_SIGNATURE = b"PK\x03\x04"
 _PDF_SIGNATURE = b"%PDF-"
+
+# The file types this module can turn into rows today. A PDF is DETECTED
+# (so it can be refused with a clear message) but not readable until the
+# PDF reader exists (Phase 2 Step 9), which adds it here. The import service
+# checks against this set in the request, so the two cannot disagree.
+READABLE_FILE_TYPES = frozenset({FileType.CSV, FileType.XLS})
 
 # A CSV is plain text and has no signature, so for CSV the file name is all
 # we have to go on.
@@ -116,14 +123,21 @@ def detect_file_type(filename: str, content: bytes) -> FileType:
 
 
 def read_statement(filename: str, content: bytes) -> ParserInput:
-    """Detect the file type and read the file into rows.
+    """Detect the file type and read the file into rows."""
+    return read_statement_as(detect_file_type(filename, content), content)
 
-    This is what the import service (Step 7) calls. A PDF is detected
-    properly - so the upload row can record `file_type = "pdf"` - and then
-    refused, because PDF parsing is Phase 2 (Phase 1 plan).
+
+def read_statement_as(file_type: FileType, content: bytes) -> ParserInput:
+    """Read a file whose type is already known into rows.
+
+    The import worker uses this: the type was decided from the file's
+    signature (and, for a CSV, its name) when it was uploaded, and is
+    stored on the upload. Detecting it again in the worker would need the
+    name, and the stored name may be truncated - so the stored type is
+    used, and the two halves of an import cannot disagree about it.
+
+    A PDF is refused until the PDF reader exists (Phase 2 Step 9).
     """
-    file_type = detect_file_type(filename, content)
-
     if file_type is FileType.CSV:
         return read_csv(content)
     if file_type is FileType.XLS:

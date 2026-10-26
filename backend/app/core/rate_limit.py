@@ -51,6 +51,12 @@ log = structlog.get_logger()
 # Limit strings are parsed by the `limits` library: "<count>/<period>".
 AUTH_LIMIT = "5/minute"  # register, login: per IP
 UPLOAD_LIMIT = "10/hour"  # statement uploads: per user (used from Step 7)
+# GET /uploads/{id}, the status a client polls after an upload (Phase 2).
+# Its own limit, so polling does not use up the shared GENERAL_LIMIT that
+# every other call depends on. The responses ask for one poll every
+# UPLOAD_POLL_INTERVAL_SECONDS (Retry-After); 120/min leaves room for a few
+# uploads polled at once and for a client that polls a little faster.
+UPLOAD_POLL_LIMIT = "120/minute"
 GENERAL_LIMIT = "100/minute"  # everything else: per user, or per IP if logged out
 
 

@@ -14,11 +14,18 @@ The rules defended here, and where they come from:
 - an unexpected error is retried, and only the
   LAST failure marks the upload `failed`             ADR 013
 - Redis down -> 503, and no upload is left `pending` Phase 2 plan
+- a job whose process died or was stopped still
+  ends in `failed`                                   ADR 013
+- an import and a delete of its account do not
+  deadlock                                           ADR 013 (lock order)
 """
 
+import threading
+import time
 import uuid
 import zlib
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -28,8 +35,9 @@ import structlog
 from fastapi.testclient import TestClient
 from httpx import Response
 from redis import Redis
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from rq import Queue
-from sqlalchemy import func, select
+from sqlalchemy import Engine, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.redis import get_redis
@@ -136,11 +144,20 @@ def count(db: Session, model: type[Any]) -> int:
 def final_failure(upload_id: str) -> Any:
     """Stand-in for an RQ job that has used up its retries.
 
-    `on_process_statement_failure` reads only these three attributes. A
-    real `Job` would have to be loaded from Redis and its retry counter
-    edited, which tests RQ more than our callback.
+    The failure hooks read only these attributes. A real `Job` would have
+    to be loaded from Redis and its retry counter edited, which tests RQ
+    more than our hooks.
     """
-    return SimpleNamespace(args=(upload_id,), should_retry=False, retries_left=0)
+    return SimpleNamespace(
+        args=(upload_id,), func_name=PROCESS_STATEMENT, should_retry=False, retries_left=0
+    )
+
+
+def retrying(upload_id: str) -> Any:
+    """Stand-in for an RQ job that RQ is about to run again."""
+    return SimpleNamespace(
+        args=(upload_id,), func_name=PROCESS_STATEMENT, should_retry=True, retries_left=2
+    )
 
 
 # --- The job in Redis -------------------------------------------------------
@@ -192,6 +209,7 @@ def test_the_job_is_enqueued_with_retries_and_a_failure_callback(
     assert job.retries_left == RETRY_MAX
     assert job.retry_intervals == RETRY_INTERVALS_SECONDS
     assert job.failure_callback is jobs.on_process_statement_failure
+    assert job.stopped_callback is jobs.on_process_statement_stopped
     assert job.failure_ttl == FAILURE_TTL.total_seconds()
     # The name is what is stored; it must resolve to the real function.
     assert job.func is jobs.process_statement
@@ -309,7 +327,12 @@ def test_the_import_transaction_rechecks_the_status_after_locking(
     status that is no longer `processing`. It must stop, not import.
     """
     upload_id = queue_upload(client, alice, content=statement, account_id=account_id)
-    monkeypatch.setattr(imports_service, "_claim", lambda *_args: True)
+    # "Go on", handing back the row as it is: still `pending`.
+    monkeypatch.setattr(
+        imports_service,
+        "_claim",
+        lambda session, upload_id: session.get(StatementUpload, upload_id),
+    )
 
     with job_sessions() as session:
         imports_service.process_upload(session, uuid.UUID(upload_id))
@@ -490,3 +513,202 @@ def test_redis_down_is_a_503_and_the_upload_is_failed(
     assert upload.status is UploadStatus.FAILED
     assert upload.error_message == imports_service.QUEUE_UNAVAILABLE_MESSAGE
     assert count(db, UploadBlob) == 0
+
+
+# --- The other ways a job can end -------------------------------------------
+
+
+def test_a_stopped_job_fails_its_upload(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    statement: bytes,
+    held_queue: Queue,
+    db: Session,
+) -> None:
+    """RQ never retries a stopped job and does not call on_failure for it,
+    so on_stopped is the only chance to mark the upload `failed`."""
+    upload_id = queue_upload(client, alice, content=statement, account_id=account_id)
+
+    jobs.on_process_statement_stopped(final_failure(upload_id), get_redis())
+
+    upload = upload_row(db, upload_id)
+    assert upload.status is UploadStatus.FAILED
+    assert upload.error_message == imports_service.UNEXPECTED_FAILURE_MESSAGE
+    assert db.get(UploadBlob, upload.id) is None
+
+
+def test_a_job_whose_process_died_fails_only_after_its_last_attempt(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    statement: bytes,
+    held_queue: Queue,
+    db: Session,
+) -> None:
+    """The child process running the job died (e.g. killed for using too
+    much memory). RQ calls the worker's killed-horse handler, NOT the job's
+    on_failure. While a retry is coming, nothing changes; after the last
+    attempt, the upload is failed."""
+    upload_id = queue_upload(client, alice, content=statement, account_id=account_id)
+
+    jobs.on_work_horse_killed(retrying(upload_id), 1234, 9, None)
+    assert upload_row(db, upload_id).status is UploadStatus.PENDING
+
+    jobs.on_work_horse_killed(final_failure(upload_id), 1234, 9, None)
+    upload = upload_row(db, upload_id)
+    assert upload.status is UploadStatus.FAILED
+    assert upload.error_message == imports_service.UNEXPECTED_FAILURE_MESSAGE
+
+
+# --- An enqueue error that arrives after the job ran -------------------------
+
+
+def test_an_enqueue_error_after_the_job_got_through_is_not_a_503(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    statement: bytes,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Redis accepted the job, but its reply timed out. The synchronous test
+    queue runs the job inside the real enqueue, which stands in for a fast
+    worker; then the timeout is raised. The import succeeded, so the user
+    must not be told to upload again (they would then get a 409)."""
+    real_enqueue = imports_service.enqueue_statement_processing
+
+    def enqueue_then_time_out(queue: Queue, upload_id: uuid.UUID) -> None:
+        real_enqueue(queue, upload_id)
+        raise RedisTimeoutError("Timeout reading from socket")
+
+    monkeypatch.setattr(imports_service, "enqueue_statement_processing", enqueue_then_time_out)
+
+    response = post_upload(client, alice, content=statement, account_id=account_id)
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "completed"
+    assert upload_row(db, response.json()["id"]).status is UploadStatus.COMPLETED
+    assert count(db, Transaction) == 5
+
+
+# --- Unfinished uploads of the same file -------------------------------------
+
+
+def test_a_recent_unfinished_upload_of_the_file_is_a_409_naming_it(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    statement: bytes,
+    held_queue: Queue,
+) -> None:
+    """The first upload is still waiting for the worker. "You have already
+    uploaded this file" would be false - nothing is imported yet - so the
+    message says it is being imported, and names the upload to poll."""
+    upload_id = queue_upload(client, alice, content=statement, account_id=account_id)
+
+    again = post_upload(client, alice, content=statement, account_id=account_id)
+
+    assert again.status_code == 409
+    error = again.json()["error"]
+    assert error["message"] == imports_service.FILE_BEING_IMPORTED_MESSAGE
+    assert error["details"] == {"upload_id": upload_id}
+
+
+def test_a_stuck_upload_of_the_file_is_failed_and_the_new_one_accepted(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    statement: bytes,
+    held_queue: Queue,
+    db: Session,
+) -> None:
+    """An upload `pending` for longer than STALE_UPLOAD_AFTER has no job
+    working on it any more (lost between commit and enqueue, or its worker
+    never came). It must not block the file until a cleanup job runs."""
+    stuck_id = queue_upload(client, alice, content=statement, account_id=account_id)
+    stuck = upload_row(db, stuck_id)
+    stuck.created_at = datetime.now(UTC) - imports_service.STALE_UPLOAD_AFTER - timedelta(minutes=1)
+    db.commit()
+
+    again = post_upload(client, alice, content=statement, account_id=account_id)
+
+    assert again.status_code == 202
+    assert again.json()["id"] != stuck_id
+    stuck = upload_row(db, stuck_id)
+    assert stuck.status is UploadStatus.FAILED
+    assert stuck.error_message == imports_service.STALE_UPLOAD_MESSAGE
+    assert db.get(UploadBlob, stuck.id) is None
+
+
+# --- Lock order ---------------------------------------------------------------
+
+
+def wait_until_a_query_waits_for_a_lock(engine: Engine, timeout: float = 5.0) -> None:
+    """Block until some connection to the test database is waiting on a lock."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with engine.connect() as conn:
+            waiting = conn.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                )
+            )
+        if waiting:
+            return
+        time.sleep(0.05)
+    raise AssertionError("the concurrent DELETE never started waiting for a lock")
+
+
+def test_deleting_the_account_during_an_import_waits_instead_of_deadlocking(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    statement: bytes,
+    held_queue: Queue,
+    db: Session,
+    migrated_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The import and a DELETE of its account, at the same moment.
+
+    The DELETE locks the account row and then, by cascade, the upload row.
+    The import used to lock the upload row first and the account row
+    (through the transactions' foreign key) second: opposite orders, so
+    each waited for the other and Postgres aborted one of them. Now the
+    import takes the account first, so the DELETE simply waits for it.
+
+    The DELETE is started from a second thread in the middle of the import
+    (just before the INSERT), and the import only goes on once Postgres
+    reports the DELETE as waiting for a lock. Before the fix, this test
+    ends in a DeadlockDetected error on one side.
+    """
+    upload_id = queue_upload(client, alice, content=statement, account_id=account_id)
+    outcome: dict[str, Any] = {}
+
+    def delete_the_account() -> None:
+        try:
+            with migrated_engine.begin() as conn:
+                conn.execute(text("DELETE FROM accounts WHERE id = :id"), {"id": account_id})
+            outcome["deleted"] = True
+        except Exception as exc:  # reported by the assertion below
+            outcome["error"] = exc
+
+    deleter = threading.Thread(target=delete_the_account)
+    real_store = imports_service.store_transactions
+
+    def store_while_the_account_is_deleted(*args: Any) -> Any:
+        deleter.start()
+        wait_until_a_query_waits_for_a_lock(migrated_engine)
+        return real_store(*args)
+
+    monkeypatch.setattr(imports_service, "store_transactions", store_while_the_account_is_deleted)
+
+    jobs.process_statement(upload_id)
+    deleter.join(timeout=10)
+
+    assert outcome == {"deleted": True}
+    # The import committed first, then the DELETE removed it all by cascade.
+    assert count(db, StatementUpload) == 0
+    assert count(db, Transaction) == 0

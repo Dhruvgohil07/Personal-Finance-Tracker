@@ -22,6 +22,7 @@ from app.services import imports as imports_service
 from app.workers import jobs, worker
 from app.workers.queue import (
     ON_PROCESS_STATEMENT_FAILURE,
+    ON_PROCESS_STATEMENT_STOPPED,
     PROCESS_STATEMENT,
     QUEUE_NAME,
     get_queue,
@@ -33,9 +34,10 @@ class FakeWorker:
 
     created: list["FakeWorker"] = []
 
-    def __init__(self, queues: list[str], connection: Redis) -> None:
+    def __init__(self, queues: list[str], connection: Redis, **options: Any) -> None:
         self.queues = queues
         self.connection = connection
+        self.options = options
         self.work_kwargs: dict[str, Any] | None = None
         FakeWorker.created.append(self)
 
@@ -54,6 +56,9 @@ def test_the_worker_listens_on_the_queue_the_api_uses(monkeypatch: pytest.Monkey
     [built] = FakeWorker.created
     assert built.queues == [QUEUE_NAME]
     assert built.work_kwargs == {"with_scheduler": True}
+    # A job whose process DIES never reaches on_failure; this handler is
+    # how such an upload still ends up `failed`.
+    assert built.options == {"work_horse_killed_handler": jobs.on_work_horse_killed}
 
 
 def test_the_worker_has_its_own_redis_client(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -88,6 +93,7 @@ def test_the_job_names_resolve_to_the_job_functions() -> None:
     fail in the worker, at run time. This catches it in the test run."""
     assert import_attribute(PROCESS_STATEMENT) is jobs.process_statement
     assert import_attribute(ON_PROCESS_STATEMENT_FAILURE) is jobs.on_process_statement_failure
+    assert import_attribute(ON_PROCESS_STATEMENT_STOPPED) is jobs.on_process_statement_stopped
 
 
 def test_a_failure_that_will_be_retried_touches_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,10 +103,28 @@ def test_a_failure_that_will_be_retried_touches_nothing(monkeypatch: pytest.Monk
     def no_database() -> None:
         raise AssertionError("the callback must not open a session before the last attempt")
 
-    monkeypatch.setattr(jobs, "SessionLocal", no_database)
-    job = SimpleNamespace(args=(str(uuid.uuid4()),), should_retry=True, retries_left=2)
+    monkeypatch.setattr(jobs, "CallbackSessionLocal", no_database)
+    job = SimpleNamespace(
+        args=(str(uuid.uuid4()),), func_name=PROCESS_STATEMENT, should_retry=True, retries_left=2
+    )
 
     jobs.on_process_statement_failure(job, get_redis(), RuntimeError, RuntimeError("x"), None)
+    jobs.on_work_horse_killed(job, 1234, 9, None)
+
+
+def test_the_killed_horse_handler_ignores_other_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It is registered on the whole worker, so it also sees the jobs of
+    later steps (cleanup, analysis). Those have no upload to fail."""
+
+    def no_database() -> None:
+        raise AssertionError("another job type must not touch uploads")
+
+    monkeypatch.setattr(jobs, "CallbackSessionLocal", no_database)
+    job = SimpleNamespace(
+        args=(), func_name="app.workers.jobs.cleanup", should_retry=False, retries_left=0
+    )
+
+    jobs.on_work_horse_killed(job, 1234, 9, None)
 
 
 def test_a_column_mapping_survives_the_trip_through_the_database() -> None:

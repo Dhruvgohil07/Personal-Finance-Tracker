@@ -108,7 +108,8 @@ def db(migrated_engine: Engine) -> Iterator[Session]:
 def job_sessions(migrated_engine: Engine, monkeypatch: pytest.MonkeyPatch) -> sessionmaker[Session]:
     """Make the RQ jobs open their sessions on the TEST database.
 
-    A job opens its own session (`SessionLocal()` in app/workers/jobs.py),
+    A job opens its own session (`SessionLocal()` in app/workers/jobs.py,
+    `CallbackSessionLocal()` in its failure hooks),
     because in production it runs in another process with no request
     around it. `SessionLocal` is bound to DATABASE_URL, the development
     database, so the tests swap it for a factory bound to the test engine.
@@ -116,6 +117,9 @@ def job_sessions(migrated_engine: Engine, monkeypatch: pytest.MonkeyPatch) -> se
     """
     factory = sessionmaker(bind=migrated_engine, expire_on_commit=False)
     monkeypatch.setattr(jobs, "SessionLocal", factory)
+    # The failure hooks use their own unpooled factory (they can run in the
+    # worker's parent process); it points at the test database too.
+    monkeypatch.setattr(jobs, "CallbackSessionLocal", factory)
     return factory
 
 

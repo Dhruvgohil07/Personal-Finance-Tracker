@@ -34,6 +34,7 @@ QUEUE_NAME = "default"
 
 PROCESS_STATEMENT = "app.workers.jobs.process_statement"
 ON_PROCESS_STATEMENT_FAILURE = "app.workers.jobs.on_process_statement_failure"
+ON_PROCESS_STATEMENT_STOPPED = "app.workers.jobs.on_process_statement_stopped"
 
 # How often, and after how long, an unexpected error is retried: 3 more
 # attempts, 10 s, 1 min and 5 min after the failures before them. Meant for
@@ -77,6 +78,10 @@ def enqueue_statement_processing(queue: Queue, upload_id: uuid.UUID) -> Job:
         PROCESS_STATEMENT,
         str(upload_id),
         retry=Retry(max=RETRY_MAX, interval=RETRY_INTERVALS_SECONDS),
+        # Both end in a `failed` upload once no retry is coming. The third
+        # way a job can end - its process dying - is handled by the
+        # worker, not the job (see app/workers/jobs.py).
         on_failure=Callback(ON_PROCESS_STATEMENT_FAILURE),
+        on_stopped=Callback(ON_PROCESS_STATEMENT_STOPPED),
         failure_ttl=int(FAILURE_TTL.total_seconds()),
     )
