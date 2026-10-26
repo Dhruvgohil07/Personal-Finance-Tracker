@@ -82,6 +82,23 @@ def build_health_engine(database_url: str) -> Engine:
     )
 
 
+def build_unpooled_engine(database_url: str) -> Engine:
+    """An engine without a pool, for code that runs in a process that forks.
+
+    The RQ worker's main process forks a child for every job. A pooled
+    connection opened in the parent would be copied into each child, and a
+    psycopg connection must never be used by two processes at once. With
+    NullPool every session opens its own connection and closes it when the
+    session ends, so nothing is left open to be inherited.
+    """
+    return create_engine(
+        database_url,
+        poolclass=NullPool,
+        hide_parameters=True,
+        connect_args={"connect_timeout": CONNECT_TIMEOUT_SECONDS},
+    )
+
+
 engine = build_engine(get_settings().database_url)
 health_engine = build_health_engine(get_settings().database_url)
 

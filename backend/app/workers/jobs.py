@@ -16,6 +16,20 @@ Every job follows the same three rules from the SPEC:
 The work itself is in `app/services/imports.py`; a job is only the thin
 wrapper that gives the service a session, the same way a route is a thin
 wrapper that gives it a request.
+
+**Rule 3 needs three hooks, not one**, because RQ reports a job's end in
+three different ways (read in RQ 2.12's source):
+
+- the job raised an exception -> `on_failure` (`on_process_statement_failure`)
+  - also used by RQ's cleanup for a job whose worker vanished ("abandoned");
+- the job was stopped on purpose (`rq` stop command) -> `on_stopped`
+  (`on_process_statement_stopped`). A stopped job is never retried;
+- the child process running the job died (out of memory, a crash in a C
+  library, killed after its timeout) -> the worker's
+  `work_horse_killed_handler` (`on_work_horse_killed`). RQ does NOT call
+  `on_failure` in this case.
+
+All three end in `_fail_after_last_attempt`.
 """
 
 import uuid
@@ -24,11 +38,23 @@ from types import TracebackType
 import structlog
 from redis import Redis
 from rq.job import Job
+from sqlalchemy.orm import sessionmaker
 
-from app.db.session import SessionLocal
+from app.core.config import get_settings
+from app.db.session import SessionLocal, build_unpooled_engine
 from app.services import imports as imports_service
+from app.workers.queue import PROCESS_STATEMENT
 
 log = structlog.get_logger()
+
+# Sessions for the failure hooks. Two of them (the killed-horse handler and
+# RQ's abandoned-job cleanup) run in the worker's PARENT process, which
+# forks a child for every job, so they must not leave a pooled connection
+# behind to be inherited (see `build_unpooled_engine`). The engine is
+# created here, but it connects only when a hook actually runs.
+CallbackSessionLocal = sessionmaker(
+    bind=build_unpooled_engine(get_settings().database_url), expire_on_commit=False
+)
 
 
 def process_statement(upload_id: str) -> None:
@@ -72,20 +98,62 @@ def on_process_statement_failure(
     contain internals. RQ keeps the traceback in its failed-job registry
     for a week (`FAILURE_TTL`), which is where to look.
     """
-    upload_id = uuid.UUID(job.args[0])
-    if job.should_retry:
-        log.warning(
-            "statement_import_will_retry",
-            upload_id=str(upload_id),
-            retries_left=job.retries_left,
-            error_type=exc_type.__name__,
-        )
+    if _retry_is_coming(job, error_type=exc_type.__name__):
         return
+    _fail_after_last_attempt(job, reason="unexpected_error")
 
-    with SessionLocal() as db:
+
+def on_process_statement_stopped(job: Job, connection: Redis) -> None:
+    """RQ's `on_stopped` callback: someone stopped the job on purpose.
+
+    RQ never retries a stopped job, so this is always the end of it.
+    """
+    _fail_after_last_attempt(job, reason="stopped")
+
+
+def on_work_horse_killed(job: Job, retpid: int, ret_val: int, rusage: object) -> None:
+    """The worker's `work_horse_killed_handler`: the job's process died.
+
+    Registered on the Worker (app/workers/worker.py), so it is called for
+    EVERY job type; only `process_statement` jobs are handled here. RQ
+    calls it before deciding whether to retry, with the same
+    `should_retry` rule as `on_failure`.
+
+    The arguments are fixed by RQ: the job, the dead child's pid, its exit
+    status from `waitpid`, and its resource usage. Only the job is used.
+    (`rusage` is typed `object`: its real type, `resource.struct_rusage`,
+    exists only on Unix, and this module must import on Windows too.)
+    """
+    if job.func_name != PROCESS_STATEMENT:
+        return
+    if _retry_is_coming(job, error_type="WorkHorseKilled"):
+        return
+    _fail_after_last_attempt(job, reason="worker_died")
+
+
+def _retry_is_coming(job: Job, *, error_type: str) -> bool:
+    """True, and logged, if RQ will run this job again."""
+    if not job.should_retry:
+        return False
+    log.warning(
+        "statement_import_will_retry",
+        upload_id=job.args[0],
+        retries_left=job.retries_left,
+        error_type=error_type,
+    )
+    return True
+
+
+def _fail_after_last_attempt(job: Job, *, reason: str) -> None:
+    """Mark the job's upload `failed` with the generic message.
+
+    `fail_upload` leaves an upload that is already finished alone, so a
+    hook that fires late cannot undo a completed import.
+    """
+    with CallbackSessionLocal() as db:
         imports_service.fail_upload(
             db,
-            upload_id,
+            uuid.UUID(job.args[0]),
             imports_service.UNEXPECTED_FAILURE_MESSAGE,
-            reason="unexpected_error",
+            reason=reason,
         )

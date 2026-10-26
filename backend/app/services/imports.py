@@ -37,9 +37,10 @@ import dataclasses
 import hashlib
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
 from pathlib import PurePosixPath
+from typing import NoReturn
 
 import structlog
 from redis.exceptions import RedisError
@@ -58,13 +59,13 @@ from app.core.errors import (
     ServiceUnavailableError,
 )
 from app.db.errors import violates_constraint
-from app.models import Account, StatementUpload, Transaction, UploadBlob, UploadStatus
+from app.models import Account, StatementUpload, Transaction, UploadBlob, UploadStatus, User
 from app.models.statement_upload import FILE_HASH_INDEX, MAX_FILENAME_LENGTH, NOT_FAILED_SQL
 from app.parsers.base import FileType, ParsedStatement, ParseError, StatementParser
 from app.parsers.fingerprint import fingerprints_for
 from app.parsers.generic_csv import ColumnMapping, GenericCsvParser
 from app.parsers.normalize import normalize_row
-from app.parsers.readers import detect_file_type, read_statement
+from app.parsers.readers import READABLE_FILE_TYPES, detect_file_type, read_statement_as
 from app.parsers.registry import ParserRegistry, build_default_registry
 from app.services import accounts as accounts_service
 from app.workers.queue import enqueue_statement_processing
@@ -72,6 +73,12 @@ from app.workers.queue import enqueue_statement_processing
 log = structlog.get_logger()
 
 DUPLICATE_FILE_MESSAGE = "You have already uploaded this file."
+# A duplicate that has not finished importing yet. Saying "already
+# uploaded" would be wrong: nothing from it is imported so far. The 409's
+# `details` carry its upload id, so the client can poll that upload.
+FILE_BEING_IMPORTED_MESSAGE = (
+    "This file is already being imported. Check that upload for the result."
+)
 NO_PARSER_MESSAGE = (
     "We could not recognise this statement's layout. If it is a CSV, send a "
     "column_mapping describing which column holds the date, the description "
@@ -81,9 +88,10 @@ MAPPING_NEEDS_CSV_MESSAGE = "A column mapping can only be used with a CSV file."
 WRONG_ACCOUNT_NUMBER_MESSAGE = (
     "This statement is for a different account number than the account you selected."
 )
-# Refused in the request until the PDF parser exists (Phase 2 Step 9). The
-# file type is known from its signature, so there is no reason to store the
-# file and let the worker discover the same thing.
+# For a detected type the readers cannot read yet (`READABLE_FILE_TYPES`).
+# Today that is only PDF, until the PDF parser exists (Phase 2 Step 9). The
+# type is known from the signature, so there is no reason to store the file
+# and let the worker discover the same thing.
 PDF_NOT_SUPPORTED_MESSAGE = "PDF statements are not supported yet; upload the .xls or CSV version."
 
 # The `error_message` of a failed upload, for the failures that are not the
@@ -96,6 +104,13 @@ FILE_UNREADABLE_MESSAGE = "The stored file could not be read. Please upload it a
 UNEXPECTED_FAILURE_MESSAGE = (
     "Something went wrong while importing this statement. Please upload it again."
 )
+STALE_UPLOAD_MESSAGE = "This import did not finish. Please upload the file again."
+
+# How long an upload may stay `pending`/`processing` before it is presumed
+# lost: the API died between commit and enqueue, or the worker was down.
+# A real import takes seconds; RQ's retries add at most ~6 minutes. Phase 2
+# Step 3's cleanup job will use the same threshold.
+STALE_UPLOAD_AFTER = timedelta(hours=1)
 
 # The statuses in which an upload still has work to do. `processing` is in
 # it because a worker that crashed half-way leaves the row `processing`,
@@ -156,7 +171,8 @@ def create_upload(
 
     - `PayloadTooLargeError` (413)   - over `MAX_UPLOAD_MB`
     - `NotFoundError` (404)          - unknown account, or someone else's
-    - `ConflictError` (409)          - this exact file was already uploaded
+    - `ConflictError` (409)          - this exact file was already uploaded,
+                                       or is still being imported
     - `InvalidStatementError` (400)  - not a file type we can read
     - `ServiceUnavailableError` (503) - the queue (Redis) is unreachable
 
@@ -168,7 +184,9 @@ def create_upload(
        answers 404 for an account that does not exist *or* belongs to
        someone else (rule 2, IDOR).
     3. **sha256 of the bytes** -> was this exact file already uploaded by
-       this user? Dedupe level 1 (SPEC §6.3).
+       this user? Dedupe level 1 (SPEC §6.3). An earlier upload of it that
+       is stuck unfinished for over `STALE_UPLOAD_AFTER` is failed first,
+       so a lost job cannot block the file (`_fail_if_stale`).
     4. **file type, from the file's signature** ("magic bytes"), so a
        Word document renamed to `.xls` is refused here, not in the worker.
 
@@ -185,8 +203,9 @@ def create_upload(
     account = accounts_service.get_account(db, user_id, account_id)
 
     file_sha256 = hashlib.sha256(content).hexdigest()
-    if _already_uploaded(db, user_id, file_sha256):
-        raise ConflictError(DUPLICATE_FILE_MESSAGE)
+    existing = _live_upload(db, user_id, file_sha256)
+    if existing is not None and not _fail_if_stale(db, existing):
+        _raise_duplicate(existing)
 
     file_type = _supported_file_type(filename, content)
 
@@ -228,13 +247,19 @@ def create_upload(
     try:
         enqueue_statement_processing(queue, upload.id)
     except RedisError:
-        # The row and the file are committed, but no job will ever process
-        # them. Leaving the row `pending` would leave the user polling a
-        # status that never changes, and it would block the same file
-        # (only `failed` frees it). So it is failed right away, which also
-        # deletes the stored file, and the user is told to try again.
-        fail_upload(db, upload.id, QUEUE_UNAVAILABLE_MESSAGE, reason="queue_unavailable")
-        raise ServiceUnavailableError(QUEUE_UNAVAILABLE_MESSAGE) from None
+        # Most likely no job exists, and the committed row would stay
+        # `pending` forever, blocking the same file (only `failed` frees
+        # it). So it is failed right away, which also deletes the file, and
+        # the user is told to try again.
+        #
+        # But an error can also arrive AFTER Redis accepted the job: a
+        # reply that times out. A fast worker may then already have claimed
+        # or even finished the upload. `fail_upload` only fails an upload
+        # that is still `pending`, and says whether it did. If it did not,
+        # the job got through, and the upload is answered as accepted.
+        if fail_upload(db, upload.id, QUEUE_UNAVAILABLE_MESSAGE, reason="queue_unavailable"):
+            raise ServiceUnavailableError(QUEUE_UNAVAILABLE_MESSAGE) from None
+        log.warning("statement_upload_enqueue_error_after_job_ran", upload_id=str(upload.id))
 
     # IDs and the file type only: no filename (it can identify a person),
     # nothing from the file (CLAUDE.md rule 3).
@@ -274,17 +299,29 @@ def process_upload(db: Session, upload_id: uuid.UUID) -> None:
     twice: the second run waits for the first to commit, then finds the
     upload finished and does nothing.
 
+    **Lock order.** Transaction 2 first takes `FOR KEY SHARE` on the user
+    and the account rows, and only then the upload row. Inserting the
+    transactions needs those two locks anyway (their foreign keys), and
+    `DELETE /accounts/{id}` or `DELETE /me` take them in the same order:
+    the owner row first, then (by cascade) the upload. Taking the upload
+    first would make an import and such a delete wait for each other
+    (a deadlock, and a 500 for the user). Same order, no cycle: the delete
+    simply waits until the import has committed.
+
     An expected failure - an unreadable file, a statement for a different
     account, a missing or damaged blob - is recorded with `fail_upload` and
     the function returns normally, so RQ does not retry it. Anything else
     is raised for RQ to retry.
     """
-    if not _claim(db, upload_id):
+    claimed = _claim(db, upload_id)
+    if claimed is None:
         return
 
-    # Transaction 2. `populate_existing` re-reads the row even though the
-    # session already has it, so the status checked below is the one in the
-    # database now, after taking the lock - not the one from step 1.
+    # Transaction 2, locks in the fixed order: owners first (see above).
+    _lock_owners(db, claimed.user_id, claimed.account_id)
+    # `populate_existing` re-reads the row even though the session already
+    # has it, so the status checked below is the one in the database now,
+    # after taking the lock - not the one from step 1.
     upload = db.get(StatementUpload, upload_id, with_for_update=True, populate_existing=True)
     if upload is None or upload.status is not UploadStatus.PROCESSING:
         # Another run of the same job finished it (or the user deleted it)
@@ -307,14 +344,11 @@ def process_upload(db: Session, upload_id: uuid.UUID) -> None:
         content = decrypt_file(
             EncryptedFile(nonce=blob.nonce, ciphertext=blob.encrypted_content), upload_id
         )
-        _file_type, statement = parse_statement(
-            # Not the stored filename: it was cut to 255 characters, which
-            # can cut off the ".csv" that is a CSV's only sign of being one.
-            # The type was decided in the request, so a name built from it
-            # makes the reader decide the same way again.
-            f"statement.{upload.file_type.value}",
-            content,
-            column_mapping=_mapping_from_json(upload.column_mapping),
+        # By the type the request decided, not by detecting it again: the
+        # stored filename may be cut short (255 characters), and for a CSV
+        # the name is the only sign of what it is.
+        statement = parse_statement(
+            upload.file_type, content, column_mapping=_mapping_from_json(upload.column_mapping)
         )
         account = db.get_one(Account, upload.account_id)
         _check_statement_matches_account(account, statement)
@@ -355,8 +389,10 @@ def process_upload(db: Session, upload_id: uuid.UUID) -> None:
     )
 
 
-def fail_upload(db: Session, upload_id: uuid.UUID, message: str, *, reason: str) -> None:
+def fail_upload(db: Session, upload_id: uuid.UUID, message: str, *, reason: str) -> bool:
     """Mark an unfinished upload `failed`, delete its stored file, and commit.
+
+    Returns True if it did, False if the upload was already final or gone.
 
     `message` is shown to the user (`error_message`), so it must be safe to
     show: no narrations, amounts or balances. `reason` is a short fixed
@@ -373,7 +409,7 @@ def fail_upload(db: Session, upload_id: uuid.UUID, message: str, *, reason: str)
     upload = db.get(StatementUpload, upload_id, with_for_update=True, populate_existing=True)
     if upload is None or upload.status not in _UNFINISHED:
         db.rollback()
-        return
+        return False
 
     upload.status = UploadStatus.FAILED
     upload.error_message = message
@@ -385,18 +421,19 @@ def fail_upload(db: Session, upload_id: uuid.UUID, message: str, *, reason: str)
         upload_id=str(upload_id),
         reason=reason,
     )
+    return True
 
 
 # --- Step 1: bytes -> a parsed statement (no database) --------------------
 
 
 def parse_statement(
-    filename: str,
+    file_type: FileType,
     content: bytes,
     *,
     column_mapping: ColumnMapping | None = None,
-) -> tuple[FileType, ParsedStatement]:
-    """Read and parse an uploaded file, or raise `InvalidStatementError`.
+) -> ParsedStatement:
+    """Read and parse a stored file of a known type, or raise `InvalidStatementError`.
 
     Touches no database and no request, which is what lets the worker call
     it and what lets a unit test call it with two lines of bytes.
@@ -413,7 +450,7 @@ def parse_statement(
     show to a user (no narrations, no amounts - CLAUDE.md rule 3).
     """
     try:
-        data = read_statement(filename, content)
+        data = read_statement_as(file_type, content)
     except ParseError as exc:
         # The request already refused empty files, unsupported types and
         # PDFs (`_supported_file_type`), so in the worker this is a file
@@ -432,11 +469,9 @@ def parse_statement(
         parser = GenericCsvParser(column_mapping)
 
     try:
-        statement = parser.parse(data)
+        return parser.parse(data)
     except ParseError as exc:
         raise InvalidStatementError(str(exc)) from None
-
-    return data.file_type, statement
 
 
 # --- Step 2: a parsed statement -> rows in the database -------------------
@@ -519,12 +554,12 @@ def store_transactions(
 # --- Helpers --------------------------------------------------------------
 
 
-def _claim(db: Session, upload_id: uuid.UUID) -> bool:
+def _claim(db: Session, upload_id: uuid.UUID) -> StatementUpload | None:
     """Transaction 1 of `process_upload`: mark the upload `processing`.
 
-    Returns False, and changes nothing, when there is nothing to do: the
-    upload was deleted, or it is already final (`completed`, `failed`),
-    which is what makes running the job again a no-op.
+    Returns the upload, or None, changing nothing, when there is nothing to
+    do: the upload was deleted, or it is already final (`completed`,
+    `failed`), which is what makes running the job again a no-op.
 
     `processing` is accepted as well as `pending`: it means an earlier
     attempt crashed half-way (its transaction 2 rolled back), and this is
@@ -534,11 +569,24 @@ def _claim(db: Session, upload_id: uuid.UUID) -> bool:
     if upload is None or upload.status not in _UNFINISHED:
         db.rollback()
         log.info("statement_import_skipped", upload_id=str(upload_id))
-        return False
+        return None
 
     upload.status = UploadStatus.PROCESSING
     db.commit()
-    return True
+    return upload
+
+
+def _lock_owners(db: Session, user_id: uuid.UUID, account_id: uuid.UUID) -> None:
+    """Take `FOR KEY SHARE` on the upload's user and account rows.
+
+    KEY SHARE is the weakest row lock: it only stops the row from being
+    deleted (or its key changed), and it is exactly what the foreign-key
+    checks of the INSERT into `transactions` take anyway. Taking it up
+    front, before the upload row, fixes the lock order (see
+    `process_upload`). A row that is already gone simply matches nothing.
+    """
+    db.execute(select(User.id).where(User.id == user_id).with_for_update(key_share=True))
+    db.execute(select(Account.id).where(Account.id == account_id).with_for_update(key_share=True))
 
 
 def _supported_file_type(filename: str, content: bytes) -> FileType:
@@ -553,7 +601,9 @@ def _supported_file_type(filename: str, content: bytes) -> FileType:
         file_type = detect_file_type(filename, content)
     except ParseError as exc:
         raise InvalidStatementError(str(exc)) from None
-    if file_type is FileType.PDF:
+    # The readers' own list of what they can read, so this check and the
+    # worker cannot disagree (only PDF is detected but unreadable today).
+    if file_type not in READABLE_FILE_TYPES:
         raise InvalidStatementError(PDF_NOT_SUPPORTED_MESSAGE)
     return file_type
 
@@ -579,8 +629,8 @@ def _mapping_from_json(stored: dict[str, str | None] | None) -> ColumnMapping | 
     return ColumnMapping(**stored)
 
 
-def _already_uploaded(db: Session, user_id: uuid.UUID, file_sha256: str) -> bool:
-    """Has this user uploaded this exact file before? (dedupe level 1)
+def _live_upload(db: Session, user_id: uuid.UUID, file_sha256: str) -> StatementUpload | None:
+    """This user's live (not failed) upload of this exact file, if any (dedupe level 1).
 
     Scoped by user_id like every other query (rule 2): two users uploading
     the same file are two separate imports, and one user must not be able
@@ -596,12 +646,39 @@ def _already_uploaded(db: Session, user_id: uuid.UUID, file_sha256: str) -> bool
     index even in a prepared plan, where a bound parameter's value is
     unknown (see the constant in app/models/statement_upload.py).
     """
-    stmt = select(StatementUpload.id).where(
+    stmt = select(StatementUpload).where(
         StatementUpload.user_id == user_id,
         StatementUpload.file_sha256 == file_sha256,
         text(NOT_FAILED_SQL),
     )
-    return db.scalar(stmt) is not None
+    return db.scalar(stmt)
+
+
+def _fail_if_stale(db: Session, upload: StatementUpload) -> bool:
+    """Fail an upload stuck unfinished for too long; True if that freed its file.
+
+    A `pending` or `processing` upload older than `STALE_UPLOAD_AFTER` has
+    no job working on it any more (the job was lost, or its worker died
+    for good). Without this, uploading the same file again would be refused
+    until the cleanup job ran. A finished upload is never touched.
+    """
+    if upload.status not in _UNFINISHED:
+        return False
+    if upload.created_at > datetime.now(UTC) - STALE_UPLOAD_AFTER:
+        return False
+    return fail_upload(db, upload.id, STALE_UPLOAD_MESSAGE, reason="stale")
+
+
+def _raise_duplicate(existing: StatementUpload) -> NoReturn:
+    """The 409 for a file this user already has a live upload of.
+
+    The message depends on whether that upload has finished, and the id is
+    in `details` either way, so the client can go and look at it.
+    """
+    details = {"upload_id": str(existing.id)}
+    if existing.status in _UNFINISHED:
+        raise ConflictError(FILE_BEING_IMPORTED_MESSAGE, details=details)
+    raise ConflictError(DUPLICATE_FILE_MESSAGE, details=details)
 
 
 def _check_statement_matches_account(account: Account, statement: ParsedStatement) -> None:

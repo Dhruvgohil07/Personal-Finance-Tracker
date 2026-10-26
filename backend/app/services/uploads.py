@@ -20,6 +20,20 @@ UPLOAD_NOT_FOUND_MESSAGE = "Upload not found."
 UPLOAD_PROCESSING_MESSAGE = (
     "This statement is being imported right now. Try again once it has finished."
 )
+OVERLAPPED_BY_LATER_UPLOAD_MESSAGE = (
+    "A later statement for this account overlaps this one and relies on its "
+    "transactions. Delete that later upload first, then this one."
+)
+
+# Statuses of a later upload that may have skipped this upload's rows as
+# duplicates: it finished (with or without balance problems), or it is
+# being imported right now. A `pending` one has not looked at any row yet,
+# and a `failed` one stored nothing.
+_RELIES_ON_EARLIER_ROWS = (
+    UploadStatus.COMPLETED,
+    UploadStatus.NEEDS_REVIEW,
+    UploadStatus.PROCESSING,
+)
 
 
 def list_uploads(db: Session, user_id: uuid.UUID) -> list[StatementUpload]:
@@ -66,21 +80,71 @@ def delete_upload(db: Session, user_id: uuid.UUID, upload_id: uuid.UUID) -> None
     as a duplicate belongs to the earlier upload that inserted it, and
     stays.
 
-    Refused with 409 while the worker is `processing` the upload. The row
-    is locked first (`FOR UPDATE`), which waits for a running import to
-    commit, so the status read here is final, not a moment-old copy. A
-    `pending` upload can be deleted: its job will find nothing and stop.
+    Refused with 409 in two cases:
+
+    - **The upload is being imported.** The worker holds the row's lock for
+      the whole import, so the lock is taken with `SKIP LOCKED`: a locked
+      row is simply not returned, instead of this request waiting for the
+      import to finish (and then deleting it). A row that exists but did
+      not come back is therefore busy - 409 at once. A `processing` row
+      that nobody holds (a crashed attempt waiting for its retry) is
+      refused too. A `pending` upload can be deleted: its job will find
+      nothing and stop.
+    - **A later upload relies on this one's rows** (`_overlapped_by_later`).
+      Deleting the earlier one would silently cut a hole in the later
+      statement's period, and that file could not be uploaded again.
     """
-    upload = db.scalar(_owned(user_id, upload_id).with_for_update())
+    upload = db.scalar(_owned(user_id, upload_id).with_for_update(skip_locked=True))
     if upload is None:
+        # Not returned: either it is not the user's (404), or it is locked
+        # by a running import (409). The plain read does not wait for locks.
+        if db.scalar(_owned(user_id, upload_id)) is not None:
+            db.rollback()
+            raise ConflictError(UPLOAD_PROCESSING_MESSAGE)
         raise NotFoundError(UPLOAD_NOT_FOUND_MESSAGE)
     if upload.status is UploadStatus.PROCESSING:
         db.rollback()
         raise ConflictError(UPLOAD_PROCESSING_MESSAGE)
+    if _overlapped_by_later(db, upload):
+        db.rollback()
+        raise ConflictError(OVERLAPPED_BY_LATER_UPLOAD_MESSAGE)
 
     db.delete(upload)
     db.commit()
     log.info("upload_deleted", user_id=str(user_id), upload_id=str(upload_id))
+
+
+def _overlapped_by_later(db: Session, upload: StatementUpload) -> bool:
+    """Does a LATER upload of the same account cover part of this one's period?
+
+    Dedupe skips a row that is already stored (SPEC §6.3), and the skipped
+    row stays attached to the upload that inserted it. So when a later
+    statement overlaps this one, its rows in the overlap were most likely
+    skipped as duplicates of THIS upload's - and deleting this upload would
+    delete them, even though the later statement contains them too.
+
+    The test is deliberately simple and errs on the side of refusing: same
+    account, created later, periods overlap, and the later upload reported
+    duplicates. It cannot tell which earlier upload those duplicates
+    matched; nothing records that per row. Refusing costs the user one
+    extra step (delete the later one first); allowing it would lose data
+    without a word.
+
+    An upload that inserted nothing has nothing to protect.
+    """
+    if upload.rows_inserted == 0 or upload.period_start is None or upload.period_end is None:
+        return False
+    stmt = select(StatementUpload.id).where(
+        StatementUpload.user_id == upload.user_id,
+        StatementUpload.account_id == upload.account_id,
+        StatementUpload.id != upload.id,
+        StatementUpload.created_at > upload.created_at,
+        StatementUpload.status.in_(_RELIES_ON_EARLIER_ROWS),
+        StatementUpload.rows_duplicate > 0,
+        StatementUpload.period_start <= upload.period_end,
+        StatementUpload.period_end >= upload.period_start,
+    )
+    return db.scalar(stmt.limit(1)) is not None
 
 
 def _owned(user_id: uuid.UUID, upload_id: uuid.UUID) -> Select[tuple[StatementUpload]]:

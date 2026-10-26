@@ -25,14 +25,15 @@ import uuid
 from http import HTTPStatus
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 
 from app.api.deps import CurrentUser, DbSession, JobQueue
 from app.core.config import get_settings
 from app.core.errors import ErrorResponse, PayloadTooLargeError
-from app.core.rate_limit import UPLOAD_LIMIT, limiter
+from app.core.rate_limit import UPLOAD_LIMIT, UPLOAD_POLL_LIMIT, limiter
+from app.models import UploadStatus
 from app.parsers.generic_csv import ColumnMapping
 from app.schemas.upload import ColumnMappingRequest, UploadResponse, column_mapping_json_example
 from app.services import imports as imports_service
@@ -55,6 +56,12 @@ _CREATE_RESPONSES = {
 # How much is read from the upload at a time while checking the size limit.
 _READ_CHUNK_BYTES = 64 * 1024
 
+# How long a client should wait before polling an unfinished upload again,
+# sent as the standard `Retry-After` header. A statement imports in a second
+# or two, so this keeps a polling client well inside UPLOAD_POLL_LIMIT.
+UPLOAD_POLL_INTERVAL_SECONDS = 2
+_UNFINISHED = (UploadStatus.PENDING, UploadStatus.PROCESSING)
+
 
 @router.post(
     "",
@@ -70,6 +77,7 @@ _READ_CHUNK_BYTES = 64 * 1024
 @limiter.limit(UPLOAD_LIMIT)
 def create_upload(
     request: Request,
+    response: Response,
     user: CurrentUser,
     db: DbSession,
     queue: JobQueue,
@@ -89,7 +97,8 @@ def create_upload(
     """Store a statement and queue it for import into one of your accounts.
 
     Answers **202** with the upload `pending`; poll `GET /uploads/{id}` for
-    the result. Answers 400 if the file is not a type we can read, 404 if
+    the result, waiting the seconds given in the `Retry-After` header.
+    Answers 400 if the file is not a type we can read, 404 if
     the account is not yours, 409 if you have uploaded this exact file
     before, 413 if it is over the size limit, and 503 if the import queue
     is unavailable. A file that turns out to be unreadable once parsed is
@@ -107,6 +116,7 @@ def create_upload(
         queue=queue,
         column_mapping=_column_mapping_from_json(column_mapping),
     )
+    _ask_to_poll_later(response, upload.status)
     return UploadResponse.model_validate(upload)
 
 
@@ -120,9 +130,18 @@ def list_uploads(user: CurrentUser, db: DbSession) -> list[UploadResponse]:
 @router.get(
     "/{upload_id}", response_model=UploadResponse, responses=_NOT_FOUND, summary="Get one upload"
 )
-def get_upload(user: CurrentUser, db: DbSession, upload_id: uuid.UUID) -> UploadResponse:
-    """One upload. Poll this after POST /uploads until `status` is final."""
+# Its own limit, outside the shared general one (see UPLOAD_POLL_LIMIT).
+@limiter.limit(UPLOAD_POLL_LIMIT)
+def get_upload(
+    request: Request, response: Response, user: CurrentUser, db: DbSession, upload_id: uuid.UUID
+) -> UploadResponse:
+    """One upload. Poll this after POST /uploads until `status` is final.
+
+    While the upload is unfinished, the `Retry-After` header says how many
+    seconds to wait before asking again.
+    """
     upload = uploads_service.get_upload(db, user.id, upload_id)
+    _ask_to_poll_later(response, upload.status)
     return UploadResponse.model_validate(upload)
 
 
@@ -139,6 +158,17 @@ def delete_upload(user: CurrentUser, db: DbSession, upload_id: uuid.UUID) -> Non
     Answers 409 while the upload is being processed.
     """
     uploads_service.delete_upload(db, user.id, upload_id)
+
+
+def _ask_to_poll_later(response: Response, status: UploadStatus) -> None:
+    """Add `Retry-After` while the upload is unfinished: when to poll again.
+
+    `Retry-After` is the standard HTTP header for "come back in N seconds"
+    (RFC 9110). Sent only while there is something to wait for; a final
+    upload has no reason to be polled again.
+    """
+    if status in _UNFINISHED:
+        response.headers["Retry-After"] = str(UPLOAD_POLL_INTERVAL_SECONDS)
 
 
 def _read_within_limit(file: UploadFile) -> bytes:
