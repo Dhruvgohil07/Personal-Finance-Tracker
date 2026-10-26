@@ -145,9 +145,9 @@ def many_rows(count: int) -> tuple[tuple[str, ...], ...]:
       transaction with its own fingerprint. Identical rows would survive
       too (that is what the occurrence index is for), but then a failure
       could mean either bug, and this test is about chunking.
-    - **ascending dates** (four rows per day), because a newest-first
-      statement makes the ICICI parser refuse to derive balances
-      (`_statement_balances`), which would be a second thing going on.
+    - **ascending dates** (four rows per day), so the statement is read
+      in file order and its balances chain: nothing but the chunking is
+      going on.
     - **money as `Decimal`**, formatted to two decimal places. Project
       rule 1 holds in test fixtures too: a float here could produce a cell
       like "1.0000000000000002" and the import would rightly refuse it.
@@ -1372,4 +1372,28 @@ def test_one_days_transactions_are_listed_in_statement_order(
         "UPI/THIRD/PAY",
         "UPI/SECOND/PAY",
         "UPI/FIRST/PAY",
+    ]
+
+
+def test_a_one_day_newest_first_statement_is_completed(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path, db: Session
+) -> None:
+    """Found in the Step 4 review. The parser used to derive an opening
+    balance from the FIRST row of the file, which for a newest-first export
+    of a single day is the day's LAST transaction - so a correct statement
+    came out `needs_review`. Now nothing is derived, the day is ordered by
+    its balance chain, and it adds up."""
+    newest_first = tuple(reversed(SAME_DAY_ROWS))
+
+    upload = import_file(
+        client, alice, content=statement_bytes(tmp_path, rows=newest_first), account_id=account_id
+    )
+
+    assert upload["status"] == "completed"
+    assert upload["reconciliation_issues"] == []
+    rows = db.scalars(select(Transaction).order_by(Transaction.statement_seq)).all()
+    assert [row.raw_description for row in rows] == [
+        "UPI/FIRST/PAY",
+        "UPI/SECOND/PAY",
+        "UPI/THIRD/PAY",
     ]

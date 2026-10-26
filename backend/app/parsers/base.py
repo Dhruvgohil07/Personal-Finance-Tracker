@@ -220,6 +220,16 @@ class RawRow:
             if isinstance(value, datetime) or not isinstance(value, date):
                 raise ParseError(f"{field_name} must be a date", row_number=self.row_number)
 
+    @property
+    def signed_paise(self) -> int:
+        """The row's effect on the balance: negative for a debit, positive for a credit.
+
+        `amount_paise` is always positive and `direction` carries the sign
+        (ADR 001); this puts the two back together for arithmetic on
+        balances, in one place.
+        """
+        return -self.amount_paise if self.direction is Direction.DEBIT else self.amount_paise
+
 
 @dataclass(frozen=True)
 class NormalizedRow:
@@ -245,10 +255,15 @@ class NormalizedRow:
 class ParsedStatement:
     """Everything one parser got out of one file.
 
-    The period and the balances come from the statement's own header or
-    summary when it has one (ICICI's `.xls` does, a bare CSV does not).
-    Step 7 writes them into `statement_uploads.period_start/period_end`,
-    and balance reconciliation (SPEC §6.4, Phase 2) checks against them.
+    The period comes from the statement's own header when it prints one
+    (ICICI's `.xls` does, a bare CSV does not); Step 7 writes it into
+    `statement_uploads.period_start/period_end`.
+
+    `opening_balance_paise` / `closing_balance_paise` are set ONLY when the
+    statement PRINTS them (a summary block, say). A parser must not derive
+    them from the rows: it would have to assume the rows' order, and the
+    order is decided later, by `to_chronological` (app/parsers/reconcile.py).
+    Balance reconciliation (SPEC §6.4) checks against them when they exist.
 
     `account_last4` is the last four digits of the account number when the
     statement prints one in its header (ICICI does). Step 7 compares it with

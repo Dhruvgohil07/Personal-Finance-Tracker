@@ -110,13 +110,52 @@ def test_no_balance_column_means_nothing_was_checked() -> None:
     assert reconcile([]) is None
 
 
-def test_a_row_without_a_balance_in_a_statement_with_balances() -> None:
-    """Reported, and the row after it is not checked (nothing to check
-    it against) rather than reported as a second, made-up mismatch."""
+def test_a_row_without_a_balance_is_not_an_error() -> None:
+    """Many statements leave some balance cells blank. The amount is carried
+    forward, and the next printed balance is checked against both rows."""
     rows = list(THREE_DAYS)
     rows[1] = with_balance(rows[1], None)
 
-    assert reconcile(rows) == [Issue(IssueKind.MISSING_BALANCE, 11)]
+    assert reconcile(rows) == []
+
+
+def test_a_statement_that_prints_the_balance_once_a_day_adds_up() -> None:
+    """Only each day's last row has a balance: no false alarms."""
+    rows = make_rows(
+        (1, DEBIT, 100), (1, DEBIT, 200), (1, CREDIT, 5_000), (2, DEBIT, 300), (2, DEBIT, 400)
+    )
+    once_a_day = [
+        row if index in (2, 4) else with_balance(row, None) for index, row in enumerate(rows)
+    ]
+
+    assert reconcile(once_a_day) == []
+
+
+def test_a_misread_amount_inside_a_gap_is_caught_at_the_next_balance() -> None:
+    """The amount between two printed balances is still checked: the issue
+    is reported on the next row that HAS a balance."""
+    rows = list(THREE_DAYS)
+    misread = rows[1]
+    rows[1] = RawRow(
+        row_number=misread.row_number,
+        txn_date=misread.txn_date,
+        amount_paise=5_000,  # the statement says 50_000
+        direction=misread.direction,
+        raw_description=misread.raw_description,
+        balance_after_paise=None,
+    )
+
+    assert reconcile(rows) == [Issue(IssueKind.BALANCE_MISMATCH, 12)]
+
+
+def test_without_any_printed_balance_before_it_a_row_cannot_be_checked() -> None:
+    """The first balance in the file has nothing before it to be compared
+    with (no opening balance printed), so only the rows after it are checked."""
+    rows = list(THREE_DAYS)
+    rows[0] = with_balance(rows[0], None)
+    rows[1] = with_balance(rows[1], 1)  # wrong, but nothing to check it against
+
+    assert reconcile(rows) == [Issue(IssueKind.BALANCE_MISMATCH, 12)]
 
 
 def test_the_first_row_is_checked_against_the_opening_balance() -> None:
@@ -182,6 +221,30 @@ def test_a_single_day_statement_is_ordered_by_its_balances() -> None:
 
     assert to_chronological(one_day) == one_day
     assert to_chronological(one_day[::-1]) == one_day
+
+
+def test_days_in_order_but_each_day_newest_first_is_put_right() -> None:
+    """Some exports list the days oldest-first but each day's own
+    transactions newest-first. Every day is ordered by its balance chain,
+    including the link from the previous day's last row."""
+    rows = make_rows(
+        (1, DEBIT, 100), (1, DEBIT, 200), (2, CREDIT, 5_000), (2, DEBIT, 300), (2, DEBIT, 400)
+    )
+    each_day_reversed = [rows[1], rows[0], rows[4], rows[3], rows[2]]
+
+    ordered = to_chronological(each_day_reversed)
+
+    assert ordered == rows
+    assert reconcile(ordered) == []
+
+
+def test_a_one_day_newest_first_statement_reconciles() -> None:
+    """The case the parser used to get backwards: one day, newest first.
+    No opening or closing is derived any more, so after reordering the rows
+    simply add up."""
+    one_day = make_rows((5, DEBIT, 100), (5, CREDIT, 2_500), (5, DEBIT, 300))
+
+    assert reconcile(to_chronological(one_day[::-1])) == []
 
 
 def test_a_single_day_statement_without_balances_keeps_the_file_order() -> None:

@@ -32,8 +32,11 @@ Facts that shaped the code below, all verified on the real file:
 - **The balance column is internally consistent**: for all 174 steps in the
   sample, `previous balance - withdrawal + deposit == balance`. Phase 2's
   reconciliation (SPEC §6.4) can rely on it.
-- **No opening or closing balance is printed anywhere**, so both are
-  derived from the rows (see `_statement_balances`).
+- **No opening or closing balance is printed anywhere**, so none is
+  reported. (An earlier version derived both from the first and last row,
+  which assumed oldest-first rows and got a newest-first one-day export
+  backwards. The rows' balances are checked link by link anyway - see
+  app/parsers/reconcile.py.)
 """
 
 import re
@@ -126,14 +129,11 @@ class IciciXlsParser:
 
         rows = self._parse_rows(data.rows, header_index, columns)
         period_start, period_end = _find_period(data.rows[:header_index])
-        opening, closing = _statement_balances(rows)
 
         return ParsedStatement(
             rows=rows,
             period_start=period_start,
             period_end=period_end,
-            opening_balance_paise=opening,
-            closing_balance_paise=closing,
             account_last4=_find_account_last4(data.rows[:header_index]),
         )
 
@@ -429,43 +429,6 @@ def _find_account_last4(header_rows: list[list[str]]) -> str | None:
                 tail = _ACCOUNT_TAIL_DIGITS.search(token.group())
                 return tail.group()[-4:] if tail is not None else None
     return None
-
-
-def _statement_balances(rows: list[RawRow]) -> tuple[int | None, int | None]:
-    """Derive the opening and closing balance from the rows.
-
-    ICICI prints neither, but both follow from the per-row balance column,
-    which the sample proves is internally consistent:
-
-        closing = the balance after the LAST row          (a stated fact)
-        opening = the balance after the FIRST row, with
-                  that row's own effect undone            (one subtraction)
-
-    A debit of ₹70 that left ₹1,114.71 behind means the account held
-    ₹1,184.71 before it. Returns `(None, None)` when the statement has no
-    balance column, so nothing is invented.
-
-    This is the one place Phase 2's balance reconciliation (SPEC §6.4) can
-    check its arithmetic against, which is why it is worth deriving at all.
-    """
-    if not rows:
-        return None, None
-
-    first, last = rows[0], rows[-1]
-    if first.balance_after_paise is None or last.balance_after_paise is None:
-        return None, None
-
-    # Both derivations assume the rows are in chronological order, which the
-    # sample is - but ICICI's net banking can sort the list, and a newest-first
-    # export would make "the balance before the first row" the balance before
-    # the LATEST transaction. That is not an opening balance, and because
-    # neither value would look obviously wrong, Phase 2's reconciliation would
-    # end up checking against invented numbers. Refuse instead of inventing.
-    if first.txn_date > last.txn_date:
-        return None, None
-
-    signed_first = -first.amount_paise if first.direction is Direction.DEBIT else first.amount_paise
-    return first.balance_after_paise - signed_first, last.balance_after_paise
 
 
 def _cell(row: list[str], columns: dict[str, int], label: str) -> str:
