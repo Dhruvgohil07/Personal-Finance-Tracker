@@ -1,9 +1,10 @@
-# Local development infrastructure: Postgres + Redis.
+# Local development infrastructure: Postgres + Redis + the RQ worker.
 # Start:  docker compose up -d        Stop: docker compose down
 # Reset all data (deletes volumes!): docker compose down -v
+# After changing backend code, rebuild the worker:  docker compose up -d --build worker
 #
-# The RQ worker will be added here as a service in Phase 2 (RQ needs fork(),
-# which Windows doesn't have, so the worker always runs inside Linux/Docker).
+# The API runs outside Docker (`uv run uvicorn ...`). The worker runs inside
+# it because RQ needs fork(), which Windows doesn't have.
 
 name: kharcha
 
@@ -39,6 +40,26 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  worker:
+    build: ./backend
+    # Secrets (JWT, FILE_ENCRYPTION_KEY) come from the same .env as the API.
+    # The worker MUST use the API's FILE_ENCRYPTION_KEY, or it cannot
+    # decrypt the files the API stored.
+    env_file: .env
+    environment:
+      # Inside Docker, the other services are reached by their service
+      # name, not 127.0.0.1 (which would be the worker's own container).
+      # These override the values from .env.
+      DATABASE_URL: postgresql+psycopg://kharcha:kharcha@postgres:5432/kharcha
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Start again after a crash, or after Docker Desktop restarts.
+    restart: unless-stopped
 
 volumes:
   postgres_data:

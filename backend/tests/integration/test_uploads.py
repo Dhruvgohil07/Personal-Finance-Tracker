@@ -4,8 +4,15 @@ The statements here are built by `tests/fixtures/icici_xls.py`, which writes
 a genuine (synthetic) ICICI workbook, so these tests cover the whole path an
 upload really takes:
 
-    multipart request -> reader -> parser -> normalize -> fingerprint
-                      -> INSERT ... ON CONFLICT DO NOTHING
+    multipart request -> encrypted blob + `pending` row -> RQ job
+        -> decrypt -> reader -> parser -> normalize -> fingerprint
+        -> INSERT ... ON CONFLICT DO NOTHING -> `completed`
+
+The job runs on the `sync_queue` (tests/integration/conftest.py), so by the
+time POST answers 202 it has already finished, and `GET /uploads/{id}`
+shows the final result. That is why most tests here are "POST, then GET".
+The worker's own edge cases (retries, a missing file, running a job twice)
+are in test_upload_worker.py, and GET/DELETE in test_upload_endpoints.py.
 
 The tests that matter most, and the rules they defend:
 
@@ -28,13 +35,14 @@ import pytest
 import structlog
 from fastapi.testclient import TestClient
 from httpx import Response
+from rq import Queue
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.errors import PayloadTooLargeError
-from app.models import Account, StatementUpload, Transaction, UploadStatus
+from app.models import Account, StatementUpload, Transaction, UploadBlob, UploadStatus
 from app.parsers.base import Direction, FileType
 from app.services import imports as imports_service
 from tests.fixtures.icici_xls import build_icici_xls
@@ -193,6 +201,40 @@ def post_upload(
     )
 
 
+def get_upload(client: TestClient, headers: dict[str, str], upload_id: str) -> dict[str, Any]:
+    """GET /uploads/{id}: what a client polling for the result sees."""
+    response = client.get(f"{UPLOADS}/{upload_id}", headers=headers)
+    assert response.status_code == 200
+    body: dict[str, Any] = response.json()
+    return body
+
+
+def import_file(
+    client: TestClient,
+    headers: dict[str, str],
+    *,
+    content: bytes,
+    account_id: str,
+    filename: str = "statement.xls",
+    column_mapping: str | None = None,
+) -> dict[str, Any]:
+    """Upload a file and return the upload as it is once the job has run.
+
+    POST must accept it (202). The job has then already run on the
+    synchronous test queue, so one GET gives the final state.
+    """
+    response = post_upload(
+        client,
+        headers,
+        content=content,
+        account_id=account_id,
+        filename=filename,
+        column_mapping=column_mapping,
+    )
+    assert response.status_code == 202
+    return get_upload(client, headers, response.json()["id"])
+
+
 def transactions_of(db: Session, upload_id: str) -> list[Transaction]:
     """One upload's transactions, oldest first (id breaks same-date ties)."""
     stmt = (
@@ -207,18 +249,33 @@ def count_transactions(db: Session) -> int:
     return db.scalar(select(func.count()).select_from(Transaction)) or 0
 
 
+def count_blobs(db: Session) -> int:
+    return db.scalar(select(func.count()).select_from(UploadBlob)) or 0
+
+
 # --- The happy path ---------------------------------------------------------
 
 
-def test_upload_imports_the_whole_statement(
+def test_an_upload_is_accepted_and_then_imported(
     client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path
 ) -> None:
-    """The default fixture has six body rows, one of which only continues a
-    narration, so five transactions come out of it."""
+    """202 with a `pending` upload, then the finished import on GET.
+
+    The default fixture has six body rows, one of which only continues a
+    narration, so five transactions come out of it.
+    """
     response = post_upload(client, alice, content=statement_bytes(tmp_path), account_id=account_id)
 
-    assert response.status_code == 201
-    body = response.json()
+    # Accepted, not done: the response describes the upload as it was when
+    # the request handed it to the queue (ADR 013).
+    assert response.status_code == 202
+    accepted = response.json()
+    assert accepted["status"] == "pending"
+    assert (accepted["rows_parsed"], accepted["rows_inserted"]) == (0, 0)
+    assert accepted["completed_at"] is None
+    assert accepted["file_type"] == "xls"
+
+    body = get_upload(client, alice, accepted["id"])
     assert body["status"] == "completed"
     assert body["file_type"] == "xls"
     assert body["account_id"] == account_id
@@ -290,6 +347,10 @@ def test_the_upload_row_is_recorded(
     assert upload is not None
     assert upload.status.value == "completed"
     assert upload.rows_inserted == 5
+    # The encrypted file is deleted once its rows are stored (SPEC §7.3),
+    # and no column mapping was sent with this file.
+    assert db.get(UploadBlob, upload.id) is None
+    assert upload.column_mapping is None
     # sha256 of the bytes, lowercase hex - the dedupe key, never returned
     # to the client.
     assert len(upload.file_sha256) == 64
@@ -317,8 +378,33 @@ def test_a_filename_with_a_path_is_stored_as_a_plain_name(
         filename="C:\\Users\\me\\statement.xls",
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 202
     assert response.json()["original_filename"] == "statement.xls"
+
+
+def test_a_csv_whose_name_is_cut_short_still_imports(
+    client: TestClient, alice: dict[str, str], account_id: str
+) -> None:
+    """The stored filename is cut to 255 characters, which can cut off the
+    ".csv" - and for a CSV the name is the only sign of what it is.
+
+    The worker must therefore not judge the file by its STORED name. It
+    uses the type the request already decided (`file_type`), so this file
+    imports instead of failing as "unsupported file type".
+    """
+    upload = import_file(
+        client,
+        alice,
+        content=GENERIC_CSV,
+        account_id=account_id,
+        filename="a" * 300 + ".csv",
+        column_mapping=CSV_MAPPING,
+    )
+
+    assert len(upload["original_filename"]) == 255
+    assert not upload["original_filename"].endswith(".csv")
+    assert upload["status"] == "completed"
+    assert upload["rows_inserted"] == 2
 
 
 # --- Idempotency (SPEC §6.3, CLAUDE.md rule 5) ------------------------------
@@ -329,7 +415,7 @@ def test_reuploading_the_same_file_is_rejected(
 ) -> None:
     """Dedupe level 1: the same bytes, rejected by the file-hash index (ADR 011)."""
     content = statement_bytes(tmp_path)
-    assert post_upload(client, alice, content=content, account_id=account_id).status_code == 201
+    assert post_upload(client, alice, content=content, account_id=account_id).status_code == 202
 
     again = post_upload(client, alice, content=content, account_id=account_id)
 
@@ -345,10 +431,11 @@ def test_a_failed_upload_does_not_block_the_same_file(
 ) -> None:
     """ADR 011: a `failed` row is not "already uploaded".
 
-    Phase 1 never writes a failed row, so it is inserted directly here, the
-    way the Phase 2 worker will leave one behind. The same file must then
-    import normally - otherwise a user whose file hit a parser bug could
-    never retry it after the fix.
+    The failed row is inserted directly, standing in for an earlier attempt
+    that hit a parser bug. The same file must then import normally -
+    otherwise the user could never retry it after the fix.
+    (`test_a_file_that_failed_can_be_uploaded_again` does the same through
+    a real failed import.)
     """
     content = statement_bytes(tmp_path)
     account = db.scalars(select(Account).where(Account.id == uuid.UUID(account_id))).one()
@@ -365,10 +452,9 @@ def test_a_failed_upload_does_not_block_the_same_file(
     )
     db.commit()
 
-    response = post_upload(client, alice, content=content, account_id=account_id)
+    upload = import_file(client, alice, content=content, account_id=account_id)
 
-    assert response.status_code == 201
-    assert response.json()["rows_inserted"] == 5
+    assert upload["rows_inserted"] == 5
     # The failed attempt is kept alongside the successful one.
     statuses = db.scalars(select(StatementUpload.status)).all()
     assert sorted(statuses) == [UploadStatus.COMPLETED, UploadStatus.FAILED]
@@ -384,7 +470,7 @@ def test_an_overlapping_statement_inserts_only_new_rows(
     """
     post_upload(client, alice, content=statement_bytes(tmp_path), account_id=account_id)
 
-    second = post_upload(
+    body = import_file(
         client,
         alice,
         content=statement_bytes(
@@ -398,8 +484,6 @@ def test_an_overlapping_statement_inserts_only_new_rows(
         filename="second.xls",
     )
 
-    assert second.status_code == 201
-    body = second.json()
     assert (body["rows_parsed"], body["rows_inserted"], body["rows_duplicate"]) == (3, 1, 2)
     assert count_transactions(db) == 6
     # The new row is attached to the SECOND upload, and the shared rows
@@ -416,14 +500,14 @@ def test_two_identical_rows_on_one_day_are_both_kept(
     `occurrence_index` separates them. Losing one would lose real money
     from the user's totals.
     """
-    response = post_upload(
+    upload = import_file(
         client,
         alice,
         content=statement_bytes(tmp_path, rows=IDENTICAL_ROWS),
         account_id=account_id,
     )
 
-    assert response.json()["rows_inserted"] == 2
+    assert upload["rows_inserted"] == 2
     assert count_transactions(db) == 2
 
 
@@ -445,7 +529,7 @@ def test_the_occurrence_index_is_stable_across_imports(
 
     # Same two transactions, but a file with a different period (so a
     # different sha256, which means dedupe level 1 does not fire).
-    again = post_upload(
+    again = import_file(
         client,
         alice,
         content=statement_bytes(
@@ -459,7 +543,7 @@ def test_the_occurrence_index_is_stable_across_imports(
         filename="again.xls",
     )
 
-    assert (again.json()["rows_inserted"], again.json()["rows_duplicate"]) == (0, 2)
+    assert (again["rows_inserted"], again["rows_duplicate"]) == (0, 2)
     assert count_transactions(db) == 2
 
 
@@ -507,8 +591,8 @@ def test_two_users_can_upload_the_same_file(
     content = statement_bytes(tmp_path)
     bobs_account = make_account(client, bob)
 
-    assert post_upload(client, alice, content=content, account_id=account_id).status_code == 201
-    assert post_upload(client, bob, content=content, account_id=bobs_account).status_code == 201
+    assert post_upload(client, alice, content=content, account_id=account_id).status_code == 202
+    assert post_upload(client, bob, content=content, account_id=bobs_account).status_code == 202
 
     assert count_transactions(db) == 10
     per_user = db.execute(
@@ -545,9 +629,9 @@ def test_deleting_the_account_deletes_its_transactions(
 def test_a_pdf_is_rejected(
     client: TestClient, alice: dict[str, str], account_id: str, db: Session
 ) -> None:
-    """PDF parsing is Phase 2. The message says so, and - importantly - no
-    upload row is written, so the same file can be imported once we support
-    it (see app/services/imports.py)."""
+    """PDF parsing is Phase 2 Step 9. The file's signature says it is a
+    PDF, so it is refused in the request - no row, no stored file, no job -
+    and the same file can be uploaded once PDFs are supported."""
     response = post_upload(
         client,
         alice,
@@ -558,8 +642,9 @@ def test_a_pdf_is_rejected(
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_STATEMENT"
-    assert "PDF" in response.json()["error"]["message"]
+    assert response.json()["error"]["message"] == imports_service.PDF_NOT_SUPPORTED_MESSAGE
     assert db.scalar(select(func.count()).select_from(StatementUpload)) == 0
+    assert count_blobs(db) == 0
 
 
 def test_an_empty_file_is_rejected(
@@ -581,23 +666,27 @@ def test_an_unsupported_file_type_is_rejected(
     assert response.status_code == 400
 
 
-def test_a_statement_for_a_different_account_number_is_rejected(
+def test_a_statement_for_a_different_account_number_fails(
     client: TestClient, alice: dict[str, str], tmp_path: Path, db: Session
 ) -> None:
     """The statement's own last 4 digits beat the dropdown: picking the
-    wrong account would merge another account's rows into this one."""
+    wrong account would merge another account's rows into this one.
+
+    The digits are inside the file, so only the worker can see them: the
+    upload is accepted, then fails with the reason in `error_message`.
+    """
     other_account = make_account(client, alice, masked_number="9999")
 
-    response = post_upload(
-        client, alice, content=statement_bytes(tmp_path), account_id=other_account
-    )
+    upload = import_file(client, alice, content=statement_bytes(tmp_path), account_id=other_account)
 
-    assert response.status_code == 400
-    message = response.json()["error"]["message"]
-    assert "different account number" in message
+    assert upload["status"] == "failed"
+    message = upload["error_message"]
+    assert message == imports_service.WRONG_ACCOUNT_NUMBER_MESSAGE
     # The message must not repeat the digits it read out of the file.
     assert STATEMENT_LAST4 not in message
     assert count_transactions(db) == 0
+    # A failed import deletes its stored file too.
+    assert count_blobs(db) == 0
 
 
 def test_a_file_over_the_size_limit_is_rejected(
@@ -620,42 +709,91 @@ def test_a_file_over_the_size_limit_is_rejected(
 
 
 def test_the_service_enforces_the_size_limit_too(
-    db: Session, account_id: str, monkeypatch: pytest.MonkeyPatch
+    db: Session, account_id: str, sync_queue: Queue, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The route stops reading at the limit, and the service checks again.
 
     Two checks for one rule, because they protect different callers: the
-    route protects the API, and the service is what the Phase 2 worker will
-    call with bytes that never came through a request.
+    route protects the API, and the service is the backstop for any other
+    code that hands it bytes.
     """
     monkeypatch.setattr(get_settings(), "max_upload_mb", 1)
 
     with pytest.raises(PayloadTooLargeError):
-        imports_service.import_statement(
+        imports_service.create_upload(
             db,
             uuid.uuid4(),
             account_id=uuid.UUID(account_id),
             filename="statement.xls",
             content=b"x" * (2 * 1024 * 1024),
+            queue=sync_queue,
         )
 
 
-def test_a_statement_that_cannot_be_parsed_is_rejected(
+def test_a_statement_that_cannot_be_parsed_fails(
     client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path, db: Session
 ) -> None:
-    """A file the ICICI parser recognises but cannot read: the error names
-    the row, and still no upload row is written (ADR 008)."""
+    """A file the ICICI parser recognises but cannot read.
+
+    The upload is kept as `failed` (ADR 011), with the parser's message:
+    it names the row and never the cell's value. Nothing is imported and
+    the stored file is deleted.
+    """
     broken = (("1", "01/08/2026", "01/08/2026", "", "UPI/SHOP/PAY", "seventy", "", "111471.33"),)
 
-    response = post_upload(
+    upload = import_file(
         client, alice, content=statement_bytes(tmp_path, rows=broken), account_id=account_id
     )
 
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "INVALID_STATEMENT"
-    # ParseError messages carry the row number and never the cell's value.
-    assert "row " in response.json()["error"]["message"]
-    assert db.scalar(select(func.count()).select_from(StatementUpload)) == 0
+    assert upload["status"] == "failed"
+    assert "row " in upload["error_message"]
+    assert "seventy" not in upload["error_message"]
+    assert upload["completed_at"] is None
+    assert count_transactions(db) == 0
+    assert count_blobs(db) == 0
+
+
+def test_a_damaged_workbook_fails(
+    client: TestClient, alice: dict[str, str], account_id: str, db: Session
+) -> None:
+    """The first bytes say "Excel workbook", the rest is garbage.
+
+    The request only looks at the signature, so it accepts the file; the
+    worker is where it turns out to be unreadable. That must be an ordinary
+    `failed` upload with the reader's message, not a crash and a retry.
+    """
+    ole2_signature = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+    upload = import_file(
+        client, alice, content=ole2_signature + b"not really a workbook", account_id=account_id
+    )
+
+    assert upload["file_type"] == "xls"
+    assert upload["status"] == "failed"
+    assert upload["error_message"] == "file is not a readable .xls workbook"
+    assert count_blobs(db) == 0
+
+
+def test_a_file_that_failed_can_be_uploaded_again(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path
+) -> None:
+    """ADR 011 through the real flow: a failed import frees its file.
+
+    The same bytes are sent twice. In real life a parser fix between the
+    two attempts is what would make the second one succeed; here it is
+    enough that the second is ACCEPTED (202, not 409) as a new upload.
+    """
+    broken = statement_bytes(
+        tmp_path,
+        rows=(("1", "01/08/2026", "01/08/2026", "", "UPI/SHOP/PAY", "seventy", "", "1.00"),),
+    )
+    first = import_file(client, alice, content=broken, account_id=account_id)
+    assert first["status"] == "failed"
+
+    second = post_upload(client, alice, content=broken, account_id=account_id)
+
+    assert second.status_code == 202
+    assert second.json()["id"] != first["id"]
 
 
 def test_an_amount_too_large_to_store_is_rejected(
@@ -668,7 +806,8 @@ def test_an_amount_too_large_to_store_is_rejected(
     `app/parsers/base.py` this reached the INSERT, Postgres answered
     "numeric field overflow", and the user got a 500 with no row number -
     while the logged traceback carried the whole chunk's narrations and
-    amounts (CLAUDE.md rule 3). It must be an ordinary bad row instead.
+    amounts (CLAUDE.md rule 3). It must be an ordinary bad row instead,
+    which the worker records as a `failed` upload.
     """
     absurd = (
         ("1", "01/08/2026", "01/08/2026", "", "UPI/SHOP/PAY", "70.00", "0.00", "111471.33"),
@@ -684,19 +823,17 @@ def test_an_amount_too_large_to_store_is_rejected(
         ),
     )
 
-    response = post_upload(
+    upload = import_file(
         client, alice, content=statement_bytes(tmp_path, rows=absurd), account_id=account_id
     )
 
-    assert response.status_code == 400
-    body = response.json()
-    assert body["error"]["code"] == "INVALID_STATEMENT"
+    assert upload["status"] == "failed"
     # Names the row, like every other unreadable-row error.
-    assert "row 15" in body["error"]["message"]
-    assert "too large" in body["error"]["message"]
-    # Nothing stored, not even the good first row (ADR 008).
+    assert "row 15" in upload["error_message"]
+    assert "too large" in upload["error_message"]
+    # Nothing stored, not even the good first row: the import is
+    # all-or-nothing.
     assert count_transactions(db) == 0
-    assert db.scalar(select(func.count()).select_from(StatementUpload)) == 0
 
 
 def test_a_simultaneous_duplicate_upload_is_a_conflict(
@@ -714,7 +851,7 @@ def test_a_simultaneous_duplicate_upload_is_a_conflict(
     upload reaches the INSERT - and must still be a clean 409, not a 500.
     """
     content = statement_bytes(tmp_path)
-    assert post_upload(client, alice, content=content, account_id=account_id).status_code == 201
+    assert post_upload(client, alice, content=content, account_id=account_id).status_code == 202
 
     monkeypatch.setattr(imports_service, "_already_uploaded", lambda *_args: False)
     second = post_upload(client, alice, content=content, account_id=account_id)
@@ -728,6 +865,7 @@ def test_an_integrity_error_that_is_not_a_duplicate_file_is_not_a_409(
     alice: dict[str, str],
     account_id: str,
     db: Session,
+    sync_queue: Queue,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -756,20 +894,22 @@ def test_an_integrity_error_that_is_not_a_duplicate_file_is_not_a_409(
     monkeypatch.setattr(imports_service.accounts_service, "get_account", lambda *_args: vanished)
 
     with pytest.raises(IntegrityError) as excinfo:
-        imports_service.import_statement(
+        imports_service.create_upload(
             db,
             owned.user_id,
             account_id=vanished.id,
             filename="statement.xls",
             content=statement_bytes(tmp_path),
+            queue=sync_queue,
         )
 
     assert excinfo.value.orig is not None
     assert excinfo.value.orig.diag.constraint_name == "fk_statement_uploads_account_id_accounts"
-    # Rolled back: a failed import leaves nothing behind (ADR 008).
+    # Rolled back: neither the row nor the encrypted file was kept, so
+    # nothing was enqueued for it either.
     db.expire_all()
     assert db.scalar(select(func.count()).select_from(StatementUpload)) == 0
-    assert count_transactions(db) == 0
+    assert count_blobs(db) == 0
 
 
 # --- Generic CSV + column mapping -------------------------------------------
@@ -778,7 +918,13 @@ def test_an_integrity_error_that_is_not_a_duplicate_file_is_not_a_409(
 def test_a_generic_csv_is_imported_with_a_column_mapping(
     client: TestClient, alice: dict[str, str], account_id: str, db: Session
 ) -> None:
-    response = post_upload(
+    """The mapping travels to the worker through the database, not the job.
+
+    A job's only argument is the upload id (SPEC §11), so the mapping is
+    stored on the upload row (`column_mapping`, migration 0008) and the
+    worker reads it from there.
+    """
+    body = import_file(
         client,
         alice,
         content=GENERIC_CSV,
@@ -787,8 +933,7 @@ def test_a_generic_csv_is_imported_with_a_column_mapping(
         column_mapping=CSV_MAPPING,
     )
 
-    assert response.status_code == 201
-    body = response.json()
+    assert body["status"] == "completed"
     assert body["file_type"] == "csv"
     assert (body["rows_parsed"], body["rows_inserted"]) == (2, 2)
     # A bare CSV states no period, so it is taken from the rows themselves.
@@ -799,19 +944,31 @@ def test_a_generic_csv_is_imported_with_a_column_mapping(
         (7000, Direction.DEBIT),
         (5000000, Direction.CREDIT),
     ]
+    upload = db.get(StatementUpload, uuid.UUID(body["id"]))
+    assert upload is not None
+    assert upload.column_mapping == {
+        "date_column": "Date",
+        "description_column": "Narration",
+        "date_format": "%d/%m/%Y",
+        "debit_column": "Withdrawal",
+        "credit_column": "Deposit",
+        "amount_column": None,
+        "balance_column": "Balance",
+    }
 
 
-def test_a_csv_without_a_mapping_is_rejected(
+def test_a_csv_without_a_mapping_fails(
     client: TestClient, alice: dict[str, str], account_id: str
 ) -> None:
     """No bank parser recognises a generic CSV, and without a mapping there
     is no way to know which column is which. The message says what to send."""
-    response = post_upload(
+    upload = import_file(
         client, alice, content=GENERIC_CSV, account_id=account_id, filename="export.csv"
     )
 
-    assert response.status_code == 400
-    assert "column_mapping" in response.json()["error"]["message"]
+    assert upload["status"] == "failed"
+    assert upload["error_message"] == imports_service.NO_PARSER_MESSAGE
+    assert "column_mapping" in upload["error_message"]
 
 
 def test_an_invalid_column_mapping_is_a_validation_error(
@@ -845,7 +1002,7 @@ def test_a_mapping_is_ignored_when_a_bank_parser_recognises_the_file(
     the ICICI parser even if a mapping was sent too - the mapping's columns
     do not exist in that workbook, so if it were used the import would
     fail."""
-    response = post_upload(
+    upload = import_file(
         client,
         alice,
         content=statement_bytes(tmp_path),
@@ -853,8 +1010,8 @@ def test_a_mapping_is_ignored_when_a_bank_parser_recognises_the_file(
         column_mapping=CSV_MAPPING,
     )
 
-    assert response.status_code == 201
-    assert response.json()["rows_inserted"] == 5
+    assert upload["status"] == "completed"
+    assert upload["rows_inserted"] == 5
 
 
 def test_a_mapping_cannot_rescue_an_unrecognised_workbook(
@@ -868,7 +1025,7 @@ def test_a_mapping_cannot_rescue_an_unrecognised_workbook(
     """
     unknown_bank = statement_bytes(tmp_path, header_labels=("A", "B", "C", "D", "E", "F", "G", "H"))
 
-    response = post_upload(
+    upload = import_file(
         client,
         alice,
         content=unknown_bank,
@@ -876,23 +1033,23 @@ def test_a_mapping_cannot_rescue_an_unrecognised_workbook(
         column_mapping=CSV_MAPPING,
     )
 
-    assert response.status_code == 400
+    assert upload["status"] == "failed"
     # The exact message, not just "CSV": NO_PARSER_MESSAGE also contains the
     # word ("if it is a CSV, send a column_mapping"), so a looser assertion
     # would pass even if the two checks in parse_statement were reordered
     # and this file took the wrong branch.
-    assert response.json()["error"]["message"] == imports_service.MAPPING_NEEDS_CSV_MESSAGE
+    assert upload["error_message"] == imports_service.MAPPING_NEEDS_CSV_MESSAGE
 
 
-def test_an_unrecognised_workbook_without_a_mapping_is_rejected(
+def test_an_unrecognised_workbook_without_a_mapping_fails(
     client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path
 ) -> None:
     unknown_bank = statement_bytes(tmp_path, header_labels=("A", "B", "C", "D", "E", "F", "G", "H"))
 
-    response = post_upload(client, alice, content=unknown_bank, account_id=account_id)
+    upload = import_file(client, alice, content=unknown_bank, account_id=account_id)
 
-    assert response.status_code == 400
-    assert response.json()["error"]["message"] == imports_service.NO_PARSER_MESSAGE
+    assert upload["status"] == "failed"
+    assert upload["error_message"] == imports_service.NO_PARSER_MESSAGE
 
 
 # --- Privacy (CLAUDE.md rule 3) ---------------------------------------------
@@ -904,15 +1061,16 @@ def test_the_log_has_no_narrations_or_amounts(
     """An import logs IDs, the file type and counts - nothing else.
 
     `capture_logs` collects every structlog event raised during the
-    request, so this covers the import service, the request logger and
-    anything else on the way.
+    request. The job runs inside the request on the test queue, so this
+    covers the API side, the worker side, the request logger and anything
+    else on the way.
     """
     content = statement_bytes(tmp_path)
 
     with structlog.testing.capture_logs() as events:
         response = post_upload(client, alice, content=content, account_id=account_id)
 
-    assert response.status_code == 201
+    assert response.status_code == 202
     text = str(events)
     for secret in (
         "TESTSHOP",  # a narration
@@ -927,9 +1085,30 @@ def test_the_log_has_no_narrations_or_amounts(
     ):
         assert secret not in text, f"{secret!r} must never be logged"
 
+    names = [event["event"] for event in events]
+    assert names.count("statement_upload_queued") == 1
     imported = [event for event in events if event["event"] == "statement_imported"]
     assert len(imported) == 1
     assert imported[0]["rows_inserted"] == 5
+
+
+def test_a_failed_import_logs_a_reason_code_not_the_message(
+    client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path
+) -> None:
+    """The failure is logged as a fixed code. The user-facing message,
+    which names a row of the file, goes only into `error_message`."""
+    broken = (("1", "01/08/2026", "01/08/2026", "", "UPI/SECRETSHOP/PAY", "x", "", "1.00"),)
+
+    with structlog.testing.capture_logs() as events:
+        post_upload(
+            client, alice, content=statement_bytes(tmp_path, rows=broken), account_id=account_id
+        )
+
+    failed = [event for event in events if event["event"] == "statement_import_failed"]
+    assert len(failed) == 1
+    assert failed[0]["reason"] == "invalid_statement"
+    assert "SECRETSHOP" not in str(events)
+    assert "row " not in str(failed[0])
 
 
 # --- Large statements (more than one INSERT chunk) --------------------------
@@ -968,7 +1147,7 @@ def test_a_statement_larger_than_one_chunk_is_fully_imported(
     """
     rows = many_rows(ROWS_JUST_OVER_ONE_CHUNK)
 
-    response = post_upload(
+    body = import_file(
         client,
         alice,
         content=statement_bytes(
@@ -977,8 +1156,7 @@ def test_a_statement_larger_than_one_chunk_is_fully_imported(
         account_id=account_id,
     )
 
-    assert response.status_code == 201
-    body = response.json()
+    assert body["status"] == "completed"
     assert (body["rows_parsed"], body["rows_inserted"], body["rows_duplicate"]) == (
         ROWS_JUST_OVER_ONE_CHUNK,
         ROWS_JUST_OVER_ONE_CHUNK,
@@ -1002,7 +1180,7 @@ def test_a_large_statement_reimports_as_all_duplicates(
     identically.
     """
     rows = many_rows(ROWS_JUST_OVER_ONE_CHUNK)
-    first = post_upload(
+    first = import_file(
         client,
         alice,
         content=statement_bytes(
@@ -1010,9 +1188,9 @@ def test_a_large_statement_reimports_as_all_duplicates(
         ),
         account_id=account_id,
     )
-    assert first.status_code == 201
+    assert first["status"] == "completed"
 
-    again = post_upload(
+    body = import_file(
         client,
         alice,
         content=statement_bytes(
@@ -1026,8 +1204,6 @@ def test_a_large_statement_reimports_as_all_duplicates(
         filename="again.xls",
     )
 
-    assert again.status_code == 201
-    body = again.json()
     assert (body["rows_parsed"], body["rows_inserted"], body["rows_duplicate"]) == (
         ROWS_JUST_OVER_ONE_CHUNK,
         0,

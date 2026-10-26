@@ -9,7 +9,8 @@ Lifecycle:
 - once per test      (`db`): hand out a Session, then empty every table
   afterwards so each test starts from a clean database.
 - once per test      (`client`): a TestClient for the real app whose routes
-  use the test database.
+  use the test database, and whose RQ jobs run immediately, in the test
+  process (`sync_queue`), also against the test database (`job_sessions`).
 - before every test  (`_reset_rate_limits`, automatic): clear the rate-limit
   counters in Redis.
 """
@@ -21,16 +22,25 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from rq import Queue
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
+from app.core.redis import get_redis
 from app.db.base import Base
 from app.db.session import build_engine, get_db
 from app.main import create_app
+from app.workers import jobs
+from app.workers.queue import get_queue
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
+
+# The queue name tests use, so a test's job can never land on the queue the
+# development worker (docker compose `worker`) is listening to - that worker
+# talks to the development database, not the test one.
+TEST_QUEUE_NAME = "kharcha-tests"
 
 
 def _test_database_url() -> str:
@@ -95,10 +105,42 @@ def db(migrated_engine: Engine) -> Iterator[Session]:
 
 
 @pytest.fixture
-def client(migrated_engine: Engine, db: Session) -> Iterator[TestClient]:
+def job_sessions(migrated_engine: Engine, monkeypatch: pytest.MonkeyPatch) -> sessionmaker[Session]:
+    """Make the RQ jobs open their sessions on the TEST database.
+
+    A job opens its own session (`SessionLocal()` in app/workers/jobs.py),
+    because in production it runs in another process with no request
+    around it. `SessionLocal` is bound to DATABASE_URL, the development
+    database, so the tests swap it for a factory bound to the test engine.
+    monkeypatch puts the original back after the test.
+    """
+    factory = sessionmaker(bind=migrated_engine, expire_on_commit=False)
+    monkeypatch.setattr(jobs, "SessionLocal", factory)
+    return factory
+
+
+@pytest.fixture
+def sync_queue(job_sessions: sessionmaker[Session]) -> Queue:
+    """A queue that runs each job at once, inside `enqueue()`.
+
+    `is_async=False` is RQ's own testing mode: no worker process, no
+    `fork()` (which Windows lacks), and the job has finished by the time
+    `enqueue()` returns. RQ still writes the job into Redis first, exactly
+    as it would for a worker, so what a job stores there can be tested too.
+
+    One difference from a real worker to keep in mind: a failing job is
+    not retried here. RQ calls the failure callback once and stops.
+    """
+    return Queue(TEST_QUEUE_NAME, connection=get_redis(), is_async=False)
+
+
+@pytest.fixture
+def client(migrated_engine: Engine, db: Session, sync_queue: Queue) -> Iterator[TestClient]:
     """The real app, with every request getting its own test-DB session.
 
-    Depending on `db` means the tables are emptied after the test.
+    Depending on `db` means the tables are emptied after the test. Uploads
+    are processed by `sync_queue`, so when POST /uploads returns, its job
+    has already run; GET /uploads/{id} then shows the final status.
 
     A fresh session per request (not the shared `db` one) behaves like
     production: nothing cached in memory carries over between requests.
@@ -117,6 +159,7 @@ def client(migrated_engine: Engine, db: Session) -> Iterator[TestClient]:
 
     app = create_app()
     app.dependency_overrides[get_db] = _get_test_db
+    app.dependency_overrides[get_queue] = lambda: sync_queue
     # Not `with TestClient(...)`: that would run the app's shutdown code,
     # which closes the shared engine and Redis client used by other tests.
     yield TestClient(app, base_url="https://testserver")

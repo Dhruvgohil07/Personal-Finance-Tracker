@@ -12,6 +12,7 @@ from typing import Annotated
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from redis import Redis
+from rq import Queue
 from sqlalchemy.orm import Session
 
 from app.core.errors import UnauthorizedError
@@ -19,11 +20,14 @@ from app.core.redis import get_redis
 from app.core.security import decode_access_token
 from app.db.session import get_db, get_health_db
 from app.models import User
+from app.workers.queue import get_queue
 
 DbSession = Annotated[Session, Depends(get_db)]
 # Only for GET /health: fails after 3 s instead of 10 s (see app/db/session.py).
 HealthDbSession = Annotated[Session, Depends(get_health_db)]
 RedisClient = Annotated[Redis, Depends(get_redis)]
+# The RQ queue uploads are processed from (tests swap in a synchronous one).
+JobQueue = Annotated[Queue, Depends(get_queue)]
 
 # HTTPBearer reads the `Authorization: Bearer <token>` header. Using it (not
 # reading the header by hand) also adds the "Authorize" button to /docs.

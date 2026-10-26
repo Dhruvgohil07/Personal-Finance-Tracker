@@ -19,13 +19,12 @@ Two things about the columns are worth knowing before reading them:
    recorded on it. If a failed row still counted as "already uploaded",
    the user could never retry that file, even after we fixed the parser
    that failed on it.
-2. **Some status values are not used yet.** Phase 1 imported synchronously
-   inside the request, so only `completed` rows exist so far. Phase 2 moves
-   the work into an RQ worker, which brings in `pending`, `processing` and
-   `failed`; `needs_password` arrives with password-protected PDFs, and
-   `needs_review` with balance reconciliation (SPEC §6.4). The whole enum
-   was created up front so that none of this needs a migration (the same
-   reasoning as ADR 002).
+2. **Some status values are not used yet.** Since Phase 2 Step 2 the API
+   creates the row as `pending` and an RQ worker moves it to `processing`
+   and then `completed` or `failed` (ADR 013). `needs_password` arrives
+   with password-protected PDFs (Step 10), and `needs_review` with balance
+   reconciliation (Step 4, SPEC §6.4). The whole enum was created up front
+   so that none of this needs a migration (the same reasoning as ADR 002).
 """
 
 import uuid
@@ -43,6 +42,7 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum_column
@@ -152,6 +152,15 @@ class StatementUpload(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # worker has processed them, and then deleted (SPEC §7.3).
     file_sha256: Mapped[str] = mapped_column(String(SHA256_HEX_LENGTH))
     status: Mapped[UploadStatus] = mapped_column(str_enum_column(UploadStatus, "upload_status"))
+    # The `column_mapping` sent with a CSV no bank parser recognises (SPEC
+    # §6.2), as a JSON object of `ColumnMapping`'s fields. NULL when none
+    # was sent, which is the normal case.
+    #
+    # Stored because the worker reads the file after the request has ended,
+    # and a job's only argument is the upload id (SPEC §11). It holds column
+    # header labels and a date pattern, nothing from the file's rows, so it
+    # is safe to keep; it also records how a CSV was read (migration 0008).
+    column_mapping: Mapped[dict[str, str | None] | None] = mapped_column(JSONB)
 
     # The period the statement covers, when the file states one (ICICI's
     # header does) or, failing that, the first and last transaction date.
@@ -168,7 +177,7 @@ class StatementUpload(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     # Why it failed, in words safe to show the user: `ParseError` messages
     # never contain narrations, amounts or balances (CLAUDE.md rule 3).
-    # Written by the Phase 2 worker; see the module docstring.
+    # Written when an upload is marked `failed` (app/services/imports.py).
     error_message: Mapped[str | None] = mapped_column(Text())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
