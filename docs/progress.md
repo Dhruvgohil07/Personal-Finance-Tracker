@@ -214,12 +214,22 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
      unfinished (ADR 007 amendment)
   978 tests, 100% coverage. ADR 013 amended
 
+- [x] Step 3: Cleanup job + scheduler — `app/services/cleanup.py` (`run_cleanup`: three
+  set-based rules in one transaction: `pending`/`processing` uploads > 1 h → failed + file
+  deleted; stored files > 24 h deleted and a still-waiting upload (e.g. `needs_password`)
+  failed as expired; refresh-token families deleted only when EVERY token expired),
+  `jobs.cleanup()`, `queue.enqueue_cleanup` (ttl 1 h, so a stopped worker never builds a
+  backlog), `app/workers/scheduler.py` (APScheduler `BlockingScheduler`, only enqueues, runs
+  once at start then hourly), compose `scheduler` service; ADR 005 amendment. 999 tests,
+  100% coverage. Live: scheduler enqueued at startup, worker ran it in 55 ms
+
 ## In progress
 - (nothing)
 
 ## Next up
-- Phase 2 Step 3: cleanup job + scheduler — `cleanup()` (blobs > 24h, `pending`/`processing`
-  rows > 1h, expired refresh tokens), `app/workers/scheduler.py`, compose `scheduler` service
+- Phase 2 Step 4: statement order + balance reconciliation — `app/parsers/reconcile.py`,
+  migration 0009 (`transactions.statement_seq`, `statement_uploads.reconciliation_issues`),
+  3-part cursor, ADR 014
 - Steps 9–10 (ICICI PDF, password PDFs) are blocked until the ICICI PDF is in `samples/`
 
 ## Open decisions / questions
@@ -239,6 +249,17 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   relies on is REFUSED (delete the later one first) rather than allowed. Nothing
   records which upload a skipped duplicate matched, so the check errs on refusing
 - Step 2 review → decided: `STALE_UPLOAD_AFTER = 1 h` (the Step 3 cleanup reuses it)
+- Step 3 → decided (ADR 005 amendment): the plan's "delete expired refresh tokens" taken
+  literally would switch off reuse detection for a thief who outlasts the stolen token, so
+  a token FAMILY is deleted only when every token in it has expired. A test proves the naive
+  rule would let the thief's token keep working
+- Step 3 → found in the live run: log keys are redacted by substring, so a count named
+  `refresh_tokens_deleted` came out as `[REDACTED]` ("token"). Renamed to
+  `refresh_rows_deleted`; a test now runs the cleanup's log line through the real
+  redaction processor (`capture_logs` skips processors, so it could not catch this)
+- Step 3 → note: the stale-upload rule scans `statement_uploads` without an index on
+  `status` (hourly; fine at personal scale). A partial index `WHERE status IN
+  ('pending','processing')` is the fix if it ever shows up
 - Step 2 → note: tests run jobs on `Queue(is_async=False)` named `kharcha-tests`, so RQ's
   retries are not exercised end to end; the callback's branches are tested directly and
   the retry options are read back from a job stored in Redis

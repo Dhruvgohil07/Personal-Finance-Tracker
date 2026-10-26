@@ -44,8 +44,10 @@ The `worker` service imports uploaded statements in the background (RQ
 needs `fork()`, so it runs in Docker, not on Windows — [ADR
 013](docs/decisions/013-upload-processing-worker.md)). It reads the same
 `.env` as the API, so both use the same `FILE_ENCRYPTION_KEY`. After
-changing backend code, rebuild it with `docker compose up -d --build worker`;
-read its logs with `docker compose logs -f worker`. Without a running
+changing backend code, rebuild both with `docker compose up -d --build worker scheduler`;
+read its logs with `docker compose logs -f worker`. Next to it, the
+`scheduler` service enqueues an hourly `cleanup` job (stale uploads,
+expired files, dead refresh-token families). Without a running
 worker, uploads stay `pending`.
 
 ### 3. Install, migrate, seed

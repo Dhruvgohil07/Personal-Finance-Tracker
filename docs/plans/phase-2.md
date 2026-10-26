@@ -296,3 +296,8 @@ and Step 5's narration rules).
     `python -m app.workers.worker` rather than `rq worker`, so that our log redaction
     is configured in the worker process (ADR 013). PDFs are refused in the request
     (400) until Step 9, since the signature already says what they are.
+- **Step 3:** "deletes expired refresh tokens" became "deletes a token family once every
+  token in it has expired". Deleting single expired tokens would let a thief who outlasts
+  the stolen token escape reuse detection (ADR 005 amendment). No new migration or ADR,
+  so the numbering from Step 2's entry stands. The stale threshold is shared with Step 2
+  (`STALE_UPLOAD_AFTER`, 1 h).
