@@ -45,10 +45,13 @@ from app.models import CategoryKind
 from app.parsers.base import Direction
 from app.utils.dates import Month
 
-# Shown for transactions the user has not filed and the categorizer has
-# not reached (`category_id IS NULL`). See `CategorySpend` in
+# Shown for transactions the user has not filed and the categorizer could
+# not place (`category_id IS NULL`). See `CategorySpend` in
 # app/schemas/insights.py for why this bucket is kept rather than dropped.
-UNCATEGORIZED_NAME = "Uncategorized"
+# Not "Uncategorized": that is the name of a SEEDED category, the user's
+# explicit "I looked, nothing fits", and the two must not look alike in one
+# list (Phase 2 plan, Step 6).
+UNCATEGORIZED_NAME = "Not categorized yet"
 
 # Percentages are reported to one decimal place: "+12.5%" is as much
 # precision as a spending figure can honestly carry.

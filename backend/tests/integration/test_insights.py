@@ -569,7 +569,8 @@ def test_uncategorized_spending_is_its_own_bucket(
     ]
     bucket = next(item for item in items if item["category_id"] is None)
 
-    assert bucket["name"] == "Uncategorized"
+    # Not "Uncategorized", the seeded category's name (Phase 2 Step 6)
+    assert bucket["name"] == "Not categorized yet"
     assert bucket["slug"] is None
     assert bucket["kind"] is None
     assert bucket["icon"] is None

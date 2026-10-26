@@ -192,16 +192,15 @@ class SummaryResponse(BaseModel):
 class CategorySpend(BaseModel):
     """What one category cost over the range.
 
-    `category_id` is `null` for the "not categorized yet" bucket - rows the
-    user has not filed and the Phase 2 categorizer has not reached. It is
-    kept as a row of its own rather than dropped, so the parts always add
-    up to `total_spend_paise`; in Phase 1 it is usually the biggest row.
+    `category_id` is `null` for the "Not categorized yet" bucket - rows the
+    user has not filed and the categorizer could not place (Phase 2 Step 6:
+    the categorizer leaves those NULL). It is kept as a row of its own
+    rather than dropped, so the parts always add up to `total_spend_paise`.
 
-    (The seed also contains a system category *named* "Uncategorized",
-    which SPEC §8 gives the categorizer as an explicit "I looked and found
-    nothing" answer. A row filed there has a real `category_id`, so the two
-    appear separately - a deliberate distinction between "not looked at"
-    and "looked at, nothing fits".)
+    (The seed also contains a system category *named* "Uncategorized", the
+    user's explicit "I looked and nothing fits". A row filed there has a
+    real `category_id`, so the two appear separately, and since Step 6 they
+    also have different names.)
     """
 
     category_id: uuid.UUID | None = Field(description="null = not categorized yet")
