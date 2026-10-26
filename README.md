@@ -138,9 +138,15 @@ be imported, `status` is `failed` and `error_message` says why (an
 unreadable row, a statement for a different account). The same file can
 then be uploaded again.
 
+While the upload is unfinished, responses carry a `Retry-After` header
+(seconds to wait before polling again). Polling has its own rate limit, so
+it does not eat into the general one.
+
 `GET /api/v1/uploads` lists your uploads, newest first.
 `DELETE /api/v1/uploads/{id}` undoes an import: the upload and every
-transaction it added are removed (`409` while it is still processing).
+transaction it added are removed. It answers `409` while the upload is
+being imported, and also when a *later* overlapping statement relies on
+this one's rows — delete the later one first.
 
 Things worth trying here:
 

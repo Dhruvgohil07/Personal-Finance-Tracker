@@ -72,3 +72,12 @@ routes, and what happens when Redis (the counter store) is down.
   validates before the decorator runs. Harmless, since they do no work.
 - When upgrading slowapi, check whether the bug in (8) is fixed; the
   regression test will tell if the workaround is still needed.
+
+## Amendment — Phase 2 Step 2 (2026-10-26)
+`GET /uploads/{id}` is polled by a client while the worker imports an upload
+(ADR 013). Under the general limit, those polls would use up the one shared
+counter that every other call depends on. So the route has its own decorator
+limit, `UPLOAD_POLL_LIMIT = "120/minute"` per user. As decision 3 says, a
+decorated route uses only its own limit, and its counter is shared by all
+upload ids of that user. Unfinished uploads also send `Retry-After: 2`, so a
+well-behaved client polls about 30 times a minute.
