@@ -43,6 +43,11 @@ from dataclasses import dataclass
 
 from app.parsers.base import Channel
 
+# The width ICICI cuts the VPA field to (the layout above). A stored VPA of
+# exactly this length may be the start of a longer one, which is what a
+# `vpa` rule must allow for (app/categorizer/handlers.py, review of Step 7).
+ICICI_VPA_WIDTH = 14
+
 # --- Channel: the narration's first word ----------------------------------
 
 # Banks put the channel first ("UPI/...", "NEFT CR-...", "ATW-48291 ..."), so

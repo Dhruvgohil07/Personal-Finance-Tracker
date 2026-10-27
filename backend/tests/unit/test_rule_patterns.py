@@ -14,13 +14,16 @@ import pytest
 from pydantic import ValidationError
 
 from app.categorizer.handlers import (
+    Rule,
     RuleMatchType,
     looks_like_person,
     normalize_rule_pattern,
+    same_vpa,
 )
 from app.categorizer.learning import learned_rule_key
 from app.models.category_rule import DEFAULT_RULE_PRIORITY
 from app.parsers.base import Channel
+from app.parsers.narration import ICICI_VPA_WIDTH
 from app.schemas.rule import RuleCreate, RuleUpdate
 from app.schemas.transaction import TransactionUpdate
 from tests.unit.test_categorizer import facts, upi
@@ -74,6 +77,40 @@ def test_a_pattern_that_would_match_nothing_or_everything_is_refused(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         normalize_rule_pattern(match_type, typed)
+
+
+# --- same_vpa: ICICI cuts VPAs at 14 characters (review of Step 7) ---------------
+
+CUT = "asha.verma@oka"  # exactly ICICI_VPA_WIDTH characters
+FULL = "asha.verma@okaxis"
+
+
+def test_the_cut_width_is_what_the_cut_vpa_has() -> None:
+    assert len(CUT) == ICICI_VPA_WIDTH
+
+
+@pytest.mark.parametrize(
+    ("stored", "pattern", "same"),
+    [
+        (FULL, FULL, True),  # printed whole
+        (CUT, FULL, True),  # an .xls row, the id typed in full
+        (FULL, CUT, True),  # a rule learned from an .xls row, a full row (PDF)
+        (CUT, CUT, True),
+        ("ravi@ok", "ravi@okaxis", False),  # shorter than the width: printed whole
+        (CUT, "asha.verma@okaybank", True),  # same first 14: the cut cannot tell
+        (CUT, "other.name@okaxis", False),
+        (None, FULL, False),  # a row with no VPA
+    ],
+)
+def test_a_vpa_rule_allows_for_icicis_cut(stored: str | None, pattern: str, same: bool) -> None:
+    assert same_vpa(stored, pattern) is same
+
+
+def test_a_vpa_rule_matches_a_cut_row() -> None:
+    rule = Rule(V, FULL, uuid.uuid4())
+
+    assert rule.matches(upi("ASHAVERMA", CUT))
+    assert not rule.matches(upi("ASHAVERMA", "asha@okaxis"))
 
 
 # --- learned_rule_key -------------------------------------------------------------

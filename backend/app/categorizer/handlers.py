@@ -18,7 +18,7 @@ from enum import StrEnum
 
 from app.categorizer.base import CategorySource, Decision, Handler, TxnFacts
 from app.parsers.base import Channel, Direction
-from app.parsers.narration import key_words, name_key
+from app.parsers.narration import ICICI_VPA_WIDTH, key_words, name_key
 from app.parsers.normalize import LONG_DIGITS, normalize_description
 
 # How sure each kind of handler is (stored in `category_confidence`).
@@ -113,6 +113,28 @@ def normalize_rule_pattern(match_type: RuleMatchType, pattern: str) -> str:
     return text
 
 
+def same_vpa(stored: str | None, pattern: str) -> bool:
+    """True if a row's VPA and a rule's VPA are the same UPI id.
+
+    Equal, or one is exactly `ICICI_VPA_WIDTH` long and the other starts
+    with it: ICICI cuts the VPA field at 14 characters (ADR 015), so
+    "asha.verma@oka" on an `.xls` row IS "asha.verma@okaxis" typed by the
+    user - or printed in full by a PDF statement (Step 9). Checked both
+    ways round, so a rule learned from a cut row also finds the full id.
+
+    A VPA that is shorter than the width was printed whole, so it must
+    match exactly. Two different ids sharing their first 14 characters
+    would be taken for one; ICICI's cut leaves no way to tell them apart
+    (review of Step 7, decided with Dhruv).
+    """
+    if stored is None:
+        return False
+    if stored == pattern:
+        return True
+    short, long = sorted((stored, pattern), key=len)
+    return len(short) == ICICI_VPA_WIDTH and long.startswith(short)
+
+
 @dataclass(frozen=True)
 class Rule:
     """One of the user's rules, as plain data (loaded from `category_rules`).
@@ -121,7 +143,8 @@ class Rule:
     list the user sees and "first" in the chain mean the same thing.
 
     The pattern arrives normalized for its match type (app/schemas/rule.py
-    does it on the way in), so each comparison below is exact.
+    does it on the way in), so each comparison below is exact - except for
+    a VPA cut short by ICICI (`same_vpa`).
     """
 
     match_type: RuleMatchType
@@ -133,7 +156,7 @@ class Rule:
         if self.match_type is RuleMatchType.MERCHANT:
             return facts.merchant_key == self.pattern
         if self.match_type is RuleMatchType.VPA:
-            return facts.counterparty_vpa == self.pattern.lower()
+            return same_vpa(facts.counterparty_vpa, self.pattern.lower())
         # CONTAINS: the narration was uppercased by normalization, so the
         # pattern is too ("zomato" finds "ZOMATO").
         return self.pattern.upper() in facts.normalized_description
