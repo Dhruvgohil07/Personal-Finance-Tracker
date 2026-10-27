@@ -578,3 +578,30 @@ def test_clearing_a_detected_half_lets_detection_pair_it_again(
     assert response.status_code == 200
     assert state(db, rows_of(db, savings)[SENT]) == PAIRED
     assert state(db, rows_of(db, other)[0]) == PAIRED
+
+
+# --- The import pass reads only the amounts it brought in (review of Step 8) ----------------
+
+UNRELATED_ROWS = (
+    ("1", "20/08/2026", "20/08/2026", "",
+     upi("MOON CAFE", "Q123456789@ybl", "NO REMARK", "YES BANK L", "512345678921"),
+     "99.00", "0.00", "34901.00"),
+)  # fmt: skip
+
+
+@pytest.mark.usefixtures("seeded")
+def test_an_import_checks_only_rows_of_its_own_amounts(
+    client: TestClient, alice: dict[str, str], tmp_path: Path, db: Session
+) -> None:
+    """Pairing never links different amounts, so an import of a ₹99 row
+    has no reason to read (and lock) the ₹15,000 pair or anything else."""
+    savings, other = import_both(client, alice, tmp_path)
+
+    with structlog.testing.capture_logs() as logs:
+        import_into(client, alice, tmp_path, UNRELATED_ROWS, "4321")
+
+    [detected] = [entry for entry in logs if entry["event"] == "self_transfers_detected"]
+    assert detected["rows_checked"] == 1  # the new ₹99 row alone
+    # ...and the pair it never looked at is untouched.
+    assert state(db, rows_of(db, savings)[SENT]) == PAIRED
+    assert state(db, rows_of(db, other)[0]) == PAIRED
