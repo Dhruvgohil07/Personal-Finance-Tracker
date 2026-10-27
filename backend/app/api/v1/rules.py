@@ -32,7 +32,7 @@ _CONFLICT = {HTTPStatus.CONFLICT: {"model": ErrorResponse}}
 )
 def list_rules(user: CurrentUser, db: DbSession) -> list[RuleResponse]:
     """Your rules, the one tried first at the top: lowest priority number,
-    and among equal numbers the newest."""
+    and among equal numbers the one created or changed most recently."""
     return [RuleResponse.model_validate(rule) for rule in rules_service.list_rules(db, user.id)]
 
 

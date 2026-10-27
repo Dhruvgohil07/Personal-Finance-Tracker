@@ -50,7 +50,8 @@ class RuleCreate(BaseModel):
     pattern: RawPattern = Field(description="What to match, e.g. 'Moon Cafe' or 'name@okaxis'")
     category_id: uuid.UUID = Field(description="A system category or one of your own")
     priority: Priority = Field(
-        default=DEFAULT_RULE_PRIORITY, description="Lower is tried first; ties go to the newest"
+        default=DEFAULT_RULE_PRIORITY,
+        description="Lower is tried first; ties go to the most recently created or changed",
     )
 
     # Runs after `match_type` (fields are validated in the order they are
