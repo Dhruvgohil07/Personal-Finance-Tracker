@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from app.categorizer.base import CategorySource
 from app.db.seed import run_seed
 from app.models import Category, Transaction, User
-from app.services import rules as rules_service
+from app.services import categorization as categorization_service
 from app.services.categorization import SELF_TRANSFER_CONFIDENCE, recategorize_user
 from tests.fixtures.icici_xls import build_icici_xls
 from tests.integration.test_categorization import upi
@@ -322,7 +322,9 @@ def test_a_note_on_a_paired_row_does_not_rerun(
     savings, _ = import_both(client, alice, tmp_path)
     sent = rows_of(db, savings)[SENT]
     reruns: list[Any] = []
-    monkeypatch.setattr(rules_service, "commit_and_apply", lambda *args: reruns.append(args))
+    monkeypatch.setattr(
+        categorization_service, "commit_and_recategorize", lambda *args: reruns.append(args)
+    )
 
     response = client.patch(
         f"/api/v1/transactions/{sent.id}", json={"notes": "to my HDFC"}, headers=alice
@@ -344,7 +346,9 @@ def test_refiling_an_unpaired_row_does_not_rerun(
     savings, _ = import_both(client, alice, tmp_path)
     shop = rows_of(db, savings)[SHOP]
     reruns: list[Any] = []
-    monkeypatch.setattr(rules_service, "commit_and_apply", lambda *args: reruns.append(args))
+    monkeypatch.setattr(
+        categorization_service, "commit_and_recategorize", lambda *args: reruns.append(args)
+    )
 
     client.patch(
         f"/api/v1/transactions/{shop.id}",
