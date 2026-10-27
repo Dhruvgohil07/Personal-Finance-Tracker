@@ -166,6 +166,14 @@ def update_transaction(
     user's rows the same way, so the OTHER half - now without a partner -
     is re-decided at once instead of staying out of the totals.
     """
+    if "category_id" in data.model_fields_set:
+        # A category change may end in a re-run inside this transaction
+        # (Redis down), so the per-user lock comes BEFORE the row is read
+        # or touched - the lock order every run uses (review of Step 8).
+        # Taken for every category change, not only the re-running ones,
+        # so `is_detected_self_transfer` below reads a row no run is
+        # changing at that moment.
+        categorization_service.lock_categorization(db, user_id)
     transaction = get_transaction(db, user_id, transaction_id)
     changes = data.model_dump(exclude_unset=True)
     # Not a column: an instruction about the category change.

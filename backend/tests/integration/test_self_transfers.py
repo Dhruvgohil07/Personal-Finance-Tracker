@@ -25,6 +25,7 @@ from app.categorizer.base import CategorySource
 from app.db.seed import run_seed
 from app.models import Category, Transaction, User
 from app.services import categorization as categorization_service
+from app.services import transactions as transactions_service
 from app.services.categorization import SELF_TRANSFER_CONFIDENCE, recategorize_user
 from tests.fixtures.icici_xls import build_icici_xls
 from tests.integration.test_categorization import upi
@@ -357,3 +358,43 @@ def test_refiling_an_unpaired_row_does_not_rerun(
     )
 
     assert reruns == []
+
+
+# --- Lock order (review of Step 8) ---------------------------------------------------------
+
+
+@pytest.mark.usefixtures("seeded")
+def test_a_category_change_locks_the_user_before_touching_the_row(
+    client: TestClient,
+    alice: dict[str, str],
+    tmp_path: Path,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lock first, rows after - the order every run uses. The other way
+    round, an inline re-run (Redis down) could deadlock with a running job."""
+    savings, _ = import_both(client, alice, tmp_path)
+    sent = rows_of(db, savings)[SENT]
+    calls: list[str] = []
+    real_lock = categorization_service.lock_categorization
+    real_set = transactions_service._set_category
+
+    def lock(*args: Any) -> None:
+        calls.append("lock")
+        real_lock(*args)
+
+    def set_category(*args: Any) -> None:
+        calls.append("set_category")
+        real_set(*args)
+
+    monkeypatch.setattr(categorization_service, "lock_categorization", lock)
+    monkeypatch.setattr(transactions_service, "_set_category", set_category)
+
+    client.patch(
+        f"/api/v1/transactions/{sent.id}",
+        json={"category_id": system_id(db, "rent")},
+        headers=alice,
+    )
+
+    # The re-run that follows takes the lock again (re-entrant in Postgres).
+    assert calls[:2] == ["lock", "set_category"]

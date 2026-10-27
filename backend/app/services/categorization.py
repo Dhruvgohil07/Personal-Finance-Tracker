@@ -28,7 +28,7 @@ either: both queries leave those rows out, and the chain's own guard says
 the same, belt and braces.
 
 **One user's categorization runs one at a time.** Both entry points first
-take a per-user lock (`_lock_categorization`), and only then read the rules.
+take a per-user lock (`lock_categorization`), and only then read the rules.
 Without it, two runs could overlap - an import that read the rules a
 moment before a rule changed, or two rule changes in quick succession -
 and the one that commits LAST would win with rules that are already out
@@ -87,7 +87,7 @@ def categorize_upload(db: Session, upload: StatementUpload) -> int:
     Rows that the upload SKIPPED as duplicates belong to the earlier upload
     that inserted them, so they are not looked at again.
     """
-    _lock_categorization(db, upload.user_id)
+    lock_categorization(db, upload.user_id)
     rows = db.scalars(
         select(Transaction).where(
             # user_id as well as upload_id: every query is scoped by user
@@ -123,7 +123,7 @@ def recategorize_user(db: Session, user_id: uuid.UUID) -> int:
     the WHERE clause, finds the row is `user_manual` now, and skips it.
     Without the lock, this could overwrite a choice the user had just made.
     """
-    _lock_categorization(db, user_id)
+    lock_categorization(db, user_id)
     rows = db.scalars(
         select(Transaction)
         .where(
@@ -262,7 +262,7 @@ class _Outcome:
             log.warning("category_not_usable_by_user", **ids, rows_count=self.refused_ids)
 
 
-def _lock_categorization(db: Session, user_id: uuid.UUID) -> None:
+def lock_categorization(db: Session, user_id: uuid.UUID) -> None:
     """Take this user's categorization lock until the transaction ends.
 
     `pg_advisory_xact_lock(key)` is a Postgres lock on a NUMBER instead of
@@ -272,6 +272,14 @@ def _lock_categorization(db: Session, user_id: uuid.UUID) -> None:
     signed 64-bit integer (the type Postgres takes). Two users sharing those
     bytes would only wait for each other, never get a wrong answer; nothing
     else in the app uses advisory locks, so no other lock can collide.
+
+    **Lock order: this lock FIRST, transaction rows after.** A run holds it
+    and then locks rows (`FOR UPDATE`). A request that changes a row and
+    may then re-run in its own transaction (Redis down) must therefore take
+    this lock BEFORE it touches the row. The other way round, the request
+    would hold the row and wait for this lock while a running job held this
+    lock and waited for the row: a deadlock (review of Step 8). Public for
+    exactly those callers.
     """
     key = int.from_bytes(user_id.bytes[:8], "big", signed=True)
     db.execute(select(func.pg_advisory_xact_lock(key)))
