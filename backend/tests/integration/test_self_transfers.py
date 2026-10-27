@@ -450,3 +450,73 @@ def test_a_delete_that_breaks_no_pair_does_not_rerun(
     assert client.delete(f"/api/v1/uploads/{upload}", headers=alice).status_code == 204
     assert client.delete(f"/api/v1/accounts/{row.account_id}", headers=alice).status_code == 204
     assert reruns == []
+
+
+# --- Manual Self Transfer rows are anchors (review of Step 8, decided with Dhruv) ----------
+
+
+def refile(client: TestClient, headers: dict[str, str], row: Transaction, category: str) -> None:
+    response = client.patch(
+        f"/api/v1/transactions/{row.id}", json={"category_id": category}, headers=headers
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.usefixtures("seeded")
+def test_confirming_a_pair_by_hand_keeps_the_other_half(
+    client: TestClient, alice: dict[str, str], tmp_path: Path, db: Session
+) -> None:
+    savings, other = import_both(client, alice, tmp_path)
+
+    refile(client, alice, rows_of(db, savings)[SENT], system_id(db, "self-transfer"))
+
+    assert state(db, rows_of(db, savings)[SENT]) == (
+        "self-transfer",
+        CategorySource.USER_MANUAL,
+        True,
+    )
+    assert state(db, rows_of(db, other)[0]) == PAIRED  # was stripped before the fix
+
+
+@pytest.mark.usefixtures("seeded")
+def test_a_transfer_marked_by_hand_finds_its_other_half(
+    client: TestClient, alice: dict[str, str], tmp_path: Path, db: Session
+) -> None:
+    """A rule keeps the credit out of detection; filing it under Self
+    Transfer by hand makes it an anchor, and its debit is paired to it."""
+    rule = client.post(
+        "/api/v1/rules",
+        json={
+            "match_type": "vpa",
+            "pattern": "9999999998@ybl",
+            "category_id": system_id(db, "salary"),
+        },
+        headers=alice,
+    )
+    assert rule.status_code == 201
+    savings, other = import_both(client, alice, tmp_path)
+    assert state(db, rows_of(db, savings)[SENT])[2] is False  # nothing to pair with
+
+    refile(client, alice, rows_of(db, other)[0], system_id(db, "self-transfer"))
+
+    assert state(db, rows_of(db, savings)[SENT]) == PAIRED
+    # The anchor itself is exactly as the user set it.
+    assert state(db, rows_of(db, other)[0]) == ("self-transfer", CategorySource.USER_MANUAL, True)
+
+
+@pytest.mark.usefixtures("seeded")
+def test_unmarking_an_anchor_releases_its_partner(
+    client: TestClient, alice: dict[str, str], tmp_path: Path, db: Session
+) -> None:
+    savings, other = import_both(client, alice, tmp_path)
+    received = rows_of(db, other)[0]
+    refile(client, alice, received, system_id(db, "self-transfer"))
+    assert state(db, rows_of(db, savings)[SENT]) == PAIRED
+
+    refile(client, alice, received, system_id(db, "salary"))
+
+    assert state(db, rows_of(db, savings)[SENT]) == (
+        "transfers-to-people",
+        CategorySource.HEURISTIC,
+        False,
+    )
