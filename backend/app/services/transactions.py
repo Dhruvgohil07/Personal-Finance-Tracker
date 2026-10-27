@@ -157,9 +157,9 @@ def update_transaction(
 
     `apply_to_similar` (Phase 2 Step 7, SPEC §8.1) learns a rule from the
     correction in the SAME commit as the category, so a 400 "nothing to
-    match on" leaves the row unchanged too. Only after the commit are the
-    rules applied to the user's other rows (`rules_service.apply_rules`).
-    The row itself stays `user_manual`: the user chose it.
+    match on" leaves the row unchanged too. The rules are then applied to
+    the user's other rows (`rules_service.commit_and_apply`). The row
+    itself stays `user_manual`: the user chose it.
     """
     transaction = get_transaction(db, user_id, transaction_id)
     changes = data.model_dump(exclude_unset=True)
@@ -174,8 +174,12 @@ def update_transaction(
         transaction.notes = changes["notes"] or None
     if apply_to_similar:
         rules_service.learn_rule(db, user_id, transaction)
+        # Commits the row and the rule together, then re-runs the user's
+        # other rows (in this same transaction when Redis is down).
+        rules_service.commit_and_apply(db, queue, user_id)
+    else:
+        db.commit()
 
-    db.commit()
     # Field NAMES only - never the note's text or the category id's meaning
     # for this user (CLAUDE.md rule 3).
     log.info(
@@ -185,8 +189,6 @@ def update_transaction(
         fields=sorted(changes),
         apply_to_similar=apply_to_similar,
     )
-    if apply_to_similar:
-        rules_service.apply_rules(db, queue, user_id)
     return transaction
 
 
