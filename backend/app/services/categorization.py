@@ -69,12 +69,20 @@ log = structlog.get_logger()
 # 1.00 and above the P2P guess's 0.70.
 SELF_TRANSFER = "self-transfer"
 SELF_TRANSFER_CONFIDENCE = Decimal("0.80")
-# Which rows detection may pair. Never a manual row (the user decided), and
-# never one a user rule decided: a rule wins over detection, because the
-# user said so (decided with Dhruv, ADR 018).
-_PAIRABLE = Transaction.category_source.not_in(
-    (CategorySource.USER_MANUAL, CategorySource.USER_RULE)
-)
+# Which rows detection may pair: those the chain could NOT place with
+# confidence - left uncategorized (`none`) or guessed as a person by the P2P
+# heuristic (`heuristic`, which also covers earlier detections). A payment
+# to your own account looks exactly like either.
+#
+# Never a row a user rule or the user decided (they said so), and - since
+# the review of Step 8 (decided with Dhruv) - never one the merchant
+# dictionary or a keyword placed: a Swiggy debit or a salary credit is not a
+# self transfer, however round its amount. Before, rent of ₹25,000 and a
+# ₹25,000 salary a day later in another account erased each other from the
+# totals. No payment app (CRED, Paytm) is a seeded merchant, so card-bill
+# payments made through them still pair. The LLM (Phase 4) places
+# merchants, so its rows stay out too.
+_PAIRABLE = Transaction.category_source.in_((CategorySource.NONE, CategorySource.HEURISTIC))
 # ...with one exception: a row the user filed under Self Transfer BY HAND
 # takes part as an ANCHOR - a fixed half whose partner may be paired to it,
 # while the manual row itself is never written. Without it, confirming one

@@ -520,3 +520,39 @@ def test_unmarking_an_anchor_releases_its_partner(
         CategorySource.HEURISTIC,
         False,
     )
+
+
+# --- Merchant and keyword rows are never paired (review of Step 8, decided with Dhruv) -----
+
+COINCIDENCE_SAVINGS = (
+    # Rent to the landlord (P2P guess) and a Swiggy order (merchant).
+    ("1", "01/08/2026", "01/08/2026", "",
+     upi("RAMESH K", "8888888888@ybl", "rent", "HDFC BANK", "512345678911"),
+     "25000.00", "0.00", "75000.00"),
+    ("2", "02/08/2026", "02/08/2026", "",
+     upi("Swiggy Lim", "swiggypayu@hdf", "NO REMARK", "HDFC BANK", "512345678912"),
+     "450.00", "0.00", "74550.00"),
+)  # fmt: skip
+COINCIDENCE_OTHER = (
+    # A salary of the same round amount a day later (keyword), and a friend
+    # paying back ₹450 (P2P guess) the day after the Swiggy order.
+    ("1", "02/08/2026", "02/08/2026", "", "NEFT-SALARY-ACME", "0.00", "25000.00", "45000.00"),
+    ("2", "03/08/2026", "03/08/2026", "",
+     upi("NEHA P", "7777777777@ybl", "dinner", "AXIS BANK", "512345678913"),
+     "0.00", "450.00", "45450.00"),
+)  # fmt: skip
+
+
+@pytest.mark.usefixtures("seeded")
+def test_equal_amounts_with_a_merchant_or_keyword_side_are_not_paired(
+    client: TestClient, alice: dict[str, str], tmp_path: Path, db: Session
+) -> None:
+    savings = import_into(client, alice, tmp_path, COINCIDENCE_SAVINGS, "1234")
+    other = import_into(client, alice, tmp_path, COINCIDENCE_OTHER, "5678")
+
+    rent, swiggy = rows_of(db, savings)
+    salary, payback = rows_of(db, other)
+    assert state(db, rent) == ("transfers-to-people", CategorySource.HEURISTIC, False)
+    assert state(db, salary) == ("salary", CategorySource.KEYWORD, False)
+    assert state(db, swiggy) == ("food-dining", CategorySource.MERCHANT, False)
+    assert state(db, payback) == ("other-income", CategorySource.HEURISTIC, False)
