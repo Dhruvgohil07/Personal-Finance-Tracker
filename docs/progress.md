@@ -331,14 +331,22 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   9. one self-transfer rule, `CategoryKind.marks_self_transfer`
 
   1320 tests, 100% coverage
+- [x] Step 8: Self-transfer detection — pure matcher `app/categorizer/self_transfer.py`
+  (one-to-one, nearest gap first, a row ambiguous at its nearest gap stays unmatched),
+  `_detect_self_transfers` at the end of BOTH categorization passes (import and rule
+  re-run), so rule changes keep the pairs. Pairs become Self Transfer / `heuristic` /
+  0.80 / `is_self_transfer`. User rules and manual rows are never paired. Re-filing a
+  half by hand re-runs the user's rows. No migration, no new job. ADR 018. Verified on
+  synthetic two- and three-account statements only (one real account so far).
+  1350 tests, 100% coverage
 
 ## In progress
 - (nothing)
 
 ## Next up
-- Phase 2 Step 8: self-transfer detection (ADR 018). It must survive a rule re-run,
-  which re-decides every non-manual row (ADR 017, Consequences)
 - Steps 9–10 (ICICI PDF, password PDFs) are blocked until the ICICI PDF is in `samples/`
+- Step 11 (acceptance) needs the PDF too. Its self-transfer check needs a second real
+  account's statement
 
 ## Open decisions / questions
 - Git workflow → decided: `main` protected (ruleset `protect-main`); every change via a
@@ -426,6 +434,14 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
 
   The Step 6 check that a rule's category belongs to its user is now enforced in both
   places: `POST/PATCH /rules` (404) and where the id is written
+- Self transfers → decided (ADR 018, with Dhruv):
+  - detection runs in every categorization pass, not as a `post_import_analysis` job;
+  - it overrides built-in guesses but not user rules or manual rows;
+  - re-filing a half by hand re-runs the user's rows;
+  - no pair link column.
+
+  Open: the credit must come 0–2 days AFTER the debit; revisit if a real bank posts the
+  credit side first
 - Parsing core (Step 5) → decided: `FileType` = csv/xls/pdf (SPEC §5 lists only csv/pdf;
   `xls` added for ICICI, ADR 004 — the Step 7 migration uses these three values);
   `Direction` lives in `app/parsers/base.py` and the Step 7 model imports it from there

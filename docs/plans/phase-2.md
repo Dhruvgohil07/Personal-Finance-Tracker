@@ -361,3 +361,17 @@ and Step 5's narration rules).
   - `GET /transactions` now returns `merchant_key`;
   - VPA rules allow for ICICI's 14-character cut;
   - when Redis is down, the rule change and the re-run commit as one transaction.
+- **Step 8:** done as **ADR 018**, with no migration. Four decisions were confirmed with
+  Dhruv:
+  - **no `post_import_analysis` job**: detection runs at the end of both
+    categorization passes (import and rule re-run), so a rule change re-creates the
+    pairs instead of undoing them. The job name is left for Phase 4 recurring
+    detection;
+  - detection overrides built-in guesses but **not user rules or manual rows**;
+  - re-filing one half of a pair by hand **re-runs** the user's rows, so the partner is
+    re-decided at once;
+  - **no pair link column**.
+
+  The plan's "a tie is left alone" became "a row ambiguous at its nearest gap is
+  closed". Verified on synthetic two- and three-account statements only: just one
+  real account is imported so far.
