@@ -45,7 +45,7 @@ from decimal import Decimal
 import structlog
 from redis.exceptions import RedisError
 from rq import Queue
-from sqlalchemy import ColumnElement, Select, exists, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.categorizer.base import CategorySource, Decision, Handler, TxnFacts, categorize
@@ -74,6 +74,15 @@ SELF_TRANSFER_CONFIDENCE = Decimal("0.80")
 # user said so (decided with Dhruv, ADR 018).
 _PAIRABLE = Transaction.category_source.not_in(
     (CategorySource.USER_MANUAL, CategorySource.USER_RULE)
+)
+# ...with one exception: a row the user filed under Self Transfer BY HAND
+# takes part as an ANCHOR - a fixed half whose partner may be paired to it,
+# while the manual row itself is never written. Without it, confirming one
+# half of a detected pair stripped the other half of its partner, and a
+# transfer marked by hand never found its other half (review of Step 8,
+# decided with Dhruv).
+_MANUAL_ANCHOR = and_(
+    Transaction.category_source == CategorySource.USER_MANUAL, Transaction.is_self_transfer
 )
 
 
@@ -404,14 +413,16 @@ def _detect_self_transfers(
 
     Runs at the end of BOTH categorization passes, under the same per-user
     lock, so a non-manual row always shows "the chain, then detection"
-    (ADR 018). Over all of the user's PAIRABLE rows (`_PAIRABLE`), in every
-    account, because a pair spans two accounts and often two uploads.
+    (ADR 018). Over all of the user's PAIRABLE rows (`_PAIRABLE`) and
+    manual anchors (`_MANUAL_ANCHOR`), in every account, because a pair
+    spans two accounts and often two uploads.
 
     Two things happen:
 
-    - every row in a pair becomes Self Transfer, `heuristic`, 0.80, with
-      `is_self_transfer` set - overriding a built-in guess such as "P2P",
-      which is exactly what a payment to your own account looks like;
+    - every automatic row in a pair becomes Self Transfer, `heuristic`,
+      0.80, with `is_self_transfer` set - overriding a built-in guess such
+      as "P2P", which is exactly what a payment to your own account looks
+      like. A manual anchor in a pair is left exactly as the user set it;
     - a row that WAS detected before but is no longer in a pair (its
       partner was re-filed by hand, or a new import made it ambiguous) is
       re-decided by the chain, instead of staying a self transfer with no
@@ -422,7 +433,9 @@ def _detect_self_transfers(
     `recategorize_user`: a manual choice made meanwhile must win.
     """
     rows = db.scalars(
-        select(Transaction).where(Transaction.user_id == user_id, _PAIRABLE).with_for_update()
+        select(Transaction)
+        .where(Transaction.user_id == user_id, or_(_PAIRABLE, _MANUAL_ANCHOR))
+        .with_for_update()
     ).all()
     pairs = match_self_transfers(
         [
@@ -430,7 +443,13 @@ def _detect_self_transfers(
             for row in rows
         ]
     )
-    paired = {row_id for pair in pairs for row_id in pair}
+    in_a_pair = {row_id for pair in pairs for row_id in pair}
+    # The rows detection WRITES: every paired row except a manual anchor.
+    paired = {
+        row.id
+        for row in rows
+        if row.id in in_a_pair and row.category_source is not CategorySource.USER_MANUAL
+    }
 
     unpaired = [row for row in rows if row.id not in paired and is_detected_self_transfer(row)]
     if unpaired:

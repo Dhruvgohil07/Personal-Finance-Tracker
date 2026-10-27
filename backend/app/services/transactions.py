@@ -159,29 +159,34 @@ def update_transaction(
     `apply_to_similar` (Phase 2 Step 7, SPEC §8.1) learns a rule from the
     correction in the SAME commit as the category, so a 400 "nothing to
     match on" leaves the row unchanged too. The rules are then applied to
-    the user's other rows (`categorization_service.commit_and_recategorize`). The row
-    itself stays `user_manual`: the user chose it.
+    the user's other rows (`categorization_service.commit_and_recategorize`).
+    The row itself stays `user_manual`: the user chose it.
 
-    Re-filing either half of a detected self transfer (Step 8) re-runs the
-    user's rows the same way, so the OTHER half - now without a partner -
-    is re-decided at once instead of staying out of the totals.
+    A category change on a row that is a self transfer before OR after it
+    (Step 8) re-runs the user's rows the same way, because it changes the
+    pairing of another row:
+
+    - re-filing a detected half as something else: the OTHER half has lost
+      its partner and is re-decided, instead of staying out of the totals;
+    - filing a row under Self Transfer by hand (confirming a detected half,
+      or marking a transfer detection missed): the row becomes a manual
+      ANCHOR, and the re-run pairs its other half to it (review of Step 8);
+    - re-filing such an anchor as something else: its partner is released.
     """
     if "category_id" in data.model_fields_set:
         # A category change may end in a re-run inside this transaction
         # (Redis down), so the per-user lock comes BEFORE the row is read
         # or touched - the lock order every run uses (review of Step 8).
         # Taken for every category change, not only the re-running ones,
-        # so `is_detected_self_transfer` below reads a row no run is
+        # so the self-transfer flag below is read from a row no run is
         # changing at that moment.
         categorization_service.lock_categorization(db, user_id)
     transaction = get_transaction(db, user_id, transaction_id)
     changes = data.model_dump(exclude_unset=True)
     # Not a column: an instruction about the category change.
     apply_to_similar = changes.pop("apply_to_similar", False)
-    # Read BEFORE the change below overwrites the source.
-    unpairs = "category_id" in changes and categorization_service.is_detected_self_transfer(
-        transaction
-    )
+    # Read BEFORE the change below may clear it.
+    was_self_transfer = transaction.is_self_transfer
 
     if "category_id" in changes:
         _set_category(db, user_id, transaction, changes["category_id"])
@@ -189,14 +194,16 @@ def update_transaction(
         # An empty or whitespace-only note becomes NULL, so "no note" has
         # exactly one representation in the database.
         transaction.notes = changes["notes"] or None
+    affects_pairing = "category_id" in changes and (
+        was_self_transfer or transaction.is_self_transfer
+    )
     if apply_to_similar:
         rules_service.learn_rule(db, user_id, transaction)
-    if apply_to_similar or unpairs:
+    if apply_to_similar or affects_pairing:
         # Commits this row (and the learned rule), then re-runs the user's
         # other rows - in this same transaction when Redis is down. For a
-        # re-filed half of a detected self transfer, that re-run is what
-        # re-decides its partner, which has just lost its pair (decided
-        # with Dhruv, ADR 018).
+        # self transfer, that re-run is what pairs or releases the other
+        # half (decided with Dhruv, ADR 018).
         categorization_service.commit_and_recategorize(db, queue, user_id)
     else:
         db.commit()
