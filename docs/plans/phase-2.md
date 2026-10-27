@@ -334,3 +334,24 @@ and Step 5's narration rules).
   The "user manual" step is a guard in `categorize`, not a handler. `CategorySource`
   moved to `app/categorizer/base.py`. The user-rule handler is built now; it gets an
   empty rule list until Step 7's table exists. Real share: **89/175 = 50.9%**.
+- **Step 7:** done as migration **0012** (the number from Step 3's review entry) and a
+  new **ADR 017** *User rules and re-categorization*. The plan had no ADR for this
+  step, so the later ADRs move up by one: Step 8 → 018, Step 9 → 019, Step 10 → 020.
+  Three decisions were confirmed with Dhruv:
+  - **every rule change** (create, update, delete, `apply_to_similar`) re-runs the
+    chain over all of the user's non-manual rows. This is one job,
+    `recategorize_user(user_id)`, replacing SPEC §11's `recategorize_by_rule(rule_id)`,
+    because a per-rule job cannot undo a deleted rule;
+  - `apply_to_similar` on a counterparty that already has a rule **updates** that rule
+    (an upsert), and the latest correction wins;
+  - with **Redis down**, the re-run happens inside the request instead of answering
+    503.
+
+  Two other changes from the plan as written:
+  - "nothing to match on" is a **400 `NOTHING_TO_MATCH`**, not a 422 (the rule in
+    app/core/errors.py: 422 is for field errors);
+  - `PATCH /rules/{id}` changes only `category_id` and `priority`, and a different
+    pattern is a new rule.
+
+  **Step 8 must account for this re-run:** it re-decides every non-manual row, so
+  it would undo a detected self transfer (ADR 017, Consequences).
