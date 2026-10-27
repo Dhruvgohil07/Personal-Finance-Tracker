@@ -11,6 +11,7 @@ reference numbers (CLAUDE.md rule 8).
 """
 
 import uuid
+from collections.abc import Callable, Mapping
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -21,9 +22,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.categorizer.base import CategorySource, Decision
+from app.categorizer.base import CategorySource, Handler
+from app.categorizer.handlers import Rule, RuleMatchType, build_chain
 from app.db.seed import run_seed
-from app.models import Category, Merchant, StatementUpload, Transaction
+from app.models import Category, CategoryKind, Merchant, StatementUpload, Transaction, User
 from app.services import categorization as categorization_service
 from app.services.categorization import categorize_upload
 from tests.integration.test_uploads import (
@@ -73,6 +75,14 @@ ROWS = (
     ("7", "07/08/2026", "07/08/2026", "",
      upi("Zomato Ltd", "zomatoorder@yb", "NO REMARK", "YES BANK L", "512345678907"),
      "0.00", "300.00", "98255.00"),
+    # A person paid with the remark "charges": not a bank fee (review)
+    ("8", "08/08/2026", "08/08/2026", "",
+     upi("RAMESH KUM", "9876543211@upi", "charges", "YES BANK L", "512345678908"),
+     "200.00", "0.00", "98055.00"),
+    # A person paid with the remark "hotel": still a person (review)
+    ("9", "09/08/2026", "09/08/2026", "",
+     upi("NEHA PATEL", "9876543212@upi", "hotel", "STATE BANK", "512345678909"),
+     "150.00", "0.00", "97905.00"),
 )  # fmt: skip
 
 
@@ -131,6 +141,8 @@ def test_an_upload_is_categorized_on_import(
         ("cash-withdrawal", CategorySource.KEYWORD, Decimal("0.90"), None),
         ("refunds", CategorySource.KEYWORD, Decimal("0.90"), None),
         ("refunds", CategorySource.MERCHANT, Decimal("0.90"), "ZOMATO"),
+        ("transfers-to-people", CategorySource.HEURISTIC, Decimal("0.70"), None),
+        ("transfers-to-people", CategorySource.HEURISTIC, Decimal("0.70"), None),
     ]
     # The categorizer never decides a self transfer (that is Step 8).
     assert not any(row.is_self_transfer for row in rows)
@@ -171,7 +183,7 @@ def test_the_import_log_counts_categorized_rows(
         import_rows(client, alice, tmp_path)
 
     imported = next(entry for entry in logs if entry["event"] == "statement_imported")
-    assert imported["rows_categorized"] == 6
+    assert imported["rows_categorized"] == 8
 
 
 @pytest.mark.usefixtures("seeded")
@@ -190,21 +202,77 @@ def test_a_merchant_pointing_at_an_unknown_category_leaves_the_row_alone(
     assert moon.category_source is CategorySource.NONE
     # Still linked to its merchant: the link does not depend on the category.
     assert merchant_key_of(db, moon.merchant_id) == "MOONCAFE"
-    warning = next(entry for entry in logs if entry["event"] == "unknown_category_slug")
-    assert warning["category_slug"] == "nope"
+    # ONE line per unknown slug, with the count - not one per row (review).
+    warnings = [entry for entry in logs if entry["event"] == "unknown_category_slug"]
+    assert [(entry["category_slug"], entry["rows_count"]) for entry in warnings] == [("nope", 1)]
 
 
-def test_a_rule_decision_uses_the_rules_category_id_as_is() -> None:
-    """A user rule names its category by id, not by system slug.
+# --- User-rule categories (the rules themselves arrive in Step 7) -------------
+# No rules can exist before Step 7 builds their table, so these tests swap the
+# chain for one with a single rule and run the REAL import loop with it.
 
-    Called directly because no rules can exist before Step 7 builds their
-    table; Step 7's end-to-end tests then cover this path through an upload.
+
+def chain_with_rule(category_id: uuid.UUID) -> Callable[..., list[Handler]]:
+    def build(*, rules: object, merchant_categories: Mapping[str, str]) -> list[Handler]:
+        rule = Rule(RuleMatchType.CONTAINS, "MOON CAFE", category_id)
+        return build_chain(rules=[rule], merchant_categories=merchant_categories)
+
+    return build
+
+
+def own_category(db: Session, email: str) -> uuid.UUID:
+    """A category owned by the user with this email."""
+    user_id = db.scalar(select(User.id).where(User.email == email))
+    category = Category(user_id=user_id, name="Coffee", slug="coffee", kind=CategoryKind.EXPENSE)
+    db.add(category)
+    db.commit()
+    return category.id
+
+
+@pytest.mark.usefixtures("seeded")
+def test_a_rule_may_file_a_row_under_the_users_own_category(
+    client: TestClient,
+    alice: dict[str, str],
+    tmp_path: Path,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coffee = own_category(db, "alice@example.com")
+    monkeypatch.setattr(categorization_service, "build_chain", chain_with_rule(coffee))
+
+    body = import_rows(client, alice, tmp_path)
+
+    moon = transactions_of(db, body["id"])[0]
+    assert moon.category_id == coffee
+    assert moon.category_source is CategorySource.USER_RULE
+
+
+@pytest.mark.usefixtures("seeded")
+def test_a_rule_pointing_at_another_users_category_is_refused(
+    client: TestClient,
+    alice: dict[str, str],
+    make_auth_headers: AuthHeadersFactory,
+    tmp_path: Path,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ownership check where the id is WRITTEN (review of Step 6).
+
+    The insights breakdown joins categories without a user filter (ADR 010),
+    so a stored category_id must always be a system one or the user's own.
     """
-    own_category = uuid.uuid4()
-    decision = Decision(CategorySource.USER_RULE, Decimal("1.00"), category_id=own_category)
+    make_auth_headers("bob@example.com")
+    bobs = own_category(db, "bob@example.com")
+    monkeypatch.setattr(categorization_service, "build_chain", chain_with_rule(bobs))
 
-    # Even with no system categories loaded at all.
-    assert categorization_service._category_id(decision, {}) == own_category
+    with structlog.testing.capture_logs() as logs:
+        body = import_rows(client, alice, tmp_path)
+
+    moon = transactions_of(db, body["id"])[0]
+    assert moon.category_id is None
+    assert moon.category_source is CategorySource.NONE
+    refused = next(entry for entry in logs if entry["event"] == "category_not_usable_by_user")
+    assert refused["rows_count"] == 1
 
 
 def test_without_seeded_categories_nothing_is_categorized(

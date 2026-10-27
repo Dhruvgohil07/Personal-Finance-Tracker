@@ -18,7 +18,7 @@ from enum import StrEnum
 
 from app.categorizer.base import CategorySource, Decision, Handler, TxnFacts
 from app.parsers.base import Channel, Direction
-from app.parsers.narration import dictionary_key
+from app.parsers.narration import key_words
 
 # How sure each kind of handler is (stored in `category_confidence`).
 RULE_CONFIDENCE = Decimal("1.00")  # the user said so
@@ -36,14 +36,18 @@ REFUNDS = "refunds"
 SALARY = "salary"
 TRANSFERS_TO_PEOPLE = "transfers-to-people"
 
-# Words are split the same way the merchant key splits them (narration.py):
-# on anything that is not an uppercase letter or a digit.
-_NOT_WORD_CHARS = re.compile(r"[^A-Z0-9]+")
+# Channels whose narration includes a remark TYPED BY THE PAYER (ICICI's UPI
+# and IMPS layouts both have one). A bank-wording keyword - "CHARGES",
+# "SALARY", "INTEREST" - in such a narration may be the payer's words, not
+# the bank's: paying a plumber with the remark "charges" is not a bank fee.
+# So those keyword rules only read narrations the BANK wrote (review of
+# Step 6).
+_PAYER_REMARK_CHANNELS = frozenset({Channel.UPI, Channel.IMPS})
 
 
-def _words(normalized_description: str) -> set[str]:
-    """The words of a normalized narration, as a set for quick membership tests."""
-    return {word for word in _NOT_WORD_CHARS.split(normalized_description) if word}
+def _words(text: str) -> set[str]:
+    """The words of an uppercase text, split exactly as merchant keys are."""
+    return set(key_words(text))
 
 
 # --- 2. User rules (SPEC §8.1; the table arrives in Step 7) ------------------
@@ -103,10 +107,16 @@ class UserRuleHandler:
 class MerchantHandler:
     """A merchant key found in the merchant dictionary (SPEC §5 `merchants`).
 
-    Looked up with `dictionary_key` (ADR 015 §5a), which also matches the
-    keys ICICI cut short ("SWIGGYLIM" -> SWIGGY). A DEBIT gets the merchant's
-    category; a CREDIT from a merchant is money coming back, so it is a
-    Refund, not spending at that merchant (decided with Dhruv, ADR 016).
+    Reads `facts.dictionary_key`, which the caller looked up once with
+    `dictionary_key` (ADR 015 §5a; it also matches the keys ICICI cut short,
+    "SWIGGYLIM" -> SWIGGY).
+
+    A DEBIT gets the merchant's category. A CREDIT from a merchant is money
+    coming back, so it is a Refund, not spending there (decided with Dhruv,
+    ADR 016) - UNLESS it carries an income keyword. Swiggy, Zomato, Amazon,
+    Flipkart and Airtel are large employers as well as seeded merchants, and
+    their salary credit is income, not a refund. Such a credit is passed on
+    for the keyword handler to decide (review of Step 6).
     """
 
     def __init__(self, merchant_categories: Mapping[str, str]) -> None:
@@ -114,10 +124,15 @@ class MerchantHandler:
         self._categories = merchant_categories
 
     def decide(self, facts: TxnFacts) -> Decision | None:
-        key = dictionary_key(facts.merchant_key, self._categories.keys())
-        if key is None:
+        key = facts.dictionary_key
+        if key is None or key not in self._categories:
             return None
-        slug = self._categories[key] if facts.direction is Direction.DEBIT else REFUNDS
+        if facts.direction is Direction.DEBIT:
+            slug = self._categories[key]
+        elif _income_slug(facts) is not None:
+            return None
+        else:
+            slug = REFUNDS
         return Decision(CategorySource.MERCHANT, MERCHANT_CONFIDENCE, category_slug=slug)
 
 
@@ -140,25 +155,49 @@ class KeywordHandler:
     def _slug(facts: TxnFacts) -> str | None:
         words = _words(facts.normalized_description)
         debit = facts.direction is Direction.DEBIT
+        bank_written = facts.channel not in _PAYER_REMARK_CHANNELS
 
         # --- Seen in the real ICICI statement ---
         # Cash from an ATM ("NFS/CASH WDL/...", "ATW-..."): the channel says it.
         if facts.channel is Channel.ATM and debit:
             return CASH_WITHDRAWAL
-        # BHIM cashback: the remark is printed cut short ("BHIMCASHBA").
-        if not debit and "CASHBA" in facts.normalized_description:
+        # BHIM cashback: paid by NPCI itself ("NPCI BHIM"), with the remark
+        # printed cut short ("BHIMCASHBA"). Requiring the payer keeps a
+        # friend's "cashback" remark out of it.
+        if (
+            not debit
+            and (facts.merchant_key or "").startswith("NPCI")
+            and "CASHBA" in facts.normalized_description
+        ):
             return REFUNDS
 
         # --- SPEC §8's examples, NOT yet seen in a real statement ---
-        if not debit and ("INTEREST" in words or "INT.PD" in facts.normalized_description):
-            return INTEREST
-        if not debit and "SALARY" in words:
-            return SALARY
+        # All bank wording, so none of them reads a payer's remark.
+        income = _income_slug(facts)
+        if income is not None:
+            return income
         if debit and facts.channel is Channel.ACH_NACH and "EMI" in words:
             return EMI_LOANS
-        if debit and words & {"CHARGES", "CHARGE", "CHRG", "CHGS"}:
+        if debit and bank_written and words & {"CHARGES", "CHARGE", "CHRG", "CHGS"}:
             return FEES_CHARGES
         return None
+
+
+def _income_slug(facts: TxnFacts) -> str | None:
+    """Interest or Salary, for a credit whose narration the BANK wrote.
+
+    Shared by `KeywordHandler` and `MerchantHandler` (a merchant's credit
+    with an income keyword is income, not a refund). SPEC §8's examples,
+    not yet seen in a real statement.
+    """
+    if facts.direction is not Direction.CREDIT or facts.channel in _PAYER_REMARK_CHANNELS:
+        return None
+    words = _words(facts.normalized_description)
+    if "INTEREST" in words or "INT.PD" in facts.normalized_description:
+        return INTEREST
+    if "SALARY" in words:
+        return SALARY
+    return None
 
 
 # --- 5. Person-to-person heuristic (SPEC §8.3) ----------------------------------
@@ -222,7 +261,10 @@ class P2PHandler:
 
     - the channel is UPI and the row has a counterparty VPA
     - the VPA is not a merchant QR code (`_MERCHANT_VPA`)
-    - no business word in the narration (`_BUSINESS_WORDS`)
+    - no business word in the counterparty's NAME (`_BUSINESS_WORDS`). When
+      the layout is known, only the name field is read: a remark such as
+      "hotel" says what the money was for, not who received it. Otherwise
+      the whole narration is read, as nothing tells the name apart.
     - no merchant matched - guaranteed by the chain's order, since the
       merchant handler runs first
 
@@ -241,7 +283,8 @@ class P2PHandler:
             return None
         if _MERCHANT_VPA.match(vpa):
             return None
-        if _words(facts.normalized_description) & _BUSINESS_WORDS:
+        who = facts.counterparty_name or facts.normalized_description
+        if _words(who) & _BUSINESS_WORDS:
             return None
         slug = TRANSFERS_TO_PEOPLE if facts.direction is Direction.DEBIT else OTHER_INCOME
         return Decision(CategorySource.HEURISTIC, P2P_CONFIDENCE, category_slug=slug)

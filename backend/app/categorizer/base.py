@@ -59,6 +59,16 @@ class TxnFacts:
     them, and a categorizer that never sees an amount cannot leak one (the
     same data Phase 4 may send to an LLM must stay this small, CLAUDE.md
     §7.4).
+
+    Two fields are worked out ONCE by the caller (app/services/
+    categorization.py), not by each handler:
+
+    - `dictionary_key`: the merchant-dictionary key the merchant key belongs
+      to (`dictionary_key` in app/parsers/narration.py), or None. The
+      service also needs it for `merchant_id`, so it is computed once.
+    - `counterparty_name`: the payee/payer NAME field when the narration's
+      layout is known (`counterparty_name` in narration.py), or None. Lets
+      the P2P check look at who was paid rather than at the remark.
     """
 
     direction: Direction
@@ -66,6 +76,8 @@ class TxnFacts:
     normalized_description: str
     merchant_key: str | None
     counterparty_vpa: str | None
+    dictionary_key: str | None = None
+    counterparty_name: str | None = None
     category_source: CategorySource = CategorySource.NONE
 
 

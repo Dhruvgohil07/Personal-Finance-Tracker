@@ -264,6 +264,39 @@ def name_key(name: str) -> str | None:
     return key if len(key) >= _MIN_KEY_LENGTH else None
 
 
+def key_words(text: str) -> list[str]:
+    """`text` split into words the way merchant keys are built.
+
+    Words are runs of uppercase letters and digits; everything else
+    separates them. The text must already be uppercase (a normalized
+    narration is). Shared with the categorizer, so its keyword and
+    business-word checks see exactly the words the merchant key was built
+    from.
+    """
+    return [word for word in _NOT_KEY_CHARS.split(text) if word]
+
+
+def counterparty_name(raw_description: str) -> str | None:
+    """The counterparty's NAME field of an ICICI UPI or IMPS narration, uppercased.
+
+        "UPI/Moon Cafe/q123456789@ybl/hotel/..."  -> "MOON CAFE"
+        "MMT/IMPS/<RRN>/<remark>/Asha Trade/..."   -> "ASHA TRADE"
+        anything not in those layouts              -> None
+
+    For the categorizer's business-word check (Step 6 review): it must look
+    at WHO was paid, not at the free-text remark the payer typed. Read from
+    the raw narration, because the layouts are confirmed by the RRN, which
+    normalization strips.
+    """
+    channel = detect_channel(raw_description)
+    fields = _fields(raw_description)
+    if channel is Channel.UPI and _is_icici_upi(fields):
+        return fields[1].upper() or None
+    if channel is Channel.IMPS and _is_icici_imps(fields):
+        return fields[-2].upper() or None
+    return None
+
+
 def dictionary_key(merchant_key: str | None, known_keys: Collection[str]) -> str | None:
     """The merchant-dictionary key a merchant key belongs to, if any.
 
