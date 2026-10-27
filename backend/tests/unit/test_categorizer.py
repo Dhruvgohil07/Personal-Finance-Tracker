@@ -41,6 +41,8 @@ def facts(
     channel: Channel = Channel.OTHER,
     merchant_key: str | None = None,
     vpa: str | None = None,
+    dictionary_key: str | None = None,
+    name: str | None = None,
     source: CategorySource = CategorySource.NONE,
 ) -> TxnFacts:
     return TxnFacts(
@@ -49,15 +51,29 @@ def facts(
         normalized_description=description,
         merchant_key=merchant_key,
         counterparty_vpa=vpa,
+        dictionary_key=dictionary_key,
+        counterparty_name=name,
         category_source=source,
     )
 
 
 def upi(
-    name_key: str, vpa: str, *, direction: Direction = D, description: str = "UPI/X"
+    name_key: str,
+    vpa: str,
+    *,
+    direction: Direction = D,
+    description: str = "UPI/X",
+    dictionary_key: str | None = None,
+    name: str | None = None,
 ) -> TxnFacts:
     return facts(
-        description, direction=direction, channel=Channel.UPI, merchant_key=name_key, vpa=vpa
+        description,
+        direction=direction,
+        channel=Channel.UPI,
+        merchant_key=name_key,
+        vpa=vpa,
+        dictionary_key=dictionary_key,
+        name=name,
     )
 
 
@@ -81,7 +97,12 @@ def test_a_decision_names_its_category_exactly_once() -> None:
 
 def test_a_manual_category_is_never_overwritten() -> None:
     # Even a row the chain would categorize with certainty.
-    manual = facts("UPI/ZOMATO", merchant_key="ZOMATO", source=CategorySource.USER_MANUAL)
+    manual = facts(
+        "UPI/ZOMATO",
+        merchant_key="ZOMATO",
+        dictionary_key="ZOMATO",
+        source=CategorySource.USER_MANUAL,
+    )
 
     assert categorize(manual, CHAIN) is None
 
@@ -135,38 +156,72 @@ def test_a_user_rule_beats_the_merchant_dictionary() -> None:
         rules=[Rule(RuleMatchType.MERCHANT, "ZOMATO", GROCERY)], merchant_categories=MERCHANTS
     )
 
-    decision = categorize(facts(merchant_key="ZOMATO"), chain)
+    decision = categorize(facts(merchant_key="ZOMATO", dictionary_key="ZOMATO"), chain)
 
     assert decision is not None and decision.source is CategorySource.USER_RULE
 
 
 # --- 3. Merchant dictionary -----------------------------------------------------
+# The handler reads `dictionary_key`, which the caller looked up once (a key
+# ICICI cut short, "SWIGGYLIM" -> SWIGGY, is tested in test_narration.py).
 
 
 @pytest.mark.parametrize(
-    ("merchant_key", "slug"),
-    [
-        ("ZOMATO", "food-dining"),
-        ("NETFLIX", "subscriptions"),
-        # A key ICICI cut short still finds its merchant (dictionary_key)
-        ("SWIGGYLIM", "food-dining"),
-    ],
+    ("dictionary_key", "slug"),
+    [("ZOMATO", "food-dining"), ("NETFLIX", "subscriptions"), ("SWIGGY", "food-dining")],
 )
-def test_a_merchant_debit_gets_the_merchants_category(merchant_key: str, slug: str) -> None:
-    decision = MerchantHandler(MERCHANTS).decide(facts(merchant_key=merchant_key))
+def test_a_merchant_debit_gets_the_merchants_category(dictionary_key: str, slug: str) -> None:
+    decision = MerchantHandler(MERCHANTS).decide(facts(dictionary_key=dictionary_key))
 
     assert decision == Decision(CategorySource.MERCHANT, MERCHANT_CONFIDENCE, category_slug=slug)
 
 
 def test_a_merchant_credit_is_a_refund() -> None:
-    decision = MerchantHandler(MERCHANTS).decide(facts(direction=C, merchant_key="ZOMATO"))
+    decision = MerchantHandler(MERCHANTS).decide(facts(direction=C, dictionary_key="ZOMATO"))
 
     assert decision is not None and decision.category_slug == "refunds"
 
 
-@pytest.mark.parametrize("merchant_key", [None, "MOONCAFE"])
-def test_an_unknown_merchant_passes_the_row_on(merchant_key: str | None) -> None:
-    assert MerchantHandler(MERCHANTS).decide(facts(merchant_key=merchant_key)) is None
+@pytest.mark.parametrize(
+    "dictionary_key",
+    [
+        None,  # no merchant
+        "MOONCAFE",  # a key the handler's dictionary does not hold
+    ],
+)
+def test_an_unknown_merchant_passes_the_row_on(dictionary_key: str | None) -> None:
+    assert MerchantHandler(MERCHANTS).decide(facts(dictionary_key=dictionary_key)) is None
+
+
+def test_salary_from_a_merchant_employer_is_salary_not_a_refund() -> None:
+    # Swiggy is a seeded merchant AND an employer: its salary credit is
+    # income. The merchant handler passes it on and the keyword rule decides.
+    row = facts(
+        "NEFT CR-HDFC -SWIGGY LTD-SALARY SEP",
+        direction=C,
+        channel=Channel.NEFT,
+        dictionary_key="SWIGGY",
+    )
+
+    assert MerchantHandler(MERCHANTS).decide(row) is None
+    decision = categorize(row, CHAIN)
+    assert decision is not None and decision.category_slug == "salary"
+    assert decision.source is CategorySource.KEYWORD
+
+
+def test_a_merchants_upi_credit_with_a_salary_remark_is_still_a_refund() -> None:
+    # A remark is the payer's text, so it does not make a refund income.
+    row = upi(
+        "ZOMATO",
+        "zomato@hdfcbank",
+        direction=C,
+        description="UPI/ZOMATO/SALARY",
+        dictionary_key="ZOMATO",
+    )
+
+    decision = categorize(row, CHAIN)
+
+    assert decision is not None and decision.category_slug == "refunds"
 
 
 # --- 4. Keywords ------------------------------------------------------------------
@@ -178,13 +233,25 @@ def test_an_unknown_merchant_passes_the_row_on(merchant_key: str | None) -> None
         # Seen in the real statement
         (facts("NFS/CASH WDL/ / /MUMBAI CEN/", channel=Channel.ATM), "cash-withdrawal"),
         (
-            facts("UPI/NPCI BHIM/NPCIBHIMCASH@H/BHIMCASHBA/HDFC BANK/ /X", direction=C),
+            facts(
+                "UPI/NPCI BHIM/NPCIBHIMCASH@H/BHIMCASHBA/HDFC BANK/ /X",
+                direction=C,
+                channel=Channel.UPI,
+                merchant_key="NPCIBHIM",
+            ),
             "refunds",
         ),
         # SPEC §8's examples, not seen in a real statement yet
         (facts("INT.PD: :01-07-2026 TO 30-09-2026", direction=C), "interest"),
         (facts("SAVINGS INTEREST CREDIT", direction=C), "interest"),
-        (facts("NEFT CR-HDFC -ACME TECH SOLUTIONS PVT LTD-SALARY SEP", direction=C), "salary"),
+        (
+            facts(
+                "NEFT CR-HDFC -ACME TECH SOLUTIONS PVT LTD-SALARY SEP",
+                direction=C,
+                channel=Channel.NEFT,
+            ),
+            "salary",
+        ),
         (facts("NACH/EMI PAYMENT TO/ICICI BANK", channel=Channel.ACH_NACH), "emi-loans"),
         (facts("SMS CHARGES FOR QTR JUN-26 INCL GST"), "fees-charges"),
         (facts("ATM CHRG"), "fees-charges"),
@@ -208,8 +275,20 @@ def test_keyword_rules(row: TxnFacts, slug: str) -> None:
         facts("NACH/MUTUAL FUND SIP", channel=Channel.ACH_NACH),
         facts("UPI/EMI SHOP", channel=Channel.UPI),
         # Whole words only: "SALARYMAN" is not "SALARY"
-        facts("UPI/SALARYMAN STORE", direction=C),
+        facts("NEFT CR-SALARYMAN STORE", direction=C, channel=Channel.NEFT),
         facts("UPI/MOON CAFE"),
+        # A remark the PAYER typed in UPI or IMPS is not bank wording (the
+        # review reproduced "charges" -> Fees & Charges for a person)
+        facts("UPI/RAMESH KUM/ @UPI/CHARGES/YES BANK L/ /X", channel=Channel.UPI),
+        facts("UPI/ASHA VERMA/ @UPI/SALARY/YES BANK L/ /X", direction=C, channel=Channel.UPI),
+        facts("MMT/IMPS/ /INTEREST/ASHA TRADE/SBI", direction=C, channel=Channel.IMPS),
+        # Cashback is BHIM's only when NPCI pays it, not a friend's remark
+        facts(
+            "UPI/ASHA VERMA/ @UPI/CASHBACK/YES BANK L/ /X",
+            direction=C,
+            channel=Channel.UPI,
+            merchant_key="ASHAVERMA",
+        ),
     ],
 )
 def test_keyword_rules_do_not_fire_on_lookalikes(row: TxnFacts) -> None:
@@ -268,7 +347,29 @@ def test_a_merchant_qr_code_is_not_a_person(vpa: str) -> None:
     ],
 )
 def test_a_business_word_means_it_is_not_a_person(description: str) -> None:
+    # No known layout (no counterparty name): the whole narration is read.
     assert P2PHandler().decide(upi("X", "9876543210@ybl", description=description)) is None
+
+
+def test_a_business_word_in_the_name_field_means_it_is_not_a_person() -> None:
+    row = upi("CITYMEDICAL", "9876543210@ybl", name="CITY MEDICAL", description="UPI/CITY MEDICAL")
+
+    assert P2PHandler().decide(row) is None
+
+
+def test_a_business_word_in_the_remark_does_not_stop_p2p() -> None:
+    # Paying a friend back for a hotel stay: the remark says what the money
+    # was for, the NAME says who got it (review of Step 6).
+    row = upi(
+        "ASHAVERMA",
+        "9876543210@upi",
+        name="ASHA VERMA",
+        description="UPI/ASHA VERMA/ @UPI/HOTEL/STATE BANK/ /X",
+    )
+
+    decision = P2PHandler().decide(row)
+
+    assert decision is not None and decision.category_slug == "transfers-to-people"
 
 
 @pytest.mark.parametrize(
@@ -287,7 +388,7 @@ def test_p2p_needs_a_upi_row_with_a_vpa(row: TxnFacts) -> None:
 
 def test_the_dictionary_beats_the_p2p_guess() -> None:
     # A merchant paid through a personal-looking VPA is still the merchant.
-    decision = categorize(upi("ZOMATO", "zomato.payments@okaxis"), CHAIN)
+    decision = categorize(upi("ZOMATO", "zomato.payments@okaxis", dictionary_key="ZOMATO"), CHAIN)
 
     assert decision is not None and decision.source is CategorySource.MERCHANT
 

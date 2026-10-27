@@ -14,9 +14,11 @@ from app.parsers.narration import (
     _CHANNEL_BY_FIRST_WORD,
     _KEY_WORTHY_CHANNEL_WORDS,
     Narration,
+    counterparty_name,
     detect_channel,
     dictionary_key,
     extract_vpa,
+    key_words,
     merchant_key_candidate,
     name_key,
     read_narration,
@@ -401,3 +403,28 @@ def test_cut_names_still_find_the_real_seeded_merchant(printed_name: str, seeded
     known = {merchant.normalized_key for merchant in COMMON_MERCHANTS}
 
     assert dictionary_key(name_key(printed_name), known) == seeded
+
+
+# --- key_words / counterparty_name (used by the categorizer) -----------------
+
+
+def test_key_words_split_like_the_merchant_key() -> None:
+    assert key_words("UPI/MOON CAFE/INT.PD:--X") == ["UPI", "MOON", "CAFE", "INT", "PD", "X"]
+    assert key_words("") == []
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (icici_upi("Moon Cafe", "Q123456789@ybl", "hotel"), "MOON CAFE"),
+        # The remark's own "/" does not shift the name (anchored layout)
+        (icici_upi("Asha Verma", "9876543210@upi", "a/b"), "ASHA VERMA"),
+        ("MMT/IMPS/612345678912/Fee 2026/27/Asha Trade/State Bank of I", "ASHA TRADE"),
+        (icici_upi(" ", "Q123456789@ybl"), None),  # a blank name field
+        # No known layout: no name, the categorizer reads the whole narration
+        ("UPI/512345678901/asha.k@okaxis/Rent/YES BANK", None),
+        ("NEFT CR-ACME", None),
+    ],
+)
+def test_counterparty_name(raw: str, expected: str | None) -> None:
+    assert counterparty_name(raw) == expected
