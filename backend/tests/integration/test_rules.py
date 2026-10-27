@@ -352,6 +352,31 @@ def test_changing_the_priority_changes_which_rule_wins(
     assert state(db, rows_of(db, upload_id)[MOON])[0] == "groceries"
 
 
+def test_a_merchant_rule_matches_the_key_the_api_shows(
+    client: TestClient, alice: dict[str, str], tmp_path: Path, db: Session
+) -> None:
+    """How a key is built depends on the bank's layout, so the API shows it
+    and a merchant rule matches it exactly (review of Step 7)."""
+    import_rows(client, alice, tmp_path)
+    items = client.get("/api/v1/transactions", headers=alice).json()["items"]
+    moon = next(item for item in items if item["merchant_key"] == "MOONCAFE")
+
+    create_rule(
+        client,
+        alice,
+        match_type="merchant",
+        pattern=moon["merchant_key"],
+        category_id=system_id(db, "groceries"),
+    )
+
+    response = client.get("/api/v1/transactions", headers=alice).json()["items"]
+    [refiled] = [item for item in response if item["id"] == moon["id"]]
+    assert (refiled["category_id"], refiled["category_source"]) == (
+        system_id(db, "groceries"),
+        "user_rule",
+    )
+
+
 def test_a_rule_applies_to_future_imports(
     client: TestClient, alice: dict[str, str], tmp_path: Path, db: Session
 ) -> None:

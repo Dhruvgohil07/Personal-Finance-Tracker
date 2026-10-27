@@ -43,7 +43,8 @@ class RuleCreate(BaseModel):
 
     match_type: RuleMatchType = Field(
         description=(
-            "`merchant`: the merchant name; `vpa`: the other side's UPI id; "
+            "`merchant`: equals a transaction's `merchant_key` (as GET /transactions "
+            "shows it; spaces and case do not matter); `vpa`: the other side's UPI id; "
             "`contains`: text anywhere in the narration"
         )
     )
