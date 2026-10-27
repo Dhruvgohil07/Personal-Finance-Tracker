@@ -124,3 +124,40 @@ tested.
 - A user with very many rows makes each rule change a longer job. That is fine in the
   background, but slow in the Redis-down fallback. Revisit if a user ever has 100k+
   rows.
+
+## Amendment — code review of PR 22 (9 findings, all addressed)
+Four of these were decided with Dhruv (marked *decided*).
+
+1. **A `contains` pattern holding a number of 6+ digits is refused (422).**
+   Normalization would drop the number silently: "upi 9876543210" became "UPI" and
+   matched every UPI row. Such a number is never in a stored narration anyway.
+2. **Priority ties go to the rule created or changed most recently (`updated_at`),
+   not `created_at`.** This replaces point 4's tie-break. `apply_to_similar`
+   re-teaches an existing rule in place (point 6), so ordering by `created_at` let
+   a rule written after its first version beat the latest correction.
+3. **A `vpa` rule allows for ICICI's cut** (*decided*). Two VPAs are one if they
+   are equal, or if one is exactly 14 characters and the other starts with it
+   (`same_vpa`). The check works both ways round, so a rule learned from a cut
+   `.xls` row also finds full ids from PDFs (Step 9). Ids that differ only after
+   the 14th character are taken for one, because the cut leaves no way to tell them
+   apart.
+4. **`GET /transactions` shows `merchant_key`** (*decided*). How a key is built
+   depends on the bank's layout: the whole name joined for ICICI UPI/IMPS, the
+   first word otherwise. A merchant rule matches the key exactly, so the user can
+   now see the value to type. Matching does not try to guess the layout.
+5. **An IMPS person (no VPA) is still learned by their cut name** (*decided*). It
+   can collide with another person of the same name. IMPS offers no safer key, and
+   refusing would stop learning for every IMPS counterparty.
+6. **When Redis is down, the rule change and the re-run are one transaction**
+   (*decided*). This replaces point 7's commit-first fallback. `commit_and_apply`
+   PINGs Redis before committing. If Redis is down, both commit or neither does, so
+   a failed re-run can no longer leave "500, but the rule is saved" with a 409 on
+   retry. If Redis answers the PING and then refuses the job, the rule is already
+   committed and the re-run follows it; that gap is a few milliseconds wide.
+7. **An update that changes nothing** (`{}`, or the current values) returns
+   without a commit or a re-run.
+8. **One definition of the rule order** (`rules_in_order`), used by the categorizer
+   and by `GET /rules`.
+9. **One definition of "this category makes a self transfer"**
+   (`CategoryKind.marks_self_transfer`), used by manual and automatic
+   categorization.

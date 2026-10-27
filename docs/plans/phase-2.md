@@ -355,3 +355,9 @@ and Step 5's narration rules).
 
   **Step 8 must account for this re-run:** it re-decides every non-manual row, so
   it would undo a detected self transfer (ADR 017, Consequences).
+- **Step 7 review** (`/code-review high` on PR 22, 9 findings, all addressed; ADR 017
+  amendment). No new migration or ADR, so the numbering above stands. Changes to the
+  plan as written:
+  - `GET /transactions` now returns `merchant_key`;
+  - VPA rules allow for ICICI's 14-character cut;
+  - when Redis is down, the rule change and the re-run commit as one transaction.

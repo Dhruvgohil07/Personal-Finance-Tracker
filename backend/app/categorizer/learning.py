@@ -15,6 +15,12 @@ share it. A VPA belongs to one person. For a business it is the other way
 round: one shop or brand pays out through many VPAs (a QR code per counter,
 a payment gateway per app), and the key is what they share.
 
+**A known gap: a person with no VPA.** An IMPS transfer to a person has no
+UPI id, so it falls to the second line and is learned by the person's cut
+name - the collision described above. It is kept on purpose (decided with
+Dhruv, review of Step 7): IMPS offers no safer key, and refusing would stop
+learning for every IMPS counterparty, businesses included. ADR 017 records it.
+
 A "contains" rule is never learned: which part of a narration identifies a
 counterparty is exactly the guess the two options above avoid. The user can
 still write one with `POST /rules`.
