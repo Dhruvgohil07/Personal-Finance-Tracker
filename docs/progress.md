@@ -339,6 +339,19 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   half by hand re-runs the user's rows. No migration, no new job. ADR 018. Verified on
   synthetic two- and three-account statements only (one real account so far).
   1350 tests, 100% coverage
+- [x] Step 8 code review (`/code-review high` on PR 23, 7 findings) — all 7 addressed
+  (ADR 018 amendment):
+  1. manual Self Transfer rows anchor a pair (confirming one half used to strip the
+     other)
+  2. only uncategorized or `heuristic` rows pair: rent and an equal salary no longer
+     erase each other
+  3. deleting an upload or account that breaks a pair re-runs the user's rows
+  4. lock order fixed: a category change takes the per-user lock before the row
+  5. clearing a detected half may re-pair it (documented, decided with Dhruv)
+  6. the import pass reads only the new rows' amounts
+  7. `commit_and_recategorize` moved to the categorization service
+
+  1360 tests, 100% coverage
 
 ## In progress
 - (nothing)
@@ -436,8 +449,13 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   places: `POST/PATCH /rules` (404) and where the id is written
 - Self transfers → decided (ADR 018, with Dhruv):
   - detection runs in every categorization pass, not as a `post_import_analysis` job;
-  - it overrides built-in guesses but not user rules or manual rows;
-  - re-filing a half by hand re-runs the user's rows;
+  - only uncategorized or P2P-`heuristic` rows pair; merchant, keyword and user-rule
+    rows never do (narrowed in the review);
+  - a manual Self Transfer row is an anchor: its partner pairs to it (review);
+  - re-filing a row that is a self transfer before or after re-runs the user's rows,
+    and so does a delete that breaks a pair (review);
+  - clearing a detected half may re-pair it; choose another category to reject a pair
+    (review);
   - no pair link column.
 
   Open: the credit must come 0–2 days AFTER the debit; revisit if a real bank posts the

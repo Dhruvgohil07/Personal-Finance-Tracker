@@ -92,3 +92,39 @@ pass anyway.
   conservative by design: the user can re-file by hand.
 - Only `.xls` and CSV imports exist so far, so pairs across a savings account and a
   credit-card statement wait for a credit-card parser (no sample yet, SPEC §6.2).
+
+## Amendment — code review of PR 23 (7 findings, all addressed)
+Four of these were decided with Dhruv (marked *decided*).
+
+1. **Manual Self Transfer rows are anchors** (*decided*). This replaces point 3's "not
+   manual rows". A row the user filed under Self Transfer takes part in matching as a
+   fixed half. Its automatic partner is paired to it, and the anchor itself is never
+   written. Before, confirming one half by hand stripped the other half of its pair,
+   and a transfer marked by hand never found its other half. This extends point 6: a
+   category change re-runs the user's rows whenever the row is a self transfer
+   **before or after** the change.
+2. **Only uncategorized (`none`) and `heuristic` rows are pairable** (*decided*). This
+   narrows point 3's "everything else". Rows placed by the merchant dictionary, a
+   keyword or (Phase 4) the LLM are never paired. Before, rent of ₹25,000 and a
+   ₹25,000 salary a day later in another account erased each other from the totals.
+   No payment app is a seeded merchant, so card-bill payments through them still
+   pair.
+3. **Deleting an upload or an account that holds half of a pair re-runs the user's
+   rows** once the delete is committed. Before, the other half stayed Self Transfer,
+   out of the totals, with no partner. The re-run follows the commit rather than
+   sharing its transaction: a delete cascades into rows a running import or re-run
+   may hold, so taking the categorization lock inside it could deadlock.
+4. **Lock order: the per-user lock first, rows after.** A category change takes the
+   lock before reading the row. Before, with Redis down, the inline re-run took it
+   while already holding the edited row, which is the reverse of every run's order
+   and so a possible deadlock.
+5. **Clearing a detected half may re-pair it** (*decided*, behaviour kept).
+   `category_id: null` means "let the categorizer decide" for every row. `/docs` now
+   says so, and that choosing another category is how a pair is rejected.
+6. **The import pass reads only rows whose amount a new row has.** This is exact,
+   because a pair only links equal amounts, so each amount pairs independently.
+   Before, every import read and locked every pairable row of the user.
+7. **`commit_and_recategorize` moved from the rules service to the categorization
+   service** (formerly `commit_and_apply`). It is the general "commit, then re-run"
+   mechanism, now used by rules, by re-filed pairs and by deletes
+   (`recategorize_after_commit`).
