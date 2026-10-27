@@ -199,7 +199,12 @@ class TransactionUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     category_id: uuid.UUID | None = Field(
-        default=None, description="A system category or one of your own; null clears it"
+        default=None,
+        description=(
+            "A system category or one of your own; null clears it and lets the automatic "
+            "categorizer decide again - so a detected self transfer may be paired again. "
+            "To reject a pair, choose another category instead."
+        ),
     )
     notes: Notes | None = Field(default=None, description="Your own note; null or empty clears it")
     apply_to_similar: bool = Field(

@@ -556,3 +556,25 @@ def test_equal_amounts_with_a_merchant_or_keyword_side_are_not_paired(
     assert state(db, salary) == ("salary", CategorySource.KEYWORD, False)
     assert state(db, swiggy) == ("food-dining", CategorySource.MERCHANT, False)
     assert state(db, payback) == ("other-income", CategorySource.HEURISTIC, False)
+
+
+# --- Clearing a detected half (review of Step 8, decided with Dhruv) ------------------------
+
+
+@pytest.mark.usefixtures("seeded")
+def test_clearing_a_detected_half_lets_detection_pair_it_again(
+    client: TestClient, alice: dict[str, str], tmp_path: Path, db: Session
+) -> None:
+    """Null means "let the categorizer decide", for every row: the pair is
+    found again. Choosing another category is how a pair is rejected."""
+    savings, other = import_both(client, alice, tmp_path)
+
+    response = client.patch(
+        f"/api/v1/transactions/{rows_of(db, savings)[SENT].id}",
+        json={"category_id": None},
+        headers=alice,
+    )
+
+    assert response.status_code == 200
+    assert state(db, rows_of(db, savings)[SENT]) == PAIRED
+    assert state(db, rows_of(db, other)[0]) == PAIRED
