@@ -8,14 +8,16 @@ account id alone is never enough to reach a row.
 import uuid
 
 import structlog
+from rq import Queue
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.errors import ConflictError, NotFoundError
 from app.db.errors import violates_constraint
-from app.models import Account
+from app.models import Account, Transaction
 from app.schemas.account import AccountCreate, AccountUpdate
+from app.services import categorization as categorization_service
 
 log = structlog.get_logger()
 
@@ -113,13 +115,25 @@ def update_account(
     return account
 
 
-def delete_account(db: Session, user_id: uuid.UUID, account_id: uuid.UUID) -> None:
+def delete_account(db: Session, queue: Queue, user_id: uuid.UUID, account_id: uuid.UUID) -> None:
     """Delete one of the user's accounts (hard delete).
 
     From Step 7 on, its uploads and transactions go with it through
     ON DELETE CASCADE foreign keys.
+
+    A self transfer pairs rows of TWO accounts, so deleting one account can
+    leave the other half of a pair in a surviving account. The user's rows
+    are then re-run once the delete is committed, so that half is
+    re-decided rather than left out of the totals (review of Phase 2
+    Step 8).
     """
     account = get_account(db, user_id, account_id)
+    # Asked before the rows are gone.
+    breaks_a_pair = categorization_service.has_detected_self_transfer(
+        db, user_id, Transaction.account_id == account.id
+    )
     db.delete(account)
     db.commit()
     log.info("account_deleted", user_id=str(user_id), account_id=str(account_id))
+    if breaks_a_pair:
+        categorization_service.recategorize_after_commit(db, queue, user_id)

@@ -8,11 +8,13 @@ one, delete one. Every query is scoped by `user_id` (CLAUDE.md rule 2).
 import uuid
 
 import structlog
+from rq import Queue
 from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import ConflictError, NotFoundError
-from app.models import StatementUpload, UploadStatus
+from app.models import StatementUpload, Transaction, UploadStatus
+from app.services import categorization as categorization_service
 
 log = structlog.get_logger()
 
@@ -67,7 +69,7 @@ def get_upload(db: Session, user_id: uuid.UUID, upload_id: uuid.UUID) -> Stateme
     return upload
 
 
-def delete_upload(db: Session, user_id: uuid.UUID, upload_id: uuid.UUID) -> None:
+def delete_upload(db: Session, queue: Queue, user_id: uuid.UUID, upload_id: uuid.UUID) -> None:
     """Delete an upload and every transaction it inserted (SPEC §10).
 
     The undo button for an import that should not have happened: the wrong
@@ -93,6 +95,10 @@ def delete_upload(db: Session, user_id: uuid.UUID, upload_id: uuid.UUID) -> None
     - **A later upload relies on this one's rows** (`_overlapped_by_later`).
       Deleting the earlier one would silently cut a hole in the later
       statement's period, and that file could not be uploaded again.
+
+    If the upload held half of a detected self transfer, the user's rows
+    are re-run once the delete is committed, so the other half is
+    re-decided rather than left out of the totals (review of Step 8).
     """
     upload = db.scalar(_owned(user_id, upload_id).with_for_update(skip_locked=True))
     if upload is None:
@@ -109,9 +115,17 @@ def delete_upload(db: Session, user_id: uuid.UUID, upload_id: uuid.UUID) -> None
         db.rollback()
         raise ConflictError(OVERLAPPED_BY_LATER_UPLOAD_MESSAGE)
 
+    # Asked before the rows are gone (review of Step 8).
+    breaks_a_pair = categorization_service.has_detected_self_transfer(
+        db, user_id, Transaction.upload_id == upload.id
+    )
     db.delete(upload)
     db.commit()
     log.info("upload_deleted", user_id=str(user_id), upload_id=str(upload_id))
+    if breaks_a_pair:
+        # The other half of a self transfer lost its partner: re-decide it,
+        # or it would stay out of the totals for good.
+        categorization_service.recategorize_after_commit(db, queue, user_id)
 
 
 def _overlapped_by_later(db: Session, upload: StatementUpload) -> bool:

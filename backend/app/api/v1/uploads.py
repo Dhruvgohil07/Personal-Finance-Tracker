@@ -151,12 +151,12 @@ def get_upload(
     responses={**_NOT_FOUND, **_CONFLICT},
     summary="Delete an upload and its transactions",
 )
-def delete_upload(user: CurrentUser, db: DbSession, upload_id: uuid.UUID) -> None:
+def delete_upload(user: CurrentUser, db: DbSession, queue: JobQueue, upload_id: uuid.UUID) -> None:
     """Undo an import: removes the upload and every transaction it added.
 
     Answers 409 while the upload is being processed.
     """
-    uploads_service.delete_upload(db, user.id, upload_id)
+    uploads_service.delete_upload(db, queue, user.id, upload_id)
 
 
 def _ask_to_poll_later(response: Response, status: UploadStatus) -> None:
