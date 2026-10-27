@@ -43,7 +43,7 @@ imports it.
 |---|---|---|---|
 | 1 | User manual | a guard in `categorize`, not a handler: a `user_manual` row is never touched | — |
 | 2 | `UserRuleHandler` | the user's rules, lowest `priority` number first: `merchant` (key equals), `vpa` (equals), `contains` (in the narration) | `user_rule`, 1.00 |
-| 3 | `MerchantHandler` | `dictionary_key` (ADR 015 §5a); a **debit** gets the merchant's category, a **credit** is **Refunds** | `merchant`, 0.90 |
+| 3 | `MerchantHandler` | `dictionary_key` (ADR 015 §5a); a **debit** gets the merchant's category, a **credit** is **Refunds** — unless it carries an income keyword, which is passed on to the keyword handler | `merchant`, 0.90 |
 | 4 | `KeywordHandler` | see point 4 | `keyword`, 0.90 |
 | 5 | `P2PHandler` | see point 5 | `heuristic`, 0.70 |
 | 7 | default | nothing decided: the row stays NULL ("Not categorized yet") | `none` |
@@ -59,8 +59,8 @@ category id, because a user's own category's slug is only unique per user.
 **4. Keyword rules** (decided with Dhruv: SPEC's list, marked unseen):
 - **From the real statement:**
   - the ATM channel on a debit → Cash Withdrawal
-  - a credit whose narration contains `CASHBA` → Refunds (BHIM cashback; ICICI cuts
-    the remark to `BHIMCASHBA`)
+  - a credit paid by NPCI (merchant key `NPCI…`) whose narration contains `CASHBA`
+    → Refunds (BHIM cashback; ICICI cuts the remark to `BHIMCASHBA`)
 - **From SPEC §8, not yet seen in a real statement:**
   - a credit with `INTEREST` or `INT.PD` → Interest
   - a credit with `SALARY` → Salary
@@ -70,12 +70,28 @@ category id, because a user's own category's slug is only unique per user.
 Each rule checks the DIRECTION and matches WHOLE words: interest paid on a loan is
 not income, and "SALARYMAN" is not salary.
 
+The bank-wording rules (interest, salary, charges) **never read a UPI or IMPS
+narration** (added in the review). Both layouts contain a remark TYPED BY THE PAYER,
+so the word may be theirs, not the bank's. The review reproduced the bug: a person
+paid with the remark "charges" became Fees & Charges. A remark is free text and
+says what the money was for, not what kind of transaction it was. The cashback rule
+names its payer for the same reason.
+
 **5. Person-to-person (SPEC §8.3).** A UPI row with a VPA is P2P when:
 - the VPA is not a merchant QR code. The five shapes seen in the real file:
   `q<digits>@`, `gpay-<digit>`, `paytmqr`, `paytm-<digit>`, `vyapar.<digit>`.
-- no business word appears in the narration (`STORE`, `CAFE`, `MEDICAL`, `COLLEGE`,
-  `PVT`, …), a first guess.
+- no business word appears in the counterparty's NAME (`STORE`, `CAFE`, `MEDICAL`,
+  `COLLEGE`, `PVT`, …), a first guess. When the layout is known, only the name
+  field is read (`counterparty_name` in narration.py, added in the review), so a
+  remark such as "hotel" does not stop a real P2P payment. Otherwise the whole
+  narration is read.
 - no merchant matched, which the chain's order guarantees.
+
+**5a. Salary from a merchant employer** (added in the review). Swiggy, Zomato,
+Amazon, Flipkart and Airtel are large employers as well as seeded merchants. A
+credit from one of them that carries an income keyword is passed on by the
+merchant handler, so it becomes Salary or Interest, not a Refund. The income check
+(`_income_slug`) is one function shared by both handlers.
 
 A **debit** is Transfers to People. A **credit** is **Other Income** (decided with
 Dhruv): the summary already counts it as income, so the label agrees with the totals.
@@ -85,12 +101,18 @@ Dhruv): the summary already counts it as income, so the label agrees with the to
   rows appear already categorized and a failure rolls both back;
 - touches only that upload's rows still at `none`, so rows skipped as duplicates
   belong to the upload that inserted them;
-- sets `merchant_id` from `dictionary_key` for every row, whoever decides the
-  category;
+- looks up `dictionary_key` ONCE per row and passes it in `TxnFacts`; it sets
+  `merchant_id` from that key for every row, whoever decides the category;
+- passes the counterparty's name field in `TxnFacts` too. The chain never receives
+  the raw narration;
 - logs `rows_categorized` in `statement_imported`.
 
 If a slug is missing from the database (the seed and the code disagree), the row is
-left uncategorized and the slug is logged; the import does not fail.
+left uncategorized and the import does not fail. A category ID from a user rule is
+written only if it is a system category or the user's own (added in the review).
+ADR 010's unscoped `LEFT JOIN categories` relies on exactly that, so it is enforced
+where the ID is written, not only where rules are created. Both problems are logged
+ONCE per upload, with a row count, not once per row.
 
 **7. The insights bucket for NULL categories is renamed "Not categorized yet"**, so it
 no longer shares its name with the seeded "Uncategorized" category (the user's
