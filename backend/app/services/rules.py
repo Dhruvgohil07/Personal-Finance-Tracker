@@ -54,16 +54,11 @@ RULES_UNIQUE_CONSTRAINT = "uq_category_rules_user_id_match_type_pattern"
 def list_rules(db: Session, user_id: uuid.UUID) -> list[CategoryRule]:
     """All of the user's rules, in the order the categorizer tries them.
 
-    The same order as `_load_rules` in app/services/categorization.py, so
+    The very query the categorizer loads them with (`rules_in_order`), so
     "first in the list" and "wins" mean the same thing. No pagination: a
     user has tens of rules, not thousands.
     """
-    stmt = (
-        select(CategoryRule)
-        .where(CategoryRule.user_id == user_id)
-        .order_by(CategoryRule.priority, CategoryRule.created_at.desc(), CategoryRule.id)
-    )
-    return list(db.scalars(stmt))
+    return list(db.scalars(categorization_service.rules_in_order(user_id)))
 
 
 def get_rule(db: Session, user_id: uuid.UUID, rule_id: uuid.UUID) -> CategoryRule:

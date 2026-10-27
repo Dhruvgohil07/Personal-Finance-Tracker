@@ -40,7 +40,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import structlog
-from sqlalchemy import func, or_, select
+from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.categorizer.base import CategorySource, Decision, Handler, TxnFacts, categorize
@@ -211,23 +211,36 @@ def _load_context(db: Session, user_id: uuid.UUID) -> _Context:
     return _Context(merchants=merchants, usable=_usable_categories(db, user_id), chain=chain)
 
 
-def _load_rules(db: Session, user_id: uuid.UUID) -> list[Rule]:
-    """The user's rules as the chain's plain `Rule`s, in the order they are tried.
+def rules_in_order(user_id: uuid.UUID) -> Select[tuple[CategoryRule]]:
+    """The user's rules, in the order the chain tries them.
 
-    Lowest priority number first; among equal priorities the NEWEST rule
-    first, so the latest correction wins (ADR 017). `UserRuleHandler` sorts
-    by priority with a stable sort, which keeps this order within a
-    priority. `id` makes the order total even for two rules created in the
-    same transaction.
+    The ONE definition of that order, shared by `_load_rules` and by
+    `GET /rules` (app/services/rules.py), so "first in the list" and
+    "wins" can never drift apart (review of Step 7).
+
+    Lowest priority number first; among equal priorities the rule created
+    or CHANGED most recently first, so the latest correction wins (ADR 017).
+    `updated_at`, not `created_at`: a correction that re-teaches an existing
+    rule updates it in place (the upsert in `learn_rule`), and must then
+    beat a rule written after the original one. `id` makes the order total
+    even for two rules changed in the same transaction.
     """
-    stmt = (
+    return (
         select(CategoryRule)
         .where(CategoryRule.user_id == user_id)
-        .order_by(CategoryRule.priority, CategoryRule.created_at.desc(), CategoryRule.id)
+        .order_by(CategoryRule.priority, CategoryRule.updated_at.desc(), CategoryRule.id)
     )
+
+
+def _load_rules(db: Session, user_id: uuid.UUID) -> list[Rule]:
+    """The user's rules as the chain's plain `Rule`s, in `rules_in_order`.
+
+    `UserRuleHandler` sorts by priority with a stable sort, which keeps
+    this order within a priority.
+    """
     return [
         Rule(rule.match_type, rule.pattern, rule.category_id, rule.priority)
-        for rule in db.scalars(stmt)
+        for rule in db.scalars(rules_in_order(user_id))
     ]
 
 

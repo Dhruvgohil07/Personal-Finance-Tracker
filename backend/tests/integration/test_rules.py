@@ -495,6 +495,30 @@ def test_a_second_correction_updates_the_rule_instead_of_adding_one(
     assert state(db, rows[ASHA_2]) == ("health", CategorySource.USER_MANUAL)
 
 
+def test_a_retaught_rule_beats_a_rule_written_after_it(
+    client: TestClient, alice: dict[str, str], tmp_path: Path, db: Session
+) -> None:
+    """Ties go to the rule changed most recently, not created (review of Step 7).
+
+    The upsert keeps the original row, so ordering by `created_at` would
+    leave a re-taught rule behind a rule written after its first version.
+    """
+    upload_id = import_rows(client, alice, tmp_path)
+    moon = rows_of(db, upload_id)[MOON]
+    patch_similar(client, alice, moon, system_id(db, "food-dining"))  # MOONCAFE rule
+    newer = create_rule(
+        client, alice, match_type="contains", pattern="moon", category_id=system_id(db, "groceries")
+    )
+    [first, _] = client.get(RULES, headers=alice).json()
+    assert first["id"] == newer["id"]
+
+    patch_similar(client, alice, moon, system_id(db, "rent"))  # re-teaches MOONCAFE
+
+    [first, second] = client.get(RULES, headers=alice).json()
+    assert (first["match_type"], first["category_id"]) == ("merchant", system_id(db, "rent"))
+    assert second["id"] == newer["id"]
+
+
 def test_apply_to_similar_with_nothing_to_match_changes_nothing(
     client: TestClient, alice: dict[str, str], tmp_path: Path, db: Session
 ) -> None:
