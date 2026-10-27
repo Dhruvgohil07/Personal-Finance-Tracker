@@ -41,7 +41,9 @@ _WHITESPACE = re.compile(r"\s+")
 # The limit is six so that shorter, meaningful numbers survive: a year
 # ("2026"), a store number ("STORE 42"), or an amount printed inside the
 # narration ("12500").
-_LONG_DIGITS = re.compile(r"\d{6,}")
+# Public because a `contains` rule refuses a pattern holding one: it could
+# never be found in a stored narration (app/categorizer/handlers.py).
+LONG_DIGITS = re.compile(r"\d{6,}")
 
 
 def normalize_description(raw_description: str | None) -> str:
@@ -74,7 +76,7 @@ def normalize_description(raw_description: str | None) -> str:
 
     text = raw_description.replace("|", " ")
     text = text.upper()
-    text = _LONG_DIGITS.sub(" ", text)
+    text = LONG_DIGITS.sub(" ", text)
     return _WHITESPACE.sub(" ", text).strip()
 
 
