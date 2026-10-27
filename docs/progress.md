@@ -317,6 +317,20 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   over all of the user's non-manual rows (job `recategorize_user(user_id)`, run in the
   request if Redis is down). A per-user advisory lock serializes import and re-run
   categorization. ADR 017. No new dependency. 1301 tests, 100% coverage
+- [x] Step 7 code review (`/code-review high` on PR 22, 9 findings) — all 9 addressed
+  (ADR 017 amendment):
+  1. a contains pattern holding a 6+ digit number is refused ("upi 9876543210" had
+     become "UPI", matching every UPI row)
+  2. priority ties go to `updated_at`, so a re-taught rule beats a newer one
+  3. VPA rules match VPAs ICICI cut at 14 characters, both ways round
+  4. `GET /transactions` returns `merchant_key`, the value a merchant rule matches
+  5. IMPS people stay learned by cut name (documented, decided with Dhruv)
+  6. with Redis down, the rule change and the re-run are one transaction
+  7. an update that changes nothing skips the commit and the re-run
+  8. one rule order, `rules_in_order`, for the categorizer and `GET /rules`
+  9. one self-transfer rule, `CategoryKind.marks_self_transfer`
+
+  1320 tests, 100% coverage
 
 ## In progress
 - (nothing)
@@ -402,8 +416,11 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   - every rule change re-runs the chain over ALL of the user's non-manual rows
     (`recategorize_user`, not SPEC's `recategorize_by_rule`);
   - `apply_to_similar` on an existing rule updates it (the latest correction wins);
-  - with Redis down, the re-run happens in the request;
-  - ties in priority go to the newest rule;
+  - with Redis down, the re-run happens in the request, in ONE transaction with the
+    rule change (review);
+  - ties in priority go to the rule created or changed most recently (review);
+  - VPA rules allow for ICICI's 14-character cut (review);
+  - an IMPS person is learned by their cut name, a known collision risk (review);
   - nothing to match on is a 400, not a 422;
   - PATCH /rules changes only the category and priority.
 
@@ -646,6 +663,12 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
      sibling now compare against the message constants
 
 ## Known issues
+- **Intermittent (seen 2026-10-27, Step 7 review):**
+  `test_upload_storage.py::test_a_users_uploads_are_found_through_the_user_index[upload_list]`
+  failed once in four full runs. It passes alone (3/3) and in the next full run, and
+  this branch does not touch `statement_uploads`. It asserts an EXPLAIN plan, so it
+  likely depends on table statistics left by earlier tests. Not investigated yet: worth
+  pinning the statistics (or `ANALYZE` in the test) if it shows up again, CI included
 - `GET /insights/categories` over a WHOLE YEAR stops using the date bounds: at ~45% of a
   user's rows the planner reads everything for that user through a `user_id`-prefixed index
   and filters the dates from the heap (20 400 rows scanned, 11 220 discarded, 8.75 ms on
