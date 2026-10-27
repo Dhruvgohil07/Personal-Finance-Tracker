@@ -375,3 +375,13 @@ and Step 5's narration rules).
   The plan's "a tie is left alone" became "a row ambiguous at its nearest gap is
   closed". Verified on synthetic two- and three-account statements only: just one
   real account is imported so far.
+- **Step 8 review** (`/code-review high` on PR 23, 7 findings, all addressed; ADR 018
+  amendment). No migration or new ADR. Three of the four decisions above were
+  refined with Dhruv:
+  - manual Self Transfer rows are pairing **anchors**;
+  - only uncategorized or `heuristic` rows are pairable, never merchant or keyword
+    rows;
+  - clearing a detected half may re-pair it (documented).
+
+  Deletes now re-run when they break a pair, and the import pass reads only the new
+  amounts.
