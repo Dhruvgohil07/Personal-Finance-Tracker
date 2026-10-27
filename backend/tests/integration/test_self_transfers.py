@@ -398,3 +398,55 @@ def test_a_category_change_locks_the_user_before_touching_the_row(
 
     # The re-run that follows takes the lock again (re-entrant in Postgres).
     assert calls[:2] == ["lock", "set_category"]
+
+
+# --- Deleting one half (review of Step 8) --------------------------------------------------
+
+
+@pytest.mark.usefixtures("seeded")
+def test_deleting_one_halfs_upload_re_decides_the_other(
+    client: TestClient, alice: dict[str, str], tmp_path: Path, db: Session
+) -> None:
+    savings, other = import_both(client, alice, tmp_path)
+
+    assert client.delete(f"/api/v1/uploads/{other}", headers=alice).status_code == 204
+
+    # Back in the totals as what the chain says, not a transfer with no partner.
+    assert state(db, rows_of(db, savings)[SENT]) == (
+        "transfers-to-people",
+        CategorySource.HEURISTIC,
+        False,
+    )
+
+
+@pytest.mark.usefixtures("seeded")
+def test_deleting_one_halfs_account_re_decides_the_other(
+    client: TestClient, alice: dict[str, str], tmp_path: Path, db: Session
+) -> None:
+    savings, other = import_both(client, alice, tmp_path)
+    [received] = rows_of(db, other)
+
+    response = client.delete(f"/api/v1/accounts/{received.account_id}", headers=alice)
+
+    assert response.status_code == 204
+    assert state(db, rows_of(db, savings)[SENT])[2] is False
+
+
+@pytest.mark.usefixtures("seeded")
+def test_a_delete_that_breaks_no_pair_does_not_rerun(
+    client: TestClient,
+    alice: dict[str, str],
+    tmp_path: Path,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upload = import_into(client, alice, tmp_path, SAVINGS_ROWS, "1234")
+    [row, *_] = rows_of(db, upload)
+    reruns: list[Any] = []
+    monkeypatch.setattr(
+        categorization_service, "recategorize_after_commit", lambda *args: reruns.append(args)
+    )
+
+    assert client.delete(f"/api/v1/uploads/{upload}", headers=alice).status_code == 204
+    assert client.delete(f"/api/v1/accounts/{row.account_id}", headers=alice).status_code == 204
+    assert reruns == []

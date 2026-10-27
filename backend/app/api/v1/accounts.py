@@ -10,7 +10,7 @@ from http import HTTPStatus
 
 from fastapi import APIRouter
 
-from app.api.deps import CurrentUser, DbSession
+from app.api.deps import CurrentUser, DbSession, JobQueue
 from app.core.errors import ErrorResponse
 from app.schemas.account import AccountCreate, AccountResponse, AccountUpdate
 from app.services import accounts as accounts_service
@@ -51,5 +51,7 @@ def update_account(
 
 # 204 No Content: success, and there is nothing to send back.
 @router.delete("/{account_id}", status_code=HTTPStatus.NO_CONTENT, responses=_NOT_FOUND)
-def delete_account(user: CurrentUser, db: DbSession, account_id: uuid.UUID) -> None:
-    accounts_service.delete_account(db, user.id, account_id)
+def delete_account(
+    user: CurrentUser, db: DbSession, queue: JobQueue, account_id: uuid.UUID
+) -> None:
+    accounts_service.delete_account(db, queue, user.id, account_id)

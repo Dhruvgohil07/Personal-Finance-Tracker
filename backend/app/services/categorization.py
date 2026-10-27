@@ -45,7 +45,7 @@ from decimal import Decimal
 import structlog
 from redis.exceptions import RedisError
 from rq import Queue
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import ColumnElement, Select, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.categorizer.base import CategorySource, Decision, Handler, TxnFacts, categorize
@@ -190,11 +190,44 @@ def commit_and_recategorize(db: Session, queue: Queue, user_id: uuid.UUID) -> No
         return
 
     db.commit()
+    recategorize_after_commit(db, queue, user_id)
+
+
+def recategorize_after_commit(db: Session, queue: Queue, user_id: uuid.UUID) -> None:
+    """Re-run the user's rows after a change that is ALREADY committed.
+
+    Enqueue the job, or run it here as its own transaction if Redis will
+    not take it. Used directly by the deletes (an upload, an account): a
+    delete cascades into rows a running import or re-run may hold, so it
+    must not take the categorization lock inside its own transaction (see
+    `lock_categorization`). The price: if Redis is down AND this inline
+    re-run fails, the delete stands and the re-run waits for the next
+    import or rule change - logged by the caller's error handler.
+    """
     try:
         enqueue_recategorization(queue, user_id)
     except RedisError:
         log.warning("recategorize_enqueue_failed_running_inline", user_id=str(user_id))
         recategorize_user(db, user_id)
+
+
+def has_detected_self_transfer(db: Session, user_id: uuid.UUID, where: ColumnElement[bool]) -> bool:
+    """Does any of the user's rows matching `where` belong to a detected pair?
+
+    Asked by a delete BEFORE it deletes: if it removes half of a pair, the
+    other half needs a re-run, or it would stay out of the totals with no
+    partner (review of Step 8). The same test as `is_detected_self_transfer`,
+    in SQL.
+    """
+    stmt = select(
+        exists().where(
+            Transaction.user_id == user_id,
+            Transaction.category_source == CategorySource.HEURISTIC,
+            Transaction.is_self_transfer,
+            where,
+        )
+    )
+    return bool(db.scalar(stmt))
 
 
 def _queue_is_reachable(queue: Queue) -> bool:
