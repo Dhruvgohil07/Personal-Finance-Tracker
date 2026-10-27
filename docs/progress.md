@@ -309,13 +309,21 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   7. `dictionary_key` is looked up once per row and carried in `TxnFacts`
   8. one word splitter, `key_words`, shared by narration.py and the categorizer
   1236 tests, 100% coverage; real statement unchanged at 89/175 (50.9%)
+- [x] Step 7: User rules + `apply_to_similar` — migration 0012 (`category_rules`),
+  `app/models/category_rule.py`, `schemas/rule.py`, `services/rules.py`,
+  `api/v1/rules.py` (`GET/POST/PATCH/DELETE /rules`), `app/categorizer/learning.py`
+  (`learned_rule_key`: a person's VPA, else the merchant key, else 400
+  `NOTHING_TO_MATCH`), `normalize_rule_pattern`. Every rule change re-runs the chain
+  over all of the user's non-manual rows (job `recategorize_user(user_id)`, run in the
+  request if Redis is down). A per-user advisory lock serializes import and re-run
+  categorization. ADR 017. No new dependency. 1301 tests, 100% coverage
 
 ## In progress
 - (nothing)
 
 ## Next up
-- Phase 2 Step 7: user rules + `apply_to_similar` (`category_rules` table, `/rules`
-  CRUD, re-categorize job; the Step 6 rule handler is ready for it)
+- Phase 2 Step 8: self-transfer detection (ADR 018). It must survive a rule re-run,
+  which re-decides every non-manual row (ADR 017, Consequences)
 - Steps 9–10 (ICICI PDF, password PDFs) are blocked until the ICICI PDF is in `samples/`
 
 ## Open decisions / questions
@@ -390,6 +398,17 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   user before the rule handler can write it
 - Merchant seed → decided (ADR 015, with Dhruv): NOT extended from the real file. Its
   businesses are local shops/campus vendors; user rules (Step 7) learn them per user
+- User rules → decided (ADR 017, with Dhruv):
+  - every rule change re-runs the chain over ALL of the user's non-manual rows
+    (`recategorize_user`, not SPEC's `recategorize_by_rule`);
+  - `apply_to_similar` on an existing rule updates it (the latest correction wins);
+  - with Redis down, the re-run happens in the request;
+  - ties in priority go to the newest rule;
+  - nothing to match on is a 400, not a 422;
+  - PATCH /rules changes only the category and priority.
+
+  The Step 6 check that a rule's category belongs to its user is now enforced in both
+  places: `POST/PATCH /rules` (404) and where the id is written
 - Parsing core (Step 5) → decided: `FileType` = csv/xls/pdf (SPEC §5 lists only csv/pdf;
   `xls` added for ICICI, ADR 004 — the Step 7 migration uses these three values);
   `Direction` lives in `app/parsers/base.py` and the Step 7 model imports it from there
