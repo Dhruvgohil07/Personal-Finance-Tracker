@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 import structlog
 from fastapi.testclient import TestClient
+from redis import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 from rq import Queue
 from sqlalchemy import select
@@ -31,6 +32,7 @@ from app.core.redis import get_redis
 from app.db.seed import run_seed
 from app.models import Category, CategoryKind, CategoryRule, Transaction, User
 from app.schemas.rule import RuleCreate
+from app.services import categorization as categorization_service
 from app.services import rules as rules_service
 from app.services.categorization import recategorize_user
 from app.workers.queue import RECATEGORIZE_USER, enqueue_recategorization
@@ -603,6 +605,11 @@ def test_the_job_carries_only_the_user_id() -> None:
         job.delete()
 
 
+def queue_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make Redis look unreachable to `commit_and_apply`."""
+    monkeypatch.setattr(rules_service, "_queue_is_reachable", lambda queue: False)
+
+
 def test_with_redis_down_the_rules_are_applied_in_the_request(
     client: TestClient,
     alice: dict[str, str],
@@ -610,6 +617,64 @@ def test_with_redis_down_the_rules_are_applied_in_the_request(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    upload_id = import_rows(client, alice, tmp_path)
+    queue_down(monkeypatch)
+
+    with structlog.testing.capture_logs() as logs:
+        create_rule(
+            client,
+            alice,
+            match_type="merchant",
+            pattern="moon cafe",
+            category_id=system_id(db, "groceries"),
+        )
+
+    assert state(db, rows_of(db, upload_id)[MOON]) == ("groceries", CategorySource.USER_RULE)
+    assert any(entry["event"] == "recategorize_queue_down_running_inline" for entry in logs)
+
+
+def test_with_redis_down_a_failed_rerun_saves_nothing(
+    client: TestClient,
+    alice: dict[str, str],
+    tmp_path: Path,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rule change and re-run are one transaction, so a retry starts clean
+    instead of hitting a 409 for a rule that was never applied (review)."""
+    import_rows(client, alice, tmp_path)
+    alice_id = db.scalar(select(User.id).where(User.email == "alice@example.com"))
+    assert alice_id is not None
+    queue_down(monkeypatch)
+
+    def rerun_fails(*args: object) -> None:
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(categorization_service, "_categorize_rows", rerun_fails)
+    body = RuleCreate(
+        match_type=RuleMatchType.MERCHANT,
+        pattern="moon cafe",
+        category_id=uuid.UUID(system_id(db, "groceries")),
+    )
+
+    with pytest.raises(RuntimeError):
+        rules_service.create_rule(
+            db, Queue(TEST_QUEUE_NAME, connection=get_redis()), alice_id, body
+        )
+    db.rollback()  # what closing the request's session does
+
+    assert db.scalar(select(CategoryRule.id)) is None
+
+
+def test_redis_failing_after_the_ping_still_applies_the_rule(
+    client: TestClient,
+    alice: dict[str, str],
+    tmp_path: Path,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The narrow race: Redis answered the PING, then refused the job. The
+    rule is committed by then, so the re-run happens after it."""
     upload_id = import_rows(client, alice, tmp_path)
 
     def redis_down(queue: Queue, user_id: uuid.UUID) -> None:
@@ -628,3 +693,39 @@ def test_with_redis_down_the_rules_are_applied_in_the_request(
 
     assert state(db, rows_of(db, upload_id)[MOON]) == ("groceries", CategorySource.USER_RULE)
     assert any(entry["event"] == "recategorize_enqueue_failed_running_inline" for entry in logs)
+
+
+def test_an_unreachable_redis_is_detected() -> None:
+    # Nothing listens on port 1; the short timeout keeps the test fast.
+    dead = Redis(host="127.0.0.1", port=1, socket_connect_timeout=0.2)
+
+    assert rules_service._queue_is_reachable(Queue("unused", connection=dead)) is False
+    assert rules_service._queue_is_reachable(Queue("unused", connection=get_redis())) is True
+
+
+# --- An update that changes nothing (review of Step 7) -----------------------------------
+
+
+def test_an_update_that_changes_nothing_does_not_rerun(
+    client: TestClient,
+    alice: dict[str, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rule = create_rule(
+        client, alice, match_type="contains", pattern="moon", category_id=system_id(db, "rent")
+    )
+    enqueued: list[uuid.UUID] = []
+    monkeypatch.setattr(
+        rules_service, "enqueue_recategorization", lambda queue, user_id: enqueued.append(user_id)
+    )
+    url = f"{RULES}/{rule['id']}"
+
+    for body in ({}, {"priority": 100}, {"category_id": rule["category_id"], "priority": 100}):
+        response = client.patch(url, json=body, headers=alice)
+        assert response.status_code == 200
+        assert response.json()["updated_at"] == rule["updated_at"]  # not even saved
+    assert enqueued == []
+
+    client.patch(url, json={"priority": 5}, headers=alice)
+    assert len(enqueued) == 1
