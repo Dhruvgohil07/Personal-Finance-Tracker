@@ -11,7 +11,8 @@ Every job follows the same three rules from the SPEC:
    (see `process_upload`).
 3. **On final failure it marks the upload `failed`** with a message the
    user can read, so a client polling `GET /uploads/{id}` is never left
-   looking at `processing` forever.
+   looking at `processing` forever. (Only `process_statement` has an
+   upload to mark; `cleanup` and `recategorize_user` have no status.)
 
 The work itself is in `app/services/imports.py`; a job is only the thin
 wrapper that gives the service a session, the same way a route is a thin
@@ -44,6 +45,7 @@ from sqlalchemy.orm import sessionmaker
 from app.core.config import get_settings
 from app.core.redis import get_redis
 from app.db.session import SessionLocal, build_unpooled_engine
+from app.services import categorization as categorization_service
 from app.services import cleanup as cleanup_service
 from app.services import imports as imports_service
 from app.workers.queue import PROCESS_STATEMENT, statement_job_waiting_check
@@ -90,6 +92,17 @@ def cleanup() -> None:
             now=datetime.now(UTC),
             job_is_waiting=statement_job_waiting_check(get_redis()),
         )
+
+
+def recategorize_user(user_id: str) -> None:
+    """Re-run the categorizer over a user's rows after their rules changed (ADR 017).
+
+    Enqueued by app/services/rules.py with the user id as the only argument.
+    Safe to run again: with the same rules it changes nothing. A user
+    deleted in the meantime simply has no rows left to look at.
+    """
+    with SessionLocal() as db:
+        categorization_service.recategorize_user(db, uuid.UUID(user_id))
 
 
 def on_process_statement_failure(

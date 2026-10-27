@@ -11,7 +11,6 @@ reference numbers (CLAUDE.md rule 8).
 """
 
 import uuid
-from collections.abc import Callable, Mapping
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -22,12 +21,19 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.categorizer.base import CategorySource, Handler
-from app.categorizer.handlers import Rule, RuleMatchType, build_chain
+from app.categorizer.base import CategorySource
+from app.categorizer.handlers import RuleMatchType
 from app.db.seed import run_seed
-from app.models import Category, CategoryKind, Merchant, StatementUpload, Transaction, User
-from app.services import categorization as categorization_service
-from app.services.categorization import categorize_upload
+from app.models import (
+    Category,
+    CategoryKind,
+    CategoryRule,
+    Merchant,
+    StatementUpload,
+    Transaction,
+    User,
+)
+from app.services.categorization import categorize_upload, recategorize_user
 from tests.integration.test_uploads import (
     AuthHeadersFactory,
     import_file,
@@ -207,17 +213,25 @@ def test_a_merchant_pointing_at_an_unknown_category_leaves_the_row_alone(
     assert [(entry["category_slug"], entry["rows_count"]) for entry in warnings] == [("nope", 1)]
 
 
-# --- User-rule categories (the rules themselves arrive in Step 7) -------------
-# No rules can exist before Step 7 builds their table, so these tests swap the
-# chain for one with a single rule and run the REAL import loop with it.
+# --- User-rule categories -----------------------------------------------------
+# The rules are written straight into `category_rules` (Step 7's table), so
+# a rule the API would refuse - another user's category - can be stored too,
+# and the check where the id is WRITTEN is tested on its own.
 
 
-def chain_with_rule(category_id: uuid.UUID) -> Callable[..., list[Handler]]:
-    def build(*, rules: object, merchant_categories: Mapping[str, str]) -> list[Handler]:
-        rule = Rule(RuleMatchType.CONTAINS, "MOON CAFE", category_id)
-        return build_chain(rules=[rule], merchant_categories=merchant_categories)
-
-    return build
+def store_rule(db: Session, email: str, category_id: uuid.UUID) -> None:
+    """A "MOON CAFE" rule for the user with this email."""
+    user_id = db.scalar(select(User.id).where(User.email == email))
+    assert user_id is not None
+    db.add(
+        CategoryRule(
+            user_id=user_id,
+            match_type=RuleMatchType.CONTAINS,
+            pattern="MOON CAFE",
+            category_id=category_id,
+        )
+    )
+    db.commit()
 
 
 def own_category(db: Session, email: str) -> uuid.UUID:
@@ -231,14 +245,10 @@ def own_category(db: Session, email: str) -> uuid.UUID:
 
 @pytest.mark.usefixtures("seeded")
 def test_a_rule_may_file_a_row_under_the_users_own_category(
-    client: TestClient,
-    alice: dict[str, str],
-    tmp_path: Path,
-    db: Session,
-    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient, alice: dict[str, str], tmp_path: Path, db: Session
 ) -> None:
     coffee = own_category(db, "alice@example.com")
-    monkeypatch.setattr(categorization_service, "build_chain", chain_with_rule(coffee))
+    store_rule(db, "alice@example.com", coffee)
 
     body = import_rows(client, alice, tmp_path)
 
@@ -254,16 +264,17 @@ def test_a_rule_pointing_at_another_users_category_is_refused(
     make_auth_headers: AuthHeadersFactory,
     tmp_path: Path,
     db: Session,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The ownership check where the id is WRITTEN (review of Step 6).
 
     The insights breakdown joins categories without a user filter (ADR 010),
     so a stored category_id must always be a system one or the user's own.
+    `POST /rules` refuses such a rule (tests/integration/test_rules.py);
+    this proves the import does not rely on that alone.
     """
     make_auth_headers("bob@example.com")
     bobs = own_category(db, "bob@example.com")
-    monkeypatch.setattr(categorization_service, "build_chain", chain_with_rule(bobs))
+    store_rule(db, "alice@example.com", bobs)
 
     with structlog.testing.capture_logs() as logs:
         body = import_rows(client, alice, tmp_path)
@@ -273,6 +284,32 @@ def test_a_rule_pointing_at_another_users_category_is_refused(
     assert moon.category_source is CategorySource.NONE
     refused = next(entry for entry in logs if entry["event"] == "category_not_usable_by_user")
     assert refused["rows_count"] == 1
+
+
+@pytest.mark.usefixtures("seeded")
+def test_a_rerun_refuses_another_users_category_too(
+    client: TestClient,
+    alice: dict[str, str],
+    make_auth_headers: AuthHeadersFactory,
+    tmp_path: Path,
+    db: Session,
+) -> None:
+    """The same write-time check in `recategorize_user` (Step 7), logged
+    without an upload id because a re-run spans all of the user's uploads."""
+    make_auth_headers("bob@example.com")
+    body = import_rows(client, alice, tmp_path)
+    store_rule(db, "alice@example.com", own_category(db, "bob@example.com"))
+    alice_id = db.scalar(select(User.id).where(User.email == "alice@example.com"))
+    assert alice_id is not None
+
+    with structlog.testing.capture_logs() as logs:
+        recategorize_user(db, alice_id)
+
+    db.expire_all()
+    assert transactions_of(db, body["id"])[0].category_id is None
+    refused = next(entry for entry in logs if entry["event"] == "category_not_usable_by_user")
+    assert refused["rows_count"] == 1
+    assert "upload_id" not in refused
 
 
 def test_without_seeded_categories_nothing_is_categorized(

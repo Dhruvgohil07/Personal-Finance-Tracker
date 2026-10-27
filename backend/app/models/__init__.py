@@ -7,6 +7,7 @@ isn't imported here is invisible to migrations.
 
 from app.models.account import Account, AccountType, BankCode
 from app.models.category import Category, CategoryKind
+from app.models.category_rule import CategoryRule
 from app.models.merchant import Merchant
 from app.models.refresh_token import RefreshToken
 from app.models.statement_upload import StatementUpload, UploadStatus
@@ -21,6 +22,7 @@ __all__ = [
     "DEFAULT_USER_SETTINGS",
     "Category",
     "CategoryKind",
+    "CategoryRule",
     "CategorySource",
     "Channel",
     "Merchant",

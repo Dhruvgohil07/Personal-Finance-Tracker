@@ -183,17 +183,17 @@ class TransactionUpdate(BaseModel):
     "field set to null" are therefore different requests, which the
     service tells apart with `model_dump(exclude_unset=True)`.
 
-    `is_self_transfer` and `apply_to_similar` are in SPEC §10 but are not
-    accepted here, so sending them is a 422 rather than a field that
-    quietly does nothing:
+    `apply_to_similar=true` (Phase 2 Step 7, SPEC §8.1) also learns a rule
+    from the correction, so every similar row - past and future - is filed
+    the same way (see `update_transaction` and app/services/rules.py).
 
-    - `apply_to_similar` needs the learned rules of SPEC §8.1 (Phase 2).
-    - `is_self_transfer` is not a free-standing switch. It is derived from
-      the category: choosing a category of kind `transfer` sets it, any
-      other category clears it (see `_set_category` in
-      app/services/transactions.py). That keeps the flag the insights read
-      in step with the category the user can see, instead of offering two
-      controls that can contradict each other.
+    `is_self_transfer` is in SPEC §10 but is not accepted here, so sending
+    it is a 422 rather than a field that quietly does nothing. It is not a
+    free-standing switch: it is derived from the category. Choosing a
+    category of kind `transfer` sets it, any other category clears it (see
+    `_set_category` in app/services/transactions.py). That keeps the flag
+    the insights read in step with the category the user can see, instead
+    of offering two controls that can contradict each other.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -202,6 +202,22 @@ class TransactionUpdate(BaseModel):
         default=None, description="A system category or one of your own; null clears it"
     )
     notes: Notes | None = Field(default=None, description="Your own note; null or empty clears it")
+    apply_to_similar: bool = Field(
+        default=False,
+        description=(
+            "Also file every similar transaction (same person's UPI id, or same merchant) "
+            "under this category, now and in future imports"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _similar_needs_a_category(self) -> "TransactionUpdate":
+        # "File everything like this under... nothing" is not a rule. A
+        # model validator because it reads two fields; `category_id` must
+        # have been SENT, and not as null.
+        if self.apply_to_similar and self.category_id is None:
+            raise ValueError("apply_to_similar needs a category_id")
+        return self
 
 
 class TransactionResponse(BaseModel):

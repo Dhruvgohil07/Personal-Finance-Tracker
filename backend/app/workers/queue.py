@@ -9,7 +9,8 @@ each other directly; Redis sits between them.
 
 Two rules from the SPEC shape this module:
 
-- **A job's only argument is the upload id** (SPEC §11, CLAUDE.md §7.2).
+- **A job's only argument is an id** - the upload's, or for a job about a
+  whole user, the user's (SPEC §11, CLAUDE.md §7.2).
   Everything else the worker needs is read from the database. Job
   arguments are stored in Redis in plain pickle, so anything put there -
   a statement password, a filename - would sit in Redis unencrypted.
@@ -40,6 +41,7 @@ PROCESS_STATEMENT = "app.workers.jobs.process_statement"
 ON_PROCESS_STATEMENT_FAILURE = "app.workers.jobs.on_process_statement_failure"
 ON_PROCESS_STATEMENT_STOPPED = "app.workers.jobs.on_process_statement_stopped"
 CLEANUP = "app.workers.jobs.cleanup"
+RECATEGORIZE_USER = "app.workers.jobs.recategorize_user"
 
 # How often, and after how long, an unexpected error is retried: 3 more
 # attempts, 10 s, 1 min and 5 min after the failures before them. Meant for
@@ -134,6 +136,29 @@ def enqueue_statement_processing(queue: Queue, upload_id: uuid.UUID) -> Job:
         # worker, not the job (see app/workers/jobs.py).
         on_failure=Callback(ON_PROCESS_STATEMENT_FAILURE),
         on_stopped=Callback(ON_PROCESS_STATEMENT_STOPPED),
+        failure_ttl=int(FAILURE_TTL.total_seconds()),
+    )
+
+
+def enqueue_recategorization(queue: Queue, user_id: uuid.UUID) -> Job:
+    """Put a `recategorize_user(user_id)` job on the queue (ADR 017).
+
+    Enqueued after every change to a user's rules. Its only argument is
+    the user id, never the rule: a `vpa` rule's pattern is a person's UPI
+    id, and job arguments sit in Redis unencrypted (see the module
+    docstring). Everything else is read from the database when it runs.
+
+    Raises `redis.exceptions.RedisError` when Redis cannot be reached; the
+    caller (`app/services/rules.py`) then runs the same work in the request.
+
+    Retried like an import for a database blip. No failure callback: there
+    is no status to mark, and the rows simply keep their previous
+    categories until the next rule change runs the job again.
+    """
+    return queue.enqueue(
+        RECATEGORIZE_USER,
+        str(user_id),
+        retry=Retry(max=RETRY_MAX, interval=RETRY_INTERVALS_SECONDS),
         failure_ttl=int(FAILURE_TTL.total_seconds()),
     )
 

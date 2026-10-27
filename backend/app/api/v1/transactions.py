@@ -19,7 +19,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 
-from app.api.deps import CurrentUser, DbSession
+from app.api.deps import CurrentUser, DbSession, JobQueue
 from app.core.errors import ErrorResponse
 from app.schemas.transaction import (
     TransactionFilters,
@@ -61,17 +61,26 @@ def list_transactions(
 @router.patch(
     "/{transaction_id}",
     response_model=TransactionResponse,
-    responses=_NOT_FOUND,
+    responses={HTTPStatus.BAD_REQUEST: {"model": ErrorResponse}, **_NOT_FOUND},
     summary="Categorize a transaction or add a note",
 )
 def update_transaction(
-    user: CurrentUser, db: DbSession, transaction_id: uuid.UUID, body: TransactionUpdate
+    user: CurrentUser,
+    db: DbSession,
+    queue: JobQueue,
+    transaction_id: uuid.UUID,
+    body: TransactionUpdate,
 ) -> TransactionResponse:
     """Set the category and/or your own note on one transaction.
 
     Send only the fields you want to change. A category you choose here is
     recorded as `user_manual`, which protects it from being overwritten by
     the automatic categorizer later; sending `null` clears it again.
+
+    With `apply_to_similar: true`, a rule is also saved (see `/rules`) and
+    your other transactions with the same person or merchant are
+    re-categorized in the background. Answers 400 if this transaction has
+    no merchant name or UPI id to recognise similar ones by.
     """
-    transaction = transactions_service.update_transaction(db, user.id, transaction_id, body)
+    transaction = transactions_service.update_transaction(db, queue, user.id, transaction_id, body)
     return TransactionResponse.model_validate(transaction)
