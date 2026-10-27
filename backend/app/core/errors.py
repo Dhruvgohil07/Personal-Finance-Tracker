@@ -131,6 +131,16 @@ class InvalidStatementError(AppError):
     message = "The statement could not be read."
 
 
+class NothingToMatchError(AppError):
+    # `apply_to_similar=true` on a transaction that carries nothing a rule
+    # could recognise again - no merchant name, no UPI id (a cash
+    # withdrawal, say). 400 for the same reason as InvalidStatementError:
+    # every field is valid, it is the transaction that cannot be used.
+    status_code = HTTPStatus.BAD_REQUEST
+    code = "NOTHING_TO_MATCH"
+    message = "This transaction has nothing to recognise similar ones by."
+
+
 class ServiceUnavailableError(AppError):
     # Something we depend on is down, e.g. Redis, so an upload could not be
     # handed to the worker. 503 tells the client "try again later": nothing

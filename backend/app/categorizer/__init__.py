@@ -7,4 +7,5 @@ to the database. A test enforces the purity (tests/unit/test_categorizer.py).
 
     base.py      the facts a decision is made from, the decision, the chain
     handlers.py  one handler per step of SPEC §8's chain
+    learning.py  what a correction's rule matches on (SPEC §8.1)
 """

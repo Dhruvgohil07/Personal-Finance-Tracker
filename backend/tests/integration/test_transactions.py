@@ -875,9 +875,12 @@ def test_an_unknown_transaction_is_not_found(client: TestClient, alice: Owner) -
 @pytest.mark.parametrize(
     ("body", "field"),
     [
-        # Phase 2 fields: rejected, not silently ignored.
+        # Derived from the category, never set directly: rejected, not
+        # silently ignored.
         ({"is_self_transfer": True}, "body.is_self_transfer"),
-        ({"apply_to_similar": True}, "body.apply_to_similar"),
+        # Accepted since Phase 2 Step 7, but only with a category. The check
+        # reads two fields, so the error is on the body as a whole.
+        ({"apply_to_similar": True}, "body"),
         ({"notes": "x" * 501}, "body.notes"),
         # A NUL byte cannot be stored in a text column at all.
         ({"notes": "bad\u0000note"}, "body.notes"),

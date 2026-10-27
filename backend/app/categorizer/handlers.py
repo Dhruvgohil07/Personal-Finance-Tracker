@@ -18,7 +18,8 @@ from enum import StrEnum
 
 from app.categorizer.base import CategorySource, Decision, Handler, TxnFacts
 from app.parsers.base import Channel, Direction
-from app.parsers.narration import key_words
+from app.parsers.narration import key_words, name_key
+from app.parsers.normalize import normalize_description
 
 # How sure each kind of handler is (stored in `category_confidence`).
 RULE_CONFIDENCE = Decimal("1.00")  # the user said so
@@ -50,7 +51,7 @@ def _words(text: str) -> set[str]:
     return set(key_words(text))
 
 
-# --- 2. User rules (SPEC §8.1; the table arrives in Step 7) ------------------
+# --- 2. User rules (SPEC §8.1; stored in `category_rules` since Step 7) ------
 
 
 class RuleMatchType(StrEnum):
@@ -61,12 +62,58 @@ class RuleMatchType(StrEnum):
     CONTAINS = "contains"  # the normalized narration contains the pattern
 
 
+# A pattern this short would match far too much ("A" is in every narration).
+MIN_PATTERN_LENGTH = 3
+# What a stored VPA can contain, lowercased (app/parsers/narration.py `_VPA`).
+# No "@" required: ICICI cuts VPAs short, sometimes before the handle.
+_VPA_PATTERN = re.compile(r"[a-z0-9.\-_@]+")
+
+
+def normalize_rule_pattern(match_type: RuleMatchType, pattern: str) -> str:
+    """A rule's pattern as the user typed it -> the form it is stored and matched in.
+
+    Each match type is normalized exactly like the transaction field it is
+    compared with, so "Moon Cafe" finds the rows whose key is "MOONCAFE":
+
+    - merchant: `name_key`, the function that built the stored keys
+    - vpa:      lowercase, as stored VPAs are
+    - contains: `normalize_description`, the function that built the stored
+                narrations (uppercase, long digit runs out, spaces collapsed)
+
+    Raises ValueError (a 422 when called from a Pydantic validator) for a
+    pattern that would match nothing or far too much.
+    """
+    if match_type is RuleMatchType.MERCHANT:
+        key = name_key(pattern)
+        if key is None:
+            raise ValueError(
+                f"a merchant name needs at least {MIN_PATTERN_LENGTH} letters or digits, "
+                "and not only digits"
+            )
+        return key
+    if match_type is RuleMatchType.VPA:
+        vpa = pattern.strip().lower()
+        if len(vpa) < MIN_PATTERN_LENGTH or not _VPA_PATTERN.fullmatch(vpa):
+            raise ValueError(
+                f"a UPI id has at least {MIN_PATTERN_LENGTH} characters: "
+                "letters, digits, '.', '-', '_' and '@'"
+            )
+        return vpa
+    text = normalize_description(pattern)
+    if len(text) < MIN_PATTERN_LENGTH:
+        raise ValueError(f"the text to look for needs at least {MIN_PATTERN_LENGTH} characters")
+    return text
+
+
 @dataclass(frozen=True)
 class Rule:
-    """One of the user's rules, as plain data (Step 7 loads them from the DB).
+    """One of the user's rules, as plain data (loaded from `category_rules`).
 
     `priority`: a LOWER number is tried first (1 before 2), so "first" in a
     list the user sees and "first" in the chain mean the same thing.
+
+    The pattern arrives normalized for its match type (app/schemas/rule.py
+    does it on the way in), so each comparison below is exact.
     """
 
     match_type: RuleMatchType
@@ -278,16 +325,27 @@ class P2PHandler:
     """
 
     def decide(self, facts: TxnFacts) -> Decision | None:
-        vpa = facts.counterparty_vpa
-        if facts.channel is not Channel.UPI or not vpa:
-            return None
-        if _MERCHANT_VPA.match(vpa):
-            return None
-        who = facts.counterparty_name or facts.normalized_description
-        if _words(who) & _BUSINESS_WORDS:
+        if not looks_like_person(facts):
             return None
         slug = TRANSFERS_TO_PEOPLE if facts.direction is Direction.DEBIT else OTHER_INCOME
         return Decision(CategorySource.HEURISTIC, P2P_CONFIDENCE, category_slug=slug)
+
+
+def looks_like_person(facts: TxnFacts) -> bool:
+    """The VPA-shape half of the P2P test (the first three bullets above).
+
+    A function of its own because rule learning asks the same question
+    (app/categorizer/learning.py): a person is best matched by their VPA.
+    The fourth bullet - no merchant matched - is the CALLER's: the chain
+    guarantees it by order, rule learning checks `dictionary_key` itself.
+    """
+    vpa = facts.counterparty_vpa
+    if facts.channel is not Channel.UPI or not vpa:
+        return False
+    if _MERCHANT_VPA.match(vpa):
+        return False
+    who = facts.counterparty_name or facts.normalized_description
+    return not _words(who) & _BUSINESS_WORDS
 
 
 # --- The chain ------------------------------------------------------------------

@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from app.categorizer.handlers import RuleMatchType
 from app.db.base import Base
 from app.models import (
     Account,
@@ -28,6 +29,7 @@ from app.models import (
     BankCode,
     Category,
     CategoryKind,
+    CategoryRule,
     Merchant,
     RefreshToken,
     UploadBlob,
@@ -44,6 +46,7 @@ MERCHANT_ID = uuid.UUID("66666666-6666-4666-8666-666666666666")
 TOKEN_ID = uuid.UUID("77777777-7777-4777-8777-777777777777")
 FAMILY_ID = uuid.UUID("88888888-8888-4888-8888-888888888888")
 UPLOAD_ID = uuid.UUID("99999999-9999-4999-8999-999999999999")
+RULE_ID = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 
 # The values that must never show up in a repr.
 EMAIL = "dhruv@example.com"
@@ -55,7 +58,9 @@ TOKEN_HASH = "9e107d9d372bb6826bd81d3542a419d6" * 2
 # A blob's bytes. Encrypted in real life, but a repr must not show them in
 # any form, so the test uses readable ones that would be easy to spot.
 BLOB_CONTENT = b"UPI/RAMESHKUMAR/PAY 250.00"
+VPA = "ramesh.kumar@okaxis"
 SENSITIVE = (
+    VPA,
     EMAIL,
     PASSWORD_HASH,
     HOLDER_NAME,
@@ -120,6 +125,17 @@ def make_upload_blob() -> UploadBlob:
     return UploadBlob(upload_id=UPLOAD_ID, encrypted_content=BLOB_CONTENT, nonce=bytes(12))
 
 
+def make_category_rule() -> CategoryRule:
+    # A `vpa` rule: its pattern is a person's UPI id.
+    return CategoryRule(
+        id=RULE_ID,
+        user_id=USER_ID,
+        match_type=RuleMatchType.VPA,
+        pattern=VPA,
+        category_id=CATEGORY_ID,
+    )
+
+
 # --- The exact text of each repr ------------------------------------------
 
 
@@ -155,6 +171,11 @@ def test_upload_blob_repr_is_the_upload_id_alone() -> None:
     assert repr(make_upload_blob()) == f"UploadBlob(upload_id={UPLOAD_ID})"
 
 
+def test_category_rule_repr_is_the_id_and_match_type() -> None:
+    # Not the pattern: for a `vpa` rule it identifies a person.
+    assert repr(make_category_rule()) == f"CategoryRule(id={RULE_ID}, match_type='vpa')"
+
+
 # --- The rule itself ------------------------------------------------------
 
 
@@ -168,6 +189,7 @@ def test_upload_blob_repr_is_the_upload_id_alone() -> None:
         make_merchant(),
         make_refresh_token(),
         make_upload_blob(),
+        make_category_rule(),
     ],
     ids=[
         "user",
@@ -177,6 +199,7 @@ def test_upload_blob_repr_is_the_upload_id_alone() -> None:
         "merchant",
         "refresh_token",
         "upload_blob",
+        "category_rule",
     ],
 )
 def test_no_repr_leaks_a_sensitive_value(model: Base) -> None:

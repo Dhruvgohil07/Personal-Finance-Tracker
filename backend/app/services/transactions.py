@@ -6,7 +6,8 @@ Two jobs, and both of them are about the same table:
   builds ONE SELECT out of the filters the client sent and returns a page
   of rows plus the cursor for the next page (SPEC §10).
 - `update_transaction` - the user correcting a row by hand: its category
-  and their own note (SPEC §8.1 will later learn a rule from this; Phase 2).
+  and their own note, and with `apply_to_similar` a rule learned from it
+  (SPEC §8.1, Phase 2 Step 7).
 
 Two things to understand before reading the code.
 
@@ -30,6 +31,7 @@ import uuid
 from dataclasses import dataclass
 
 import structlog
+from rq import Queue
 from sqlalchemy import Select, select, tuple_
 from sqlalchemy.orm import Session
 
@@ -38,6 +40,7 @@ from app.models import CategoryKind, CategorySource, Transaction
 from app.schemas.transaction import TransactionFilters, TransactionUpdate
 from app.services import accounts as accounts_service
 from app.services import categories as categories_service
+from app.services import rules as rules_service
 from app.utils.cursor import encode_cursor
 
 log = structlog.get_logger()
@@ -126,7 +129,11 @@ def get_transaction(db: Session, user_id: uuid.UUID, transaction_id: uuid.UUID) 
 
 
 def update_transaction(
-    db: Session, user_id: uuid.UUID, transaction_id: uuid.UUID, data: TransactionUpdate
+    db: Session,
+    queue: Queue,
+    user_id: uuid.UUID,
+    transaction_id: uuid.UUID,
+    data: TransactionUpdate,
 ) -> Transaction:
     """Set the category and/or the note on one of the user's transactions.
 
@@ -147,9 +154,17 @@ def update_transaction(
     A manual category also decides `is_self_transfer`, so the flag the
     insights read cannot disagree with the category the user chose - see
     `_set_category`.
+
+    `apply_to_similar` (Phase 2 Step 7, SPEC §8.1) learns a rule from the
+    correction in the SAME commit as the category, so a 400 "nothing to
+    match on" leaves the row unchanged too. Only after the commit are the
+    rules applied to the user's other rows (`rules_service.apply_rules`).
+    The row itself stays `user_manual`: the user chose it.
     """
     transaction = get_transaction(db, user_id, transaction_id)
     changes = data.model_dump(exclude_unset=True)
+    # Not a column: an instruction about the category change.
+    apply_to_similar = changes.pop("apply_to_similar", False)
 
     if "category_id" in changes:
         _set_category(db, user_id, transaction, changes["category_id"])
@@ -157,6 +172,8 @@ def update_transaction(
         # An empty or whitespace-only note becomes NULL, so "no note" has
         # exactly one representation in the database.
         transaction.notes = changes["notes"] or None
+    if apply_to_similar:
+        rules_service.learn_rule(db, user_id, transaction)
 
     db.commit()
     # Field NAMES only - never the note's text or the category id's meaning
@@ -166,7 +183,10 @@ def update_transaction(
         user_id=str(user_id),
         transaction_id=str(transaction_id),
         fields=sorted(changes),
+        apply_to_similar=apply_to_similar,
     )
+    if apply_to_similar:
+        rules_service.apply_rules(db, queue, user_id)
     return transaction
 
 

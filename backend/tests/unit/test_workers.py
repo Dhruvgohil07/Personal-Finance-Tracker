@@ -25,6 +25,7 @@ from app.workers.queue import (
     ON_PROCESS_STATEMENT_STOPPED,
     PROCESS_STATEMENT,
     QUEUE_NAME,
+    RECATEGORIZE_USER,
     get_queue,
 )
 
@@ -94,6 +95,7 @@ def test_the_job_names_resolve_to_the_job_functions() -> None:
     assert import_attribute(PROCESS_STATEMENT) is jobs.process_statement
     assert import_attribute(ON_PROCESS_STATEMENT_FAILURE) is jobs.on_process_statement_failure
     assert import_attribute(ON_PROCESS_STATEMENT_STOPPED) is jobs.on_process_statement_stopped
+    assert import_attribute(RECATEGORIZE_USER) is jobs.recategorize_user
 
 
 def test_a_failure_that_will_be_retried_touches_nothing(monkeypatch: pytest.MonkeyPatch) -> None:

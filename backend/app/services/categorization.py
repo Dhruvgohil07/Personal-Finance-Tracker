@@ -1,34 +1,58 @@
-"""Categorize an upload's transactions (SPEC §8, Phase 2 Step 6, ADR 016).
+"""Categorize transactions with the chain (SPEC §8; ADR 016, ADR 017).
 
 The decisions themselves are made by the pure `app/categorizer/` package.
 This module is the part that touches the database:
 
-    1. load the data the chain needs - the merchant dictionary and the ids
-       of the system categories (plus, from Step 7, the user's rules)
+    1. load the data the chain needs - the merchant dictionary, the ids of
+       the categories the user may use, and the user's own rules
     2. turn each stored row into `TxnFacts`, run the chain
     3. write the decision back: category_id, category_source, confidence,
-       and merchant_id when the merchant key is in the dictionary
+       is_self_transfer, and merchant_id when the key is in the dictionary
 
-It runs inside `process_upload` (app/services/imports.py), in the SAME
-database transaction as the insert, so the rows appear already categorized
-and a failure rolls both back together (Phase 2 plan).
+Two entry points, for the two moments categorization happens:
 
-Only rows whose `category_source` is still `none` are touched, so a
-category the user chose by hand (`user_manual`) is never overwritten - the
-chain's own guard says the same, belt and braces.
+- `categorize_upload` - right after an import, inside `process_upload`
+  (app/services/imports.py) and in the SAME database transaction as the
+  insert, so the rows appear already categorized (Phase 2 plan). Only the
+  upload's `none` rows are looked at.
+- `recategorize_user` - after one of the user's rules changed (Step 7).
+  Re-runs the chain over EVERY row of the user except `user_manual` ones,
+  so a non-manual row always shows what the current rules say: a new rule
+  takes effect on the past, and a deleted rule stops having one (decided
+  with Dhruv, ADR 017). Run by the `recategorize_user` job.
+
+A category the user chose by hand (`user_manual`) is never touched by
+either: both queries leave those rows out, and the chain's own guard says
+the same, belt and braces.
+
+**One user's categorization runs one at a time.** Both entry points first
+take a per-user lock (`_lock_categorization`), and only then read the rules.
+Without it, two runs could overlap - an import that read the rules a
+moment before a rule changed, or two rule changes in quick succession -
+and the one that commits LAST would win with rules that are already out
+of date. With it, whichever run goes second reads the rules the first one
+left, so the last word is always the newest rules.
 """
 
 import uuid
 from collections import Counter
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 
 import structlog
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.categorizer.base import CategorySource, Decision, TxnFacts, categorize
-from app.categorizer.handlers import build_chain
-from app.models import Category, Merchant, StatementUpload, Transaction
+from app.categorizer.base import CategorySource, Decision, Handler, TxnFacts, categorize
+from app.categorizer.handlers import Rule, build_chain
+from app.models import (
+    Category,
+    CategoryKind,
+    CategoryRule,
+    Merchant,
+    StatementUpload,
+    Transaction,
+)
 from app.parsers.narration import counterparty_name, dictionary_key
 
 log = structlog.get_logger()
@@ -38,11 +62,13 @@ def categorize_upload(db: Session, upload: StatementUpload) -> int:
     """Categorize the not-yet-categorized rows one upload inserted.
 
     Returns how many rows got a category. Nothing is committed here: the
-    caller (`process_upload`) commits the import as a whole.
+    caller (`process_upload`) commits the import as a whole, which also
+    releases the per-user lock.
 
     Rows that the upload SKIPPED as duplicates belong to the earlier upload
     that inserted them, so they are not looked at again.
     """
+    _lock_categorization(db, upload.user_id)
     rows = db.scalars(
         select(Transaction).where(
             # user_id as well as upload_id: every query is scoped by user
@@ -55,61 +81,208 @@ def categorize_upload(db: Session, upload: StatementUpload) -> int:
     if not rows:
         return 0
 
+    context = _load_context(db, upload.user_id)
+    outcome = _categorize_rows(rows, context)
+    outcome.log_problems(user_id=upload.user_id, upload_id=upload.id)
+    return outcome.categorized
+
+
+def recategorize_user(db: Session, user_id: uuid.UUID) -> int:
+    """Re-run the chain over all of the user's rows except manual ones, and commit.
+
+    Returns how many rows changed. Safe to run any number of times
+    (SPEC §11): with the same rules it changes nothing the second time, and
+    SQLAlchemy sends no UPDATE for a row whose values came out the same.
+
+    The rows are read `FOR UPDATE` (each one locked until the commit). That
+    closes a race with `PATCH /transactions/{id}`: if the user re-files a
+    row by hand while this runs, either the PATCH waits for this commit and
+    then wins, or this waits for the PATCH - and Postgres then re-checks
+    the WHERE clause, finds the row is `user_manual` now, and skips it.
+    Without the lock, this could overwrite a choice the user had just made.
+    """
+    _lock_categorization(db, user_id)
+    rows = db.scalars(
+        select(Transaction)
+        .where(
+            Transaction.user_id == user_id,
+            Transaction.category_source != CategorySource.USER_MANUAL,
+        )
+        .with_for_update()
+    ).all()
+
+    context = _load_context(db, user_id)
+    before = [_category_state(row) for row in rows]
+    outcome = _categorize_rows(rows, context)
+    changed = sum(1 for row, old in zip(rows, before, strict=True) if _category_state(row) != old)
+    db.commit()
+
+    outcome.log_problems(user_id=user_id)
+    # Counts only (CLAUDE.md rule 3).
+    log.info(
+        "transactions_recategorized",
+        user_id=str(user_id),
+        rows_count=len(rows),
+        rows_changed=changed,
+        rows_categorized=outcome.categorized,
+    )
+    return changed
+
+
+# --- The shared core ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UsableCategories:
+    """The categories this user's transactions may be filed under.
+
+    - `system_by_slug`: slug -> id of every SYSTEM category. The built-in
+      handlers name categories by slug, and only system rows are read for
+      that, so a user category that reuses a slug is never picked up.
+    - `ids`: the id of every category the user may use - the system ones
+      plus their own. A user rule names its category by id, and that id is
+      checked against this set before it is written.
+    - `transfer_ids`: those of kind `transfer` (Self Transfer). Filing a
+      row under one also marks it `is_self_transfer`, exactly as a manual
+      choice does (`_set_category` in app/services/transactions.py), so the
+      flag the insights read never disagrees with the category.
+    """
+
+    system_by_slug: dict[str, uuid.UUID]
+    ids: frozenset[uuid.UUID]
+    transfer_ids: frozenset[uuid.UUID]
+
+
+@dataclass(frozen=True)
+class _Context:
+    """Everything one run needs, loaded once rather than once per row."""
+
+    merchants: dict[str, Merchant]  # dictionary key -> merchant row
+    usable: UsableCategories
+    chain: Sequence[Handler]
+
+
+@dataclass
+class _Outcome:
+    """What one run did, counted rather than logged row by row."""
+
+    categorized: int = 0
+    unknown_slugs: Counter[str] = field(default_factory=Counter)
+    refused_ids: int = 0
+
+    def log_problems(self, *, user_id: uuid.UUID, upload_id: uuid.UUID | None = None) -> None:
+        """ONE line per problem, not one per row (review of Step 6).
+
+        A seed/code mismatch on a two-year statement would otherwise flood
+        the log. A slug is not personal data, and counts are only counts.
+        """
+        for slug, count in self.unknown_slugs.items():
+            log.warning("unknown_category_slug", category_slug=slug, rows_count=count)
+        if self.refused_ids:
+            ids = {"user_id": str(user_id)}
+            if upload_id is not None:
+                ids["upload_id"] = str(upload_id)
+            log.warning("category_not_usable_by_user", **ids, rows_count=self.refused_ids)
+
+
+def _lock_categorization(db: Session, user_id: uuid.UUID) -> None:
+    """Take this user's categorization lock until the transaction ends.
+
+    `pg_advisory_xact_lock(key)` is a Postgres lock on a NUMBER instead of
+    a row: any two sessions asking for the same number take turns, and the
+    lock is released by the commit or rollback (`xact`), so it cannot be
+    forgotten. The number is the first 8 bytes of the user's UUID read as a
+    signed 64-bit integer (the type Postgres takes). Two users sharing those
+    bytes would only wait for each other, never get a wrong answer; nothing
+    else in the app uses advisory locks, so no other lock can collide.
+    """
+    key = int.from_bytes(user_id.bytes[:8], "big", signed=True)
+    db.execute(select(func.pg_advisory_xact_lock(key)))
+
+
+def _load_context(db: Session, user_id: uuid.UUID) -> _Context:
     merchants = {merchant.normalized_key: merchant for merchant in db.scalars(select(Merchant))}
-    usable = _usable_categories(db, upload.user_id)
     chain = build_chain(
-        # The user's rules arrive with their table in Step 7.
-        rules=(),
+        rules=_load_rules(db, user_id),
         merchant_categories={
             key: merchant.default_category_slug for key, merchant in merchants.items()
         },
     )
+    return _Context(merchants=merchants, usable=_usable_categories(db, user_id), chain=chain)
 
-    categorized = 0
-    unknown_slugs: Counter[str] = Counter()
-    refused_ids = 0
+
+def _load_rules(db: Session, user_id: uuid.UUID) -> list[Rule]:
+    """The user's rules as the chain's plain `Rule`s, in the order they are tried.
+
+    Lowest priority number first; among equal priorities the NEWEST rule
+    first, so the latest correction wins (ADR 017). `UserRuleHandler` sorts
+    by priority with a stable sort, which keeps this order within a
+    priority. `id` makes the order total even for two rules created in the
+    same transaction.
+    """
+    stmt = (
+        select(CategoryRule)
+        .where(CategoryRule.user_id == user_id)
+        .order_by(CategoryRule.priority, CategoryRule.created_at.desc(), CategoryRule.id)
+    )
+    return [
+        Rule(rule.match_type, rule.pattern, rule.category_id, rule.priority)
+        for rule in db.scalars(stmt)
+    ]
+
+
+def _categorize_rows(rows: Sequence[Transaction], context: _Context) -> _Outcome:
+    """Run the chain on each row and write the result onto it (not committed)."""
+    outcome = _Outcome()
     for row in rows:
         # Looked up ONCE per row: the merchant link and the merchant handler
         # both need it. The link is independent of the category: a row a
         # user rule categorizes is still a Zomato row.
-        key = dictionary_key(row.merchant_key, merchants.keys())
-        row.merchant_id = merchants[key].id if key is not None else None
+        key = dictionary_key(row.merchant_key, context.merchants.keys())
+        row.merchant_id = context.merchants[key].id if key is not None else None
 
-        decision = categorize(_facts(row, key), chain)
-        if decision is None:
-            continue
-        category_id = _category_id(decision, usable)
-        if category_id is None:
+        decision = categorize(facts_of(row, key), context.chain)
+        category_id = None if decision is None else _category_id(decision, context.usable)
+        if decision is not None and category_id is None:
             if decision.category_slug is not None:
-                unknown_slugs[decision.category_slug] += 1
+                outcome.unknown_slugs[decision.category_slug] += 1
             else:
-                refused_ids += 1
+                outcome.refused_ids += 1
+
+        if decision is None or category_id is None:
+            # Nothing decided (or nothing that may be written): the row is
+            # "not categorized yet". For a new row that is what it already
+            # was; for a re-run it undoes what a deleted rule had decided.
+            row.category_id = None
+            row.category_source = CategorySource.NONE
+            row.category_confidence = None
+            row.is_self_transfer = False
             continue
         row.category_id = category_id
         row.category_source = decision.source
         row.category_confidence = decision.confidence
-        categorized += 1
-
-    # ONE line per problem, not one per row: a seed/code mismatch on a
-    # two-year statement would otherwise flood the log (review of Step 6).
-    # A slug is not personal data, and counts are only counts.
-    for slug, count in unknown_slugs.items():
-        log.warning("unknown_category_slug", category_slug=slug, rows_count=count)
-    if refused_ids:
-        log.warning(
-            "category_not_usable_by_user",
-            user_id=str(upload.user_id),
-            upload_id=str(upload.id),
-            rows_count=refused_ids,
-        )
-    return categorized
+        row.is_self_transfer = category_id in context.usable.transfer_ids
+        outcome.categorized += 1
+    return outcome
 
 
-def _facts(row: Transaction, dictionary_key: str | None) -> TxnFacts:
+def _category_state(row: Transaction) -> tuple[object, ...]:
+    """The columns a run may change, to count the rows it really changed."""
+    return (
+        row.category_id,
+        row.category_source,
+        row.category_confidence,
+        row.is_self_transfer,
+        row.merchant_id,
+    )
+
+
+def facts_of(row: Transaction, dictionary_key: str | None) -> TxnFacts:
     """What the chain may see of a stored row (no amount, no date, no raw text).
 
     The raw narration is read here, in the service, only to pick out the
-    counterparty's NAME field; the chain itself never receives it.
+    counterparty's NAME field; the chain itself never receives it. Public
+    because rule learning (app/services/rules.py) asks the same facts.
     """
     return TxnFacts(
         direction=row.direction,
@@ -123,31 +296,27 @@ def _facts(row: Transaction, dictionary_key: str | None) -> TxnFacts:
     )
 
 
-@dataclass(frozen=True)
-class UsableCategories:
-    """The categories this user's transactions may be filed under.
-
-    - `system_by_slug`: slug -> id of every SYSTEM category. The built-in
-      handlers name categories by slug, and only system rows are read for
-      that, so a user category that reuses a slug is never picked up.
-    - `ids`: the id of every category the user may use - the system ones
-      plus their own. A user rule names its category by id, and that id is
-      checked against this set before it is written.
-    """
-
-    system_by_slug: dict[str, uuid.UUID]
-    ids: frozenset[uuid.UUID]
+def merchant_keys(db: Session) -> list[str]:
+    """Every key of the merchant dictionary, for `dictionary_key` lookups."""
+    return list(db.scalars(select(Merchant.normalized_key)))
 
 
 def _usable_categories(db: Session, user_id: uuid.UUID) -> UsableCategories:
     """System categories plus the user's own: `categories_service`'s rule."""
-    stmt = select(Category.id, Category.slug, Category.user_id).where(
+    stmt = select(Category.id, Category.slug, Category.user_id, Category.kind).where(
         or_(Category.user_id.is_(None), Category.user_id == user_id)
     )
     rows = db.execute(stmt).all()
     return UsableCategories(
-        system_by_slug={slug: category_id for category_id, slug, owner in rows if owner is None},
-        ids=frozenset(category_id for category_id, _slug, _owner in rows),
+        system_by_slug={
+            slug: category_id for category_id, slug, owner, _kind in rows if owner is None
+        },
+        ids=frozenset(category_id for category_id, _slug, _owner, _kind in rows),
+        transfer_ids=frozenset(
+            category_id
+            for category_id, _slug, _owner, kind in rows
+            if kind is CategoryKind.TRANSFER
+        ),
     )
 
 
@@ -163,7 +332,7 @@ def _category_id(decision: Decision, usable: UsableCategories) -> uuid.UUID | No
       `category_id` passes exactly this check - so it is enforced where the
       id is written, not only where rules are created (review of Step 6).
 
-    The caller logs both cases once per upload.
+    The caller counts both cases and logs them once per run.
     """
     if decision.category_id is not None:
         return decision.category_id if decision.category_id in usable.ids else None
