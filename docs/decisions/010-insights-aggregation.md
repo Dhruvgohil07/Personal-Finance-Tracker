@@ -61,6 +61,14 @@ id, so the two appear as separate rows. That is the truthful rendering of
 two different facts; revisit the naming in Phase 2, when the categorizer
 actually starts using the seeded one.
 
+> **Amendment (Phase 2, Step 6):** the NULL bucket is now named
+> **"Not categorized yet"**, so it no longer shares a name with the seeded
+> "Uncategorized" category (ADR 016 §7). The categorizer leaves rows it cannot
+> place as NULL, so the bucket keeps meaning "needs your attention". The unscoped
+> `LEFT JOIN categories` is still safe only while every stored `category_id` is a
+> system category or the row owner's own. Since Step 6 that is also checked where
+> the categorizer writes the id (ADR 016 §6).
+
 ### 5. `SUM()` of a BIGINT column is NUMERIC — convert in Python, not in SQL
 Postgres widens `SUM(bigint)` to `numeric` so a total can never overflow a
 single row's type. The driver therefore returns `Decimal`, and `format_inr`

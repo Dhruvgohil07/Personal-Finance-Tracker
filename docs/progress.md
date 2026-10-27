@@ -294,6 +294,21 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   import log, insights null bucket renamed "Not categorized yet"; ADR 016. No migration.
   1220 tests, 100% coverage. **Real statement: 89/175 = 50.9% categorized without an
   LLM** (49 Transfers to People, 19 Other Income, 14 dictionary, 6 Refunds, 1 Cash)
+- [x] Step 6 code review (`/code-review high` on PR #21, 8 findings) — all 8 fixed:
+  1. bank-wording keywords (charges, salary, interest) no longer read UPI/IMPS
+     narrations, whose remark the payer types: a person paid with the remark "charges"
+     had become Fees & Charges (reproduced). BHIM cashback now requires NPCI as payer
+  2. a merchant's credit with an income keyword is Salary/Interest, not a Refund (big
+     employers are seeded merchants)
+  3. a rule's category id is written only if it is a system category or the user's own
+     (ADR 010's unscoped join relies on it); refused rows are logged
+  4. ADR 010 amended for the "Not categorized yet" rename
+  5. the P2P business-word check reads the counterparty's NAME field
+     (`counterparty_name`), not the remark
+  6. missing slugs and refused ids are logged once per upload with a count
+  7. `dictionary_key` is looked up once per row and carried in `TxnFacts`
+  8. one word splitter, `key_words`, shared by narration.py and the categorizer
+  1236 tests, 100% coverage; real statement unchanged at 89/175 (50.9%)
 
 ## In progress
 - (nothing)
