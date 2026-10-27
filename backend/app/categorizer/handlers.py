@@ -19,7 +19,7 @@ from enum import StrEnum
 from app.categorizer.base import CategorySource, Decision, Handler, TxnFacts
 from app.parsers.base import Channel, Direction
 from app.parsers.narration import key_words, name_key
-from app.parsers.normalize import normalize_description
+from app.parsers.normalize import LONG_DIGITS, normalize_description
 
 # How sure each kind of handler is (stored in `category_confidence`).
 RULE_CONFIDENCE = Decimal("1.00")  # the user said so
@@ -99,6 +99,14 @@ def normalize_rule_pattern(match_type: RuleMatchType, pattern: str) -> str:
                 "letters, digits, '.', '-', '_' and '@'"
             )
         return vpa
+    # Checked BEFORE normalizing, which would silently drop the number and
+    # leave a far broader pattern: "upi 9876543210" would become "UPI",
+    # matching every UPI row (review of Step 7).
+    if LONG_DIGITS.search(pattern):
+        raise ValueError(
+            "leave out numbers of 6 or more digits: references and phone numbers "
+            "are removed from stored narrations, so they can never be found"
+        )
     text = normalize_description(pattern)
     if len(text) < MIN_PATTERN_LENGTH:
         raise ValueError(f"the text to look for needs at least {MIN_PATTERN_LENGTH} characters")

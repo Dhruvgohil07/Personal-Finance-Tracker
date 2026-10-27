@@ -43,6 +43,7 @@ M, V, C = RuleMatchType.MERCHANT, RuleMatchType.VPA, RuleMatchType.CONTAINS
         # The same function that built the stored narrations.
         (C, "  moon   cafe ", "MOON CAFE"),
         (C, "rent|flat 4", "RENT FLAT 4"),
+        (C, "store 12345", "STORE 12345"),  # 5 digits survive normalization
     ],
 )
 def test_a_pattern_is_stored_as_its_field_is(
@@ -61,7 +62,11 @@ def test_a_pattern_is_stored_as_its_field_is(
         (V, "asha verma@okaxis", "letters, digits"),  # a space is never in a VPA
         (V, "asha#1@okaxis", "letters, digits"),
         (C, "ab", "at least 3 characters"),
-        (C, "123456789", "at least 3 characters"),  # long digits are removed
+        # A long number is refused rather than dropped: dropping it would
+        # leave "UPI", which matches every UPI row (review of Step 7).
+        (C, "upi 9876543210", "6 or more digits"),
+        (C, "123456789", "6 or more digits"),
+        (C, "  !! ", "at least 3 characters"),
     ],
 )
 def test_a_pattern_that_would_match_nothing_or_everything_is_refused(
