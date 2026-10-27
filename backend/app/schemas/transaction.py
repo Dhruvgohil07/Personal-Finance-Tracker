@@ -241,9 +241,15 @@ class TransactionResponse(BaseModel):
     balance_after_paise: int | None
     raw_description: str
     normalized_description: str
-    # Always "other" / null until Phase 2 detects them (SPEC §6.5).
+    # Read from the narration since Phase 2 Step 5 (SPEC §6.5); "other" /
+    # null on rows imported before it.
     channel: Channel
     counterparty_vpa: str | None
+    # The counterparty key a `merchant` rule matches EXACTLY ("MOONCAFE").
+    # Shown because how it is built depends on the bank's layout (the whole
+    # name joined for ICICI UPI/IMPS, the first word otherwise), so a user
+    # writing a rule by hand needs to see it (review of Step 7).
+    merchant_key: str | None
     category_id: uuid.UUID | None
     category_source: CategorySource
     category_confidence: Confidence | None

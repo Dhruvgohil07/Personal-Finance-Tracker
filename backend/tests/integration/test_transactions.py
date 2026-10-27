@@ -281,6 +281,7 @@ def test_the_response_describes_one_transaction_fully(
             # Phase 2 fills these in.
             "channel": "other",
             "counterparty_vpa": None,
+            "merchant_key": None,
             # Nothing has categorized this row yet.
             "category_id": None,
             "category_source": "none",

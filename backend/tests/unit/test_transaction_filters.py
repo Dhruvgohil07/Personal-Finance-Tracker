@@ -300,6 +300,7 @@ def _response(**overrides: Any) -> TransactionResponse:
         "normalized_description": "UPI/ZOMATO/PAY",
         "channel": "other",
         "counterparty_vpa": None,
+        "merchant_key": None,
         "category_id": None,
         "category_source": "none",
         "category_confidence": None,
