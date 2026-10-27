@@ -36,7 +36,7 @@ from sqlalchemy import Select, select, tuple_
 from sqlalchemy.orm import Session
 
 from app.core.errors import NotFoundError
-from app.models import CategoryKind, CategorySource, Transaction
+from app.models import CategorySource, Transaction
 from app.schemas.transaction import TransactionFilters, TransactionUpdate
 from app.services import accounts as accounts_service
 from app.services import categories as categories_service
@@ -233,7 +233,7 @@ def _set_category(
     transaction.category_id = category.id
     transaction.category_source = CategorySource.USER_MANUAL
     transaction.category_confidence = None
-    transaction.is_self_transfer = category.kind is CategoryKind.TRANSFER
+    transaction.is_self_transfer = category.kind.marks_self_transfer
 
 
 def _filtered_query(user_id: uuid.UUID, filters: TransactionFilters) -> Select[tuple[Transaction]]:
