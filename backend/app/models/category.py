@@ -20,6 +20,18 @@ class CategoryKind(StrEnum):
     # Money moving between your own accounts: excluded from spending/income totals.
     TRANSFER = "transfer"
 
+    @property
+    def marks_self_transfer(self) -> bool:
+        """Does filing a row under a category of this kind make it a self transfer?
+
+        The ONE place this rule lives. A manual choice (`_set_category`)
+        and the categorizer (`_categorize_rows`) both set
+        `transactions.is_self_transfer` from it, so the flag the insights
+        read can never disagree with the category, however it was chosen
+        (review of Phase 2 Step 7).
+        """
+        return self is CategoryKind.TRANSFER
+
 
 class Category(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "categories"

@@ -47,7 +47,6 @@ from app.categorizer.base import CategorySource, Decision, Handler, TxnFacts, ca
 from app.categorizer.handlers import Rule, build_chain
 from app.models import (
     Category,
-    CategoryKind,
     CategoryRule,
     Merchant,
     StatementUpload,
@@ -142,15 +141,15 @@ class UsableCategories:
     - `ids`: the id of every category the user may use - the system ones
       plus their own. A user rule names its category by id, and that id is
       checked against this set before it is written.
-    - `transfer_ids`: those of kind `transfer` (Self Transfer). Filing a
-      row under one also marks it `is_self_transfer`, exactly as a manual
-      choice does (`_set_category` in app/services/transactions.py), so the
-      flag the insights read never disagrees with the category.
+    - `self_transfer_ids`: those whose kind `marks_self_transfer` (Self
+      Transfer). Filing a row under one also marks it `is_self_transfer`,
+      by the same rule a manual choice uses (`CategoryKind`), so the flag
+      the insights read never disagrees with the category.
     """
 
     system_by_slug: dict[str, uuid.UUID]
     ids: frozenset[uuid.UUID]
-    transfer_ids: frozenset[uuid.UUID]
+    self_transfer_ids: frozenset[uuid.UUID]
 
 
 @dataclass(frozen=True)
@@ -274,7 +273,7 @@ def _categorize_rows(rows: Sequence[Transaction], context: _Context) -> _Outcome
         row.category_id = category_id
         row.category_source = decision.source
         row.category_confidence = decision.confidence
-        row.is_self_transfer = category_id in context.usable.transfer_ids
+        row.is_self_transfer = category_id in context.usable.self_transfer_ids
         outcome.categorized += 1
     return outcome
 
@@ -325,10 +324,8 @@ def _usable_categories(db: Session, user_id: uuid.UUID) -> UsableCategories:
             slug: category_id for category_id, slug, owner, _kind in rows if owner is None
         },
         ids=frozenset(category_id for category_id, _slug, _owner, _kind in rows),
-        transfer_ids=frozenset(
-            category_id
-            for category_id, _slug, _owner, kind in rows
-            if kind is CategoryKind.TRANSFER
+        self_transfer_ids=frozenset(
+            category_id for category_id, _slug, _owner, kind in rows if kind.marks_self_transfer
         ),
     )
 
