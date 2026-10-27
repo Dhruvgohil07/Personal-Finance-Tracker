@@ -159,7 +159,7 @@ def update_transaction(
     `apply_to_similar` (Phase 2 Step 7, SPEC §8.1) learns a rule from the
     correction in the SAME commit as the category, so a 400 "nothing to
     match on" leaves the row unchanged too. The rules are then applied to
-    the user's other rows (`rules_service.commit_and_apply`). The row
+    the user's other rows (`categorization_service.commit_and_recategorize`). The row
     itself stays `user_manual`: the user chose it.
 
     Re-filing either half of a detected self transfer (Step 8) re-runs the
@@ -189,7 +189,7 @@ def update_transaction(
         # re-filed half of a detected self transfer, that re-run is what
         # re-decides its partner, which has just lost its pair (decided
         # with Dhruv, ADR 018).
-        rules_service.commit_and_apply(db, queue, user_id)
+        categorization_service.commit_and_recategorize(db, queue, user_id)
     else:
         db.commit()
 

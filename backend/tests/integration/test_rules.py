@@ -606,8 +606,8 @@ def test_the_job_carries_only_the_user_id() -> None:
 
 
 def queue_down(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make Redis look unreachable to `commit_and_apply`."""
-    monkeypatch.setattr(rules_service, "_queue_is_reachable", lambda queue: False)
+    """Make Redis look unreachable to `commit_and_recategorize`."""
+    monkeypatch.setattr(categorization_service, "_queue_is_reachable", lambda queue: False)
 
 
 def test_with_redis_down_the_rules_are_applied_in_the_request(
@@ -680,7 +680,7 @@ def test_redis_failing_after_the_ping_still_applies_the_rule(
     def redis_down(queue: Queue, user_id: uuid.UUID) -> None:
         raise RedisConnectionError("down")
 
-    monkeypatch.setattr(rules_service, "enqueue_recategorization", redis_down)
+    monkeypatch.setattr(categorization_service, "enqueue_recategorization", redis_down)
 
     with structlog.testing.capture_logs() as logs:
         create_rule(
@@ -699,8 +699,10 @@ def test_an_unreachable_redis_is_detected() -> None:
     # Nothing listens on port 1; the short timeout keeps the test fast.
     dead = Redis(host="127.0.0.1", port=1, socket_connect_timeout=0.2)
 
-    assert rules_service._queue_is_reachable(Queue("unused", connection=dead)) is False
-    assert rules_service._queue_is_reachable(Queue("unused", connection=get_redis())) is True
+    assert categorization_service._queue_is_reachable(Queue("unused", connection=dead)) is False
+    assert (
+        categorization_service._queue_is_reachable(Queue("unused", connection=get_redis())) is True
+    )
 
 
 # --- An update that changes nothing (review of Step 7) -----------------------------------
@@ -717,7 +719,9 @@ def test_an_update_that_changes_nothing_does_not_rerun(
     )
     enqueued: list[uuid.UUID] = []
     monkeypatch.setattr(
-        rules_service, "enqueue_recategorization", lambda queue, user_id: enqueued.append(user_id)
+        categorization_service,
+        "enqueue_recategorization",
+        lambda queue, user_id: enqueued.append(user_id),
     )
     url = f"{RULES}/{rule['id']}"
 

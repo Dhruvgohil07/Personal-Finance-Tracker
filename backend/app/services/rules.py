@@ -9,20 +9,17 @@ Three groups of functions:
 - **`learn_rule`** - `PATCH /transactions/{id}` with `apply_to_similar=true`
   turns the corrected row into a rule (SPEC §8.1). What it matches on is
   decided by the pure `learned_rule_key`.
-- **`commit_and_apply`** - saves ANY change to a user's rules and re-runs
-  the categorizer over their past rows. Normally that is the
-  `recategorize_user` job; if Redis cannot be reached it runs right here in
-  the request instead (decided with Dhruv, ADR 017), so the user never sees
-  a rule that is saved but not applied.
-
-How the two paths keep "saved" and "applied" together is explained in
-`commit_and_apply`.
+Every change to a user's rules is saved through
+`categorization_service.commit_and_recategorize`, which commits it and
+re-runs the categorizer over their past rows: normally the
+`recategorize_user` job, or right here in the request if Redis cannot be
+reached (decided with Dhruv, ADR 017), so the user never sees a rule that
+is saved but not applied.
 """
 
 import uuid
 
 import structlog
-from redis.exceptions import RedisError
 from rq import Queue
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
@@ -37,7 +34,6 @@ from app.parsers.narration import dictionary_key
 from app.schemas.rule import RuleCreate, RuleUpdate
 from app.services import categories as categories_service
 from app.services import categorization as categorization_service
-from app.workers.queue import enqueue_recategorization
 
 log = structlog.get_logger()
 
@@ -82,7 +78,7 @@ def create_rule(db: Session, queue: Queue, user_id: uuid.UUID, data: RuleCreate)
     rule = CategoryRule(user_id=user_id, **data.model_dump())
     db.add(rule)
     _flush_or_conflict(db)
-    commit_and_apply(db, queue, user_id)
+    categorization_service.commit_and_recategorize(db, queue, user_id)
 
     log.info(
         "rule_created",
@@ -116,7 +112,7 @@ def update_rule(
         categories_service.get_category(db, user_id, changes["category_id"])
     for name, value in changes.items():
         setattr(rule, name, value)
-    commit_and_apply(db, queue, user_id)
+    categorization_service.commit_and_recategorize(db, queue, user_id)
 
     log.info("rule_updated", user_id=str(user_id), rule_id=str(rule_id), fields=sorted(changes))
     return rule
@@ -127,7 +123,7 @@ def delete_rule(db: Session, queue: Queue, user_id: uuid.UUID, rule_id: uuid.UUI
     back to whatever the remaining rules and the built-in chain say."""
     rule = get_rule(db, user_id, rule_id)
     db.delete(rule)
-    commit_and_apply(db, queue, user_id)
+    categorization_service.commit_and_recategorize(db, queue, user_id)
 
     log.info("rule_deleted", user_id=str(user_id), rule_id=str(rule_id))
 
@@ -185,58 +181,10 @@ def learn_rule(db: Session, user_id: uuid.UUID, transaction: Transaction) -> uui
     return rule_id
 
 
-# --- Applying the rules to the past ---------------------------------------
-
-
-def commit_and_apply(db: Session, queue: Queue, user_id: uuid.UUID) -> None:
-    """Commit a change to the user's rules, and re-categorize their past rows.
-
-    Call it with the rule change made but NOT committed. Two paths:
-
-    - **Redis is up (the normal case):** commit, then enqueue the
-      `recategorize_user` job (SPEC §11): a user with years of statements
-      should not wait for it. Commit FIRST because the job runs in another
-      process and can only see committed rows; enqueued before the commit,
-      a fast worker could re-categorize with the old rules.
-    - **Redis is down:** the re-run happens HERE, in the same database
-      transaction as the rule change, and `recategorize_user` commits both
-      together. If the re-run fails, both roll back: the client gets an
-      error with nothing saved, and simply tries again. (Committing the
-      rule first would turn a failed re-run into "500, but the rule was
-      saved", and the retry into a 409 - review of Step 7.)
-
-    Redis is asked with a PING before anything is committed, because which
-    path to take must be known BEFORE the commit. If it answers but then
-    fails to take the job - it went down in that instant - the rule is
-    already committed, and the re-run is done here after all, as its own
-    transaction. That gap is a few milliseconds wide.
-    """
-    if not _queue_is_reachable(queue):
-        log.warning("recategorize_queue_down_running_inline", user_id=str(user_id))
-        categorization_service.recategorize_user(db, user_id)  # commits both
-        return
-
-    db.commit()
-    try:
-        enqueue_recategorization(queue, user_id)
-    except RedisError:
-        log.warning("recategorize_enqueue_failed_running_inline", user_id=str(user_id))
-        categorization_service.recategorize_user(db, user_id)
-
-
-def _queue_is_reachable(queue: Queue) -> bool:
-    """Does the queue's Redis answer? (2 s timeout on the API's client.)"""
-    try:
-        queue.connection.ping()
-    except RedisError:
-        return False
-    return True
-
-
 def _flush_or_conflict(db: Session) -> None:
     """Send the INSERT now; turn a duplicate rule into a 409, anything else a 500.
 
-    A flush, not a commit: `commit_and_apply` decides when to commit. The
+    A flush, not a commit: `commit_and_recategorize` decides when to commit. The
     unique constraint is checked by the INSERT itself, so the 409 still
     comes from the database, before anything else is done.
     """

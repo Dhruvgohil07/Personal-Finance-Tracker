@@ -43,6 +43,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 import structlog
+from redis.exceptions import RedisError
+from rq import Queue
 from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -57,6 +59,7 @@ from app.models import (
     Transaction,
 )
 from app.parsers.narration import counterparty_name, dictionary_key
+from app.workers.queue import enqueue_recategorization
 
 log = structlog.get_logger()
 
@@ -150,6 +153,57 @@ def recategorize_user(db: Session, user_id: uuid.UUID) -> int:
         rows_categorized=outcome.categorized,
     )
     return changed
+
+
+def commit_and_recategorize(db: Session, queue: Queue, user_id: uuid.UUID) -> None:
+    """Commit a change that affects categorization, and re-run the user's rows.
+
+    For every change after which "the chain, then detection" can give a
+    different answer: a rule created, changed or deleted (app/services/
+    rules.py), and a self-transfer pair broken by hand or by a delete
+    (Step 8). Call it with the change made but NOT committed. Two paths:
+
+    - **Redis is up (the normal case):** commit, then enqueue the
+      `recategorize_user` job (SPEC §11): a user with years of statements
+      should not wait for it. Commit FIRST because the job runs in another
+      process and can only see committed rows; enqueued before the commit,
+      a fast worker could re-categorize with the old state.
+    - **Redis is down:** the re-run happens HERE, in the same database
+      transaction as the change, and `recategorize_user` commits both
+      together. If the re-run fails, both roll back: the client gets an
+      error with nothing saved, and simply tries again. (Committing first
+      would turn a failed re-run into "500, but the change was saved" -
+      review of Step 7.)
+
+    Redis is asked with a PING before anything is committed, because which
+    path to take must be known BEFORE the commit. If it answers but then
+    fails to take the job - it went down in that instant - the change is
+    already committed, and the re-run is done here after all, as its own
+    transaction. That gap is a few milliseconds wide.
+
+    Lived in app/services/rules.py until the review of Step 8, when it
+    stopped being only about rules.
+    """
+    if not _queue_is_reachable(queue):
+        log.warning("recategorize_queue_down_running_inline", user_id=str(user_id))
+        recategorize_user(db, user_id)  # commits both
+        return
+
+    db.commit()
+    try:
+        enqueue_recategorization(queue, user_id)
+    except RedisError:
+        log.warning("recategorize_enqueue_failed_running_inline", user_id=str(user_id))
+        recategorize_user(db, user_id)
+
+
+def _queue_is_reachable(queue: Queue) -> bool:
+    """Does the queue's Redis answer? (2 s timeout on the API's client.)"""
+    try:
+        queue.connection.ping()
+    except RedisError:
+        return False
+    return True
 
 
 # --- The shared core ------------------------------------------------------
