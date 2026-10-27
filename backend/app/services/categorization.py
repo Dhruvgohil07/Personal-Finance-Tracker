@@ -120,8 +120,11 @@ def categorize_upload(db: Session, upload: StatementUpload) -> int:
     context = _load_context(db, upload.user_id)
     outcome = _categorize_rows(rows, context)
     # After the chain, over ALL the user's accounts: a new row may be the
-    # other half of a transfer imported long ago (Step 8, ADR 018).
-    _detect_self_transfers(db, upload.user_id, context, outcome)
+    # other half of a transfer imported long ago (Step 8, ADR 018). Only
+    # the amounts the upload brought in can pair differently now.
+    _detect_self_transfers(
+        db, upload.user_id, context, outcome, amounts={row.amount_paise for row in rows}
+    )
     outcome.log_problems(user_id=upload.user_id, upload_id=upload.id)
     return outcome.categorized
 
@@ -415,7 +418,12 @@ def _categorize_rows(rows: Sequence[Transaction], context: _Context) -> _Outcome
 
 
 def _detect_self_transfers(
-    db: Session, user_id: uuid.UUID, context: _Context, outcome: _Outcome
+    db: Session,
+    user_id: uuid.UUID,
+    context: _Context,
+    outcome: _Outcome,
+    *,
+    amounts: set[int] | None = None,
 ) -> None:
     """Find the user's self-transfer pairs and file both rows under Self Transfer.
 
@@ -439,12 +447,20 @@ def _detect_self_transfers(
 
     The rows are read `FOR UPDATE` for the same reason as in
     `recategorize_user`: a manual choice made meanwhile must win.
+
+    `amounts` narrows the rows to those amounts (the import pass). That is
+    EXACT, not an approximation: a pair only ever links two rows of the
+    same amount, so the pairing of each amount is independent of every
+    other, and only the amounts a new upload brought in can change. Without
+    it, every import read and locked every pairable row of the user, which
+    blocked their edits for the whole import (review of Step 8). The re-run
+    pass passes None: the chain has just reset every row, so all of them
+    need deciding.
     """
-    rows = db.scalars(
-        select(Transaction)
-        .where(Transaction.user_id == user_id, or_(_PAIRABLE, _MANUAL_ANCHOR))
-        .with_for_update()
-    ).all()
+    stmt = select(Transaction).where(Transaction.user_id == user_id, or_(_PAIRABLE, _MANUAL_ANCHOR))
+    if amounts is not None:
+        stmt = stmt.where(Transaction.amount_paise.in_(amounts))
+    rows = db.scalars(stmt.with_for_update()).all()
     pairs = match_self_transfers(
         [
             TransferCandidate(row.id, row.account_id, row.direction, row.amount_paise, row.txn_date)
@@ -483,6 +499,7 @@ def _detect_self_transfers(
     log.info(
         "self_transfers_detected",
         user_id=str(user_id),
+        rows_checked=len(rows),
         pairs_count=len(pairs),
         rows_unpaired=len(unpaired),
     )
