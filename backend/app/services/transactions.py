@@ -40,6 +40,7 @@ from app.models import CategorySource, Transaction
 from app.schemas.transaction import TransactionFilters, TransactionUpdate
 from app.services import accounts as accounts_service
 from app.services import categories as categories_service
+from app.services import categorization as categorization_service
 from app.services import rules as rules_service
 from app.utils.cursor import encode_cursor
 
@@ -160,11 +161,19 @@ def update_transaction(
     match on" leaves the row unchanged too. The rules are then applied to
     the user's other rows (`rules_service.commit_and_apply`). The row
     itself stays `user_manual`: the user chose it.
+
+    Re-filing either half of a detected self transfer (Step 8) re-runs the
+    user's rows the same way, so the OTHER half - now without a partner -
+    is re-decided at once instead of staying out of the totals.
     """
     transaction = get_transaction(db, user_id, transaction_id)
     changes = data.model_dump(exclude_unset=True)
     # Not a column: an instruction about the category change.
     apply_to_similar = changes.pop("apply_to_similar", False)
+    # Read BEFORE the change below overwrites the source.
+    unpairs = "category_id" in changes and categorization_service.is_detected_self_transfer(
+        transaction
+    )
 
     if "category_id" in changes:
         _set_category(db, user_id, transaction, changes["category_id"])
@@ -174,8 +183,12 @@ def update_transaction(
         transaction.notes = changes["notes"] or None
     if apply_to_similar:
         rules_service.learn_rule(db, user_id, transaction)
-        # Commits the row and the rule together, then re-runs the user's
-        # other rows (in this same transaction when Redis is down).
+    if apply_to_similar or unpairs:
+        # Commits this row (and the learned rule), then re-runs the user's
+        # other rows - in this same transaction when Redis is down. For a
+        # re-filed half of a detected self transfer, that re-run is what
+        # re-decides its partner, which has just lost its pair (decided
+        # with Dhruv, ADR 018).
         rules_service.commit_and_apply(db, queue, user_id)
     else:
         db.commit()

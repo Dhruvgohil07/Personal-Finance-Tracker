@@ -1,4 +1,4 @@
-"""Categorize transactions with the chain (SPEC §8; ADR 016, ADR 017).
+"""Categorize transactions with the chain (SPEC §8; ADR 016, ADR 017, ADR 018).
 
 The decisions themselves are made by the pure `app/categorizer/` package.
 This module is the part that touches the database:
@@ -8,6 +8,8 @@ This module is the part that touches the database:
     2. turn each stored row into `TxnFacts`, run the chain
     3. write the decision back: category_id, category_source, confidence,
        is_self_transfer, and merchant_id when the key is in the dictionary
+    4. find self-transfer pairs across all the user's accounts and file
+       both rows under Self Transfer (`_detect_self_transfers`, Step 8)
 
 Two entry points, for the two moments categorization happens:
 
@@ -38,6 +40,7 @@ import uuid
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 import structlog
 from sqlalchemy import Select, func, or_, select
@@ -45,6 +48,7 @@ from sqlalchemy.orm import Session
 
 from app.categorizer.base import CategorySource, Decision, Handler, TxnFacts, categorize
 from app.categorizer.handlers import Rule, build_chain
+from app.categorizer.self_transfer import TransferCandidate, match_self_transfers
 from app.models import (
     Category,
     CategoryRule,
@@ -55,6 +59,19 @@ from app.models import (
 from app.parsers.narration import counterparty_name, dictionary_key
 
 log = structlog.get_logger()
+
+# Self-transfer detection (Step 8, ADR 018). The pair's category, and how
+# sure a matched pair is: an equal amount across two of your own accounts
+# within two days is strong evidence, but still a guess, so below a rule's
+# 1.00 and above the P2P guess's 0.70.
+SELF_TRANSFER = "self-transfer"
+SELF_TRANSFER_CONFIDENCE = Decimal("0.80")
+# Which rows detection may pair. Never a manual row (the user decided), and
+# never one a user rule decided: a rule wins over detection, because the
+# user said so (decided with Dhruv, ADR 018).
+_PAIRABLE = Transaction.category_source.not_in(
+    (CategorySource.USER_MANUAL, CategorySource.USER_RULE)
+)
 
 
 def categorize_upload(db: Session, upload: StatementUpload) -> int:
@@ -82,6 +99,9 @@ def categorize_upload(db: Session, upload: StatementUpload) -> int:
 
     context = _load_context(db, upload.user_id)
     outcome = _categorize_rows(rows, context)
+    # After the chain, over ALL the user's accounts: a new row may be the
+    # other half of a transfer imported long ago (Step 8, ADR 018).
+    _detect_self_transfers(db, upload.user_id, context, outcome)
     outcome.log_problems(user_id=upload.user_id, upload_id=upload.id)
     return outcome.categorized
 
@@ -113,6 +133,10 @@ def recategorize_user(db: Session, user_id: uuid.UUID) -> int:
     context = _load_context(db, user_id)
     before = [_category_state(row) for row in rows]
     outcome = _categorize_rows(rows, context)
+    # The chain has just reset every non-manual row, detected pairs
+    # included; detection puts the pairs back. Without it, every rule
+    # change would undo the self transfers (ADR 017, ADR 018).
+    _detect_self_transfers(db, user_id, context, outcome)
     changed = sum(1 for row, old in zip(rows, before, strict=True) if _category_state(row) != old)
     db.commit()
 
@@ -276,6 +300,80 @@ def _categorize_rows(rows: Sequence[Transaction], context: _Context) -> _Outcome
         row.is_self_transfer = category_id in context.usable.self_transfer_ids
         outcome.categorized += 1
     return outcome
+
+
+def _detect_self_transfers(
+    db: Session, user_id: uuid.UUID, context: _Context, outcome: _Outcome
+) -> None:
+    """Find the user's self-transfer pairs and file both rows under Self Transfer.
+
+    Runs at the end of BOTH categorization passes, under the same per-user
+    lock, so a non-manual row always shows "the chain, then detection"
+    (ADR 018). Over all of the user's PAIRABLE rows (`_PAIRABLE`), in every
+    account, because a pair spans two accounts and often two uploads.
+
+    Two things happen:
+
+    - every row in a pair becomes Self Transfer, `heuristic`, 0.80, with
+      `is_self_transfer` set - overriding a built-in guess such as "P2P",
+      which is exactly what a payment to your own account looks like;
+    - a row that WAS detected before but is no longer in a pair (its
+      partner was re-filed by hand, or a new import made it ambiguous) is
+      re-decided by the chain, instead of staying a self transfer with no
+      partner. In the re-run pass the chain already did that for every
+      row; in the import pass this is what does it.
+
+    The rows are read `FOR UPDATE` for the same reason as in
+    `recategorize_user`: a manual choice made meanwhile must win.
+    """
+    rows = db.scalars(
+        select(Transaction).where(Transaction.user_id == user_id, _PAIRABLE).with_for_update()
+    ).all()
+    pairs = match_self_transfers(
+        [
+            TransferCandidate(row.id, row.account_id, row.direction, row.amount_paise, row.txn_date)
+            for row in rows
+        ]
+    )
+    paired = {row_id for pair in pairs for row_id in pair}
+
+    unpaired = [row for row in rows if row.id not in paired and is_detected_self_transfer(row)]
+    if unpaired:
+        redone = _categorize_rows(unpaired, context)
+        outcome.unknown_slugs.update(redone.unknown_slugs)
+        outcome.refused_ids += redone.refused_ids
+
+    category_id = context.usable.system_by_slug.get(SELF_TRANSFER)
+    if category_id is None:
+        # The seed and the code disagree (as for any unknown slug): the
+        # pairs stay as the chain left them, counted once in the log.
+        if paired:
+            outcome.unknown_slugs[SELF_TRANSFER] += len(paired)
+        return
+    for row in rows:
+        if row.id in paired:
+            row.category_id = category_id
+            row.category_source = CategorySource.HEURISTIC
+            row.category_confidence = SELF_TRANSFER_CONFIDENCE
+            row.is_self_transfer = True
+
+    # Counts only (CLAUDE.md rule 3).
+    log.info(
+        "self_transfers_detected",
+        user_id=str(user_id),
+        pairs_count=len(pairs),
+        rows_unpaired=len(unpaired),
+    )
+
+
+def is_detected_self_transfer(row: Transaction) -> bool:
+    """Was this row marked by self-transfer detection (not by the chain)?
+
+    Detection is the only thing that writes `heuristic` together with
+    `is_self_transfer`: the chain's one heuristic, P2P, files people under
+    an expense or income category, and a user rule is `user_rule`.
+    """
+    return row.category_source is CategorySource.HEURISTIC and row.is_self_transfer
 
 
 def _category_state(row: Transaction) -> tuple[object, ...]:
