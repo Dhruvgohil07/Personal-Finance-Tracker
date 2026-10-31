@@ -80,7 +80,21 @@ _SERIAL = re.compile(r"\d+")
 # Number column (the remarks start after it); the three amount labels open
 # their columns.
 _HEADER_LABELS = frozenset({"Number", "Remarks", "Withdrawal", "Deposit", "Balance"})
-# A label word belongs to the header block when it is this close to the
+# Every word the three-line header prints. Its extent - where the page's
+# body starts, and (on page 1) where the title block ends - is measured
+# from ALL of them, not only the labels above: the third line ("Date",
+# "Amount (INR)", "(INR)") lies below every label, and was read as body
+# text (review of Step 9).
+_HEADER_WORDS = _HEADER_LABELS | {
+    "S",
+    "No.",
+    "Transaction",
+    "Date",
+    "Cheque",
+    "Amount",
+    "(INR)",
+}
+# A header word belongs to the header block when it is this close to the
 # "Remarks" label (the header spans three lines).
 _HEADER_HEIGHT = 25.0
 
@@ -118,7 +132,8 @@ class _Columns:
     remarks_right: float  # the Withdrawal column starts here
     deposit_left: float
     balance_left: float
-    header_bottom: float
+    header_top: float  # the header's first line; above it, the title block
+    header_bottom: float  # the header's last line; below it, the rows
 
 
 @dataclass(frozen=True)
@@ -205,9 +220,14 @@ def _columns(words: Sequence[PdfWord]) -> _Columns | None:
     remarks = next((word for word in words if word.text == "Remarks"), None)
     if remarks is None:
         return None
+    block = [
+        word
+        for word in words
+        if word.text in _HEADER_WORDS and abs(word.top - remarks.top) <= _HEADER_HEIGHT
+    ]
     labels: dict[str, PdfWord] = {}
-    for word in words:
-        if word.text in _HEADER_LABELS and abs(word.top - remarks.top) <= _HEADER_HEIGHT:
+    for word in block:
+        if word.text in _HEADER_LABELS:
             labels.setdefault(word.text, word)
     if set(labels) != _HEADER_LABELS:
         return None
@@ -216,7 +236,8 @@ def _columns(words: Sequence[PdfWord]) -> _Columns | None:
         remarks_right=labels["Withdrawal"].x0,
         deposit_left=labels["Deposit"].x0,
         balance_left=labels["Balance"].x0,
-        header_bottom=max(word.bottom for word in labels.values()),
+        header_top=min(word.top for word in block),
+        header_bottom=max(word.bottom for word in block),
     )
 
 
