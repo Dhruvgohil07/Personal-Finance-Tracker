@@ -420,15 +420,27 @@ def _find_account_last4(header_rows: list[list[str]]) -> str | None:
                 continue
             # The value sits in a later column, with blank cells between.
             for value in row[position + 1 :]:
-                token = _ACCOUNT_TOKEN.search(value)
-                if token is None:
-                    continue
                 # The first account-looking token IS the account, so stop here
                 # either way rather than searching on and finding some other
                 # number further along the row.
-                tail = _ACCOUNT_TAIL_DIGITS.search(token.group())
-                return tail.group()[-4:] if tail is not None else None
+                if _ACCOUNT_TOKEN.search(value) is not None:
+                    return account_last4(value)
     return None
+
+
+def account_last4(text: str) -> str | None:
+    """The last 4 digits of the first account identifier in `text`, or None.
+
+    Shared by the `.xls` parser above and the PDF parser (app/parsers/
+    icici_pdf.py), which print the same full account number, so both
+    apply the same rule: four digits from the END of the identifier, and
+    None when that end is masked (see `_find_account_last4`).
+    """
+    token = _ACCOUNT_TOKEN.search(text)
+    if token is None:
+        return None
+    tail = _ACCOUNT_TAIL_DIGITS.search(token.group())
+    return tail.group()[-4:] if tail is not None else None
 
 
 def _cell(row: list[str], columns: dict[str, int], label: str) -> str:

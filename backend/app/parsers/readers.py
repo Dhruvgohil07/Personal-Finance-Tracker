@@ -34,9 +34,12 @@ import io
 from decimal import Decimal
 from pathlib import PurePosixPath
 
+import pdfplumber
 import xlrd
+from pdfminer.pdfdocument import PDFPasswordIncorrect
+from pdfplumber.utils.exceptions import PdfminerException
 
-from app.parsers.base import FileType, ParseError, ParserInput
+from app.parsers.base import FileType, ParseError, ParserInput, PdfWord
 
 # The first bytes of a file ("magic number"). These are fixed by the file
 # formats themselves, so they identify a file far better than its name.
@@ -49,12 +52,6 @@ _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 _ZIP_SIGNATURE = b"PK\x03\x04"
 _PDF_SIGNATURE = b"%PDF-"
 
-# The file types this module can turn into rows today. A PDF is DETECTED
-# (so it can be refused with a clear message) but not readable until the
-# PDF reader exists (Phase 2 Step 9), which adds it here. The import service
-# checks against this set in the request, so the two cannot disagree.
-READABLE_FILE_TYPES = frozenset({FileType.CSV, FileType.XLS})
-
 # A CSV is plain text and has no signature, so for CSV the file name is all
 # we have to go on.
 _CSV_EXTENSIONS = frozenset({".csv", ".txt"})
@@ -62,7 +59,7 @@ _CSV_EXTENSIONS = frozenset({".csv", ".txt"})
 # Names that promise a workbook. Several Indian banks' "Excel download" is
 # really tab-separated text or HTML served with an `.xls` name, so when one of
 # these arrives with no workbook signature the error has to say what is actually
-# wrong - "upload a CSV or an .xls statement" would describe what the user just
+# wrong - "upload a PDF, .xls or CSV statement" would describe what the user just
 # did and leave them stuck.
 _SPREADSHEET_EXTENSIONS = frozenset({".xls", ".xlsx", ".xlsm"})
 
@@ -119,7 +116,7 @@ def detect_file_type(filename: str, content: bytes) -> FileType:
             "gave you a text or HTML file, save it as .csv and upload that"
         )
 
-    raise ParseError("unsupported file type; upload a CSV or an .xls statement")
+    raise ParseError("unsupported file type; upload a PDF, .xls or CSV statement")
 
 
 def read_statement(filename: str, content: bytes) -> ParserInput:
@@ -135,14 +132,58 @@ def read_statement_as(file_type: FileType, content: bytes) -> ParserInput:
     stored on the upload. Detecting it again in the worker would need the
     name, and the stored name may be truncated - so the stored type is
     used, and the two halves of an import cannot disagree about it.
-
-    A PDF is refused until the PDF reader exists (Phase 2 Step 9).
     """
     if file_type is FileType.CSV:
         return read_csv(content)
     if file_type is FileType.XLS:
         return read_xls(content)
-    raise ParseError("PDF statements are not supported yet")
+    return read_pdf(content)
+
+
+def read_pdf(content: bytes) -> ParserInput:
+    """Read a PDF statement into its text lines AND its words with positions.
+
+    A PDF has no cells, only text drawn at coordinates (see `ParserInput`
+    and `PdfWord`), so the reader keeps the coordinates and leaves the
+    table to the bank's parser (Phase 2 Step 9, ADR 019):
+
+    - `pdf_words`: every word on every page, with its box;
+    - `rows`: every visual line's text as a one-cell row, top to bottom,
+      page after page - enough for `detect()` and for header fields such
+      as the statement period.
+
+    A password-protected PDF is refused with a clear message until Step 10
+    adds passwords. Any other unreadable PDF is refused too: pdfplumber's
+    own errors are internal (and may mention the file), so they become one
+    plain `ParseError`.
+    """
+    try:
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            rows: list[list[str]] = []
+            words: list[PdfWord] = []
+            for number, page in enumerate(pdf.pages, start=1):
+                rows.extend([line["text"]] for line in page.extract_text_lines())
+                words.extend(
+                    PdfWord(
+                        text=word["text"],
+                        page=number,
+                        x0=float(word["x0"]),
+                        x1=float(word["x1"]),
+                        top=float(word["top"]),
+                        bottom=float(word["bottom"]),
+                    )
+                    for word in page.extract_words()
+                )
+    except PdfminerException as exc:
+        # pdfminer reports an encrypted file it cannot open as
+        # PDFPasswordIncorrect, wrapped by pdfplumber.
+        if isinstance(exc.args[0] if exc.args else None, PDFPasswordIncorrect):
+            raise ParseError(
+                "this PDF is password-protected; password-protected statements are not "
+                "supported yet"
+            ) from None
+        raise ParseError("this PDF could not be read") from None
+    return ParserInput(FileType.PDF, rows=rows, pdf_words=words)
 
 
 def read_csv(content: bytes) -> ParserInput:

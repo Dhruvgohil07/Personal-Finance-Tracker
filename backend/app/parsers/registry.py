@@ -139,7 +139,10 @@ def build_default_registry() -> ParserRegistry:
     tomorrow.
     """
     from app.parsers.icici import IciciXlsParser
+    from app.parsers.icici_pdf import IciciPdfParser
 
     registry = ParserRegistry()
     registry.register(IciciXlsParser())
+    # The same bank twice is fine: different file types (see `register`).
+    registry.register(IciciPdfParser())
     return registry

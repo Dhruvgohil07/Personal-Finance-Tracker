@@ -8,7 +8,7 @@
 POST is the only endpoint in the app that takes a FILE, so it is the only
 one using a multipart form instead of a JSON body:
 
-    file           the statement (.xls or .csv; PDF comes in Phase 2 Step 9)
+    file           the statement (PDF, .xls or .csv)
     account_id     which of your accounts it belongs to
     column_mapping optional JSON, only for a CSV no bank parser recognises
 
@@ -81,7 +81,7 @@ def create_upload(
     db: DbSession,
     queue: JobQueue,
     # File() and Form() tell FastAPI this is a multipart form, not JSON.
-    file: Annotated[UploadFile, File(description="The statement file (.xls or .csv)")],
+    file: Annotated[UploadFile, File(description="The statement file (PDF, .xls or .csv)")],
     account_id: Annotated[uuid.UUID, Form(description="The account this statement belongs to")],
     column_mapping: Annotated[
         str | None,
