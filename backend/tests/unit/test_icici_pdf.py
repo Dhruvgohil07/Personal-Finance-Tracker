@@ -227,6 +227,21 @@ def test_rows_continue_across_pages_and_the_footer_is_ignored() -> None:
     assert [(r.row_number, r.raw_description) for r in rows] == [(1, "UPI/A/a@x/1"), (2, "B")]
 
 
+def test_the_headers_third_line_is_header_not_remarks() -> None:
+    """The header's third line lies below every column label. A header word
+    of it inside the remarks column was read as remark text above the first
+    row - every page refused (review of Step 9)."""
+    third_line = [
+        word("Date", 1, 61.4, HEADER_TOP + 10),
+        word("Amount", 1, 300.0, HEADER_TOP + 10),  # inside the remarks column
+        word("(INR)", 1, EDGE, HEADER_TOP + 10),
+    ]
+
+    rows = PARSER.parse(statement(header(1), third_line, row(1, FIRST_ROW))).rows
+
+    assert len(rows) == 1
+
+
 def test_a_legend_page_without_the_header_is_skipped() -> None:
     legend = [word("Legends", 3, 50.0, 100.0), word("Withdrawal", 3, 120.0, 100.0)]
     data = statement(header(1), row(1, FIRST_ROW), legend)
@@ -243,7 +258,8 @@ def test_a_page_with_header_and_no_rows_is_an_empty_statement() -> None:
 
 
 def test_text_above_the_first_row_is_an_error_not_dropped() -> None:
-    data = statement(header(1), remark_line("ORPHAN", 1, FIRST_ROW - 25), row(1, FIRST_ROW))
+    # Below the header's last line, above the first row's band.
+    data = statement(header(1), remark_line("ORPHAN", 1, FIRST_ROW - 18), row(1, FIRST_ROW))
 
     with pytest.raises(ParseError, match="page 1 has remark text above its first transaction"):
         PARSER.parse(data)
