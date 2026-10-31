@@ -172,9 +172,10 @@ class IciciPdfParser:
         return 0.95 if found else 0.0
 
     def parse(self, data: ParserInput) -> ParsedStatement:
-        """Read every page's rows, then the period and account from page 1."""
+        """Read every page's rows, then the period and account from page 1's title."""
         pages = sorted({word.page for word in data.pdf_words})
         rows: list[RawRow] = []
+        title: list[str] = []
         header_seen = False
         for page in pages:
             words = _words_on(data.pdf_words, page)
@@ -186,17 +187,19 @@ class IciciPdfParser:
                 if any(_is_date_word(word) for word in words):
                     raise ParseError(f"page {page} has dates but no ICICI column header")
                 continue
+            if page == pages[0]:
+                title = _title_lines(words, columns)
             header_seen = True
             rows.extend(_page_rows(words, columns, page, first_row_number=len(rows) + 1))
         if not header_seen:
             raise ParseError("this file does not look like an ICICI statement")
 
-        period_start, period_end = _find_period(data.rows)
+        period_start, period_end = _find_period(title)
         return ParsedStatement(
             rows=rows,
             period_start=period_start,
             period_end=period_end,
-            account_last4=_find_account_last4(data.rows),
+            account_last4=_find_account_last4(title),
         )
 
 
@@ -407,16 +410,28 @@ def _paise(text: str, field: str, row_number: int) -> int:
     return paise
 
 
-# --- Header fields (page 1) -------------------------------------------------
+# --- Header fields (page 1's title block) -----------------------------------
 
 
-def _find_period(lines: Sequence[list[str]]) -> tuple[date | None, date | None]:
+def _title_lines(words: Sequence[PdfWord], columns: _Columns) -> list[str]:
+    """Page 1's text ABOVE the column header: the title block, as lines.
+
+    The period and the account number are read from here only - never from
+    the rows or the legend below. A narration such as "account no
+    9876543210" further down must never be able to supply the account's
+    last four digits; the `.xls` parser likewise searches only the block
+    above its table (review of Step 9).
+    """
+    return [line.text for line in _group_lines([w for w in words if w.top < columns.header_top])]
+
+
+def _find_period(lines: Sequence[str]) -> tuple[date | None, date | None]:
     """The statement period from "... for the period <from> - <to>", or (None, None).
 
     Metadata, never a reason to fail an import (as for the `.xls`).
     """
     for line in lines:
-        match = _PERIOD.search(" ".join(line))
+        match = _PERIOD.search(line)
         if match is None:
             continue
         start, end = (_try_month_date(text) for text in match.groups())
@@ -436,15 +451,14 @@ def _try_month_date(text: str) -> date | None:
     return None
 
 
-def _find_account_last4(lines: Sequence[list[str]]) -> str | None:
+def _find_account_last4(lines: Sequence[str]) -> str | None:
     """The last 4 digits of the account number in the title line, or None.
 
     The title prints the FULL number ("... Savings Account No. 084601505606
     in INR ..."); only four digits ever leave this function (SPEC §7.3).
     """
     for line in lines:
-        text = " ".join(line)
-        position = text.lower().find(_ACCOUNT_LABEL)
+        position = line.lower().find(_ACCOUNT_LABEL)
         if position != -1:
-            return account_last4(text[position + len(_ACCOUNT_LABEL) :])
+            return account_last4(line[position + len(_ACCOUNT_LABEL) :])
     return None
