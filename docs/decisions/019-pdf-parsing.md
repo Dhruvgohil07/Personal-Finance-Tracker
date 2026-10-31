@@ -84,3 +84,36 @@ structure was inspected (positions, counts, lengths and masked shapes), never co
   closer than 32.5 pt.
 - **New dev dependency `fpdf2`** for the synthetic PDF builder (`tests/fixtures/
   icici_pdf.py`), which draws the measured layout.
+
+## Amendment — code review of PR 24 (8 findings, all addressed)
+Two decisions were made with Dhruv (marked *decided*).
+
+1. **The account's last 4 and the period come only from page 1's title block** (the
+   words above the column header). Before, every text line of the PDF was searched, so
+   a narration such as "account no 9876543210" could have supplied the digits had the
+   title's wording changed.
+2. **Any failure while reading a PDF becomes one `ParseError`.** pdfplumber does not
+   wrap every failure: its public `extract_words()` was seen raising a bare `IndexError`
+   on a damaged PDF. The finding named `MalformedPDFException`, which pdfplumber in fact
+   wraps; the broad catch covers both. Only third-party parsing of the uploaded bytes
+   runs inside it.
+3. **Remarks carried over to the next page join the previous row** (*decided*). They
+   must run on from just under the header without a gap. On every real page the first
+   remark line starts 6.9 pt below the header, and the footer about 700 pt below. A
+   page holding only a continuation still drops its footer. On the first statement
+   page, or for text that does not run on from the header, it stays an error.
+4. **The name line matches even when the name field ends in a space.** The bank may
+   cut the name right after a space ("RAM KUMAR /vpa").
+5. **`read_statement_as` dispatches each file type by name** and refuses anything else.
+   Before, every non-CSV, non-XLS type went to `read_pdf`.
+6. **The header block's extent comes from all its words**, including its third line
+   ("Date", "Amount (INR)"). Before, it came only from the five column labels.
+7. **A local real-file cross-check**, `tests/unit/test_real_samples.py` (*decided*). It
+   checks that every `.xls` and PDF in `samples/` covering a common day give the same
+   transactions on those days. It asserts counts only and skips where no such pair
+   exists, CI included. This answers the finding that the synthetic cross-format test
+   is circular, because its PDFs are drawn by our own fixture.
+8. **Words are split by page once**, and each word's row is found by binary search.
+
+The real PDF parses to identical rows, period and last 4 after every one of these
+changes (checked with a digest of the parsed output, counts and hashes only).
