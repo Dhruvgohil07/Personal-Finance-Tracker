@@ -37,7 +37,6 @@ from pathlib import PurePosixPath
 import pdfplumber
 import xlrd
 from pdfminer.pdfdocument import PDFPasswordIncorrect
-from pdfplumber.utils.exceptions import PdfminerException
 
 from app.parsers.base import FileType, ParseError, ParserInput, PdfWord
 
@@ -174,10 +173,18 @@ def read_pdf(content: bytes) -> ParserInput:
                     )
                     for word in page.extract_words()
                 )
-    except PdfminerException as exc:
+    # ANY exception, not only pdfplumber's PdfminerException. These are the
+    # uploaded bytes of an untrusted file, and pdfplumber does not wrap every
+    # failure: in the review of Step 9 its public `extract_words()` raised a
+    # bare IndexError on a PDF with a damaged cross-reference table. Missed,
+    # such a file would go through three retries to a generic "something
+    # went wrong" instead of this message. Only third-party parsing of the
+    # bytes runs in this `try`, so the broad catch cannot hide a bug of ours.
+    except Exception as exc:
         # pdfminer reports an encrypted file it cannot open as
-        # PDFPasswordIncorrect, wrapped by pdfplumber.
-        if isinstance(exc.args[0] if exc.args else None, PDFPasswordIncorrect):
+        # PDFPasswordIncorrect, which pdfplumber wraps in its own exception.
+        cause = exc.args[0] if exc.args else None
+        if isinstance(exc, PDFPasswordIncorrect) or isinstance(cause, PDFPasswordIncorrect):
             raise ParseError(
                 "this PDF is password-protected; password-protected statements are not "
                 "supported yet"
