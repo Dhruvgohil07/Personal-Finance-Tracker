@@ -352,14 +352,30 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   7. `commit_and_recategorize` moved to the categorization service
 
   1360 tests, 100% coverage
+- [x] Step 9: ICICI PDF parser — `read_pdf` (pdfplumber) passes words with positions
+  (`ParserInput.pdf_words`, `PdfWord`), and the pure `IciciPdfParser` rebuilds the rows:
+  - a row starts one line above its dated line; the footer is cut at the first gap;
+  - direction comes from the amount's column;
+  - the name line is dropped when it repeats the UPI name;
+  - wrapped lines are joined by a measured rule (a one-word line within 25 pt of the
+    edge = a mid-token split).
+
+  `account_last4` is shared with the `.xls` parser, and PDFs are accepted at upload.
+  New dev dependency `fpdf2` builds synthetic PDFs (`tests/fixtures/icici_pdf.py`).
+  ADR 019. **Real PDF: 178/178 rows, balances reconcile (0 issues), last 4 matches the
+  `.xls`, 177/178 narrations rebuild the `.xls` layout exactly.** The same rows as
+  `.xls` and as PDF give 100% duplicates (synthetic, both orders).
+  1399 tests, 100% coverage
 
 ## In progress
 - (nothing)
 
 ## Next up
-- Steps 9–10 (ICICI PDF, password PDFs) are blocked until the ICICI PDF is in `samples/`
-- Step 11 (acceptance) needs the PDF too. Its self-transfer check needs a second real
-  account's statement
+- **Real cross-check of Step 9:** put an ICICI `.xls` of the PDF's exact period in
+  `samples/`, then run the counts-only comparison (every PDF row must match an `.xls`
+  row). The two current samples share no day
+- Phase 2 Step 10: password-protected PDFs (new dependency `pypdf`, added with `uv add`)
+- Step 11 (acceptance): its self-transfer check needs a second real account's statement
 
 ## Open decisions / questions
 - Git workflow → decided: `main` protected (ruleset `protect-main`); every change via a
@@ -447,6 +463,14 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
 
   The Step 6 check that a rule's category belongs to its user is now enforced in both
   places: `POST/PATCH /rules` (404) and where the id is written
+- PDF parsing → decided (ADR 019, with Dhruv):
+  - word positions travel in `ParserInput.pdf_words`, so the parser stays pure;
+  - the name line is dropped only when it equals the UPI name field;
+  - unseen PDF row kinds (NEFT, ATM) are parsed with the same rules;
+  - the cross-format check runs on a same-period real `.xls` (pending).
+
+  `uv` was installed with winget (0.13.6). It bumped `uv.lock` to `revision = 5`; CI's
+  setup-uv installs the latest uv, which reads it
 - Self transfers → decided (ADR 018, with Dhruv):
   - detection runs in every categorization pass, not as a `post_import_analysis` job;
   - only uncategorized or P2P-`heuristic` rows pair; merchant, keyword and user-rule

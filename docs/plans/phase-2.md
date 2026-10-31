@@ -385,3 +385,15 @@ and Step 5's narration rules).
 
   Deletes now re-run when they break a pair, and the import pass reads only the new
   amounts.
+- **Step 9:** done as **ADR 019** (the plan's "ADR 017" was taken by Steps 7 and 8;
+  Step 10's ADR becomes 020). No migration. Four decisions were confirmed with Dhruv
+  after profiling the real PDF (shapes and counts only):
+  - word positions travel in `ParserInput.pdf_words`;
+  - the extra name line is dropped when it repeats the UPI name field;
+  - unseen row kinds are parsed with the same rules;
+  - the real cross-check waits for a same-period `.xls`.
+
+  The PDF has no grid, so the plan's "table extraction first" was replaced by
+  word-position rows. The joining rule's 25 pt threshold was measured, after a first
+  guess of 10 pt failed on the real file. `uv` had to be installed (winget) to add
+  `fpdf2`.
