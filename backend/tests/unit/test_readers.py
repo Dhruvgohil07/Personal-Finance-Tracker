@@ -13,6 +13,7 @@ import pytest
 import xlrd
 import xlwt
 
+from app.parsers import readers
 from app.parsers.base import FileType, ParseError
 from app.parsers.readers import (
     _cell_to_text,
@@ -405,6 +406,24 @@ def test_a_pdf_is_read_into_lines_and_positioned_words(tmp_path: Path) -> None:
     assert remarks.page == 1
     assert remarks.x0 == pytest.approx(260.0, abs=0.5)
     assert remarks.top < remarks.bottom
+
+
+@pytest.mark.parametrize("error", [IndexError("list index out of range"), KeyError("Root")])
+def test_any_failure_inside_pdfplumber_is_one_plain_parse_error(
+    error: Exception, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pdfplumber does not wrap every failure on damaged bytes: its public
+    extract_words() was seen raising a bare IndexError (review of Step 9).
+    Simulated here, because the reader's own call order happens to recover
+    from the damaged file that showed it."""
+
+    def broken_open(*args: object, **kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(readers.pdfplumber, "open", broken_open)
+
+    with pytest.raises(ParseError, match="^this PDF could not be read$"):
+        read_statement_as(FileType.PDF, b"%PDF-1.7\n")
 
 
 def test_a_password_protected_pdf_has_its_own_message(tmp_path: Path) -> None:
