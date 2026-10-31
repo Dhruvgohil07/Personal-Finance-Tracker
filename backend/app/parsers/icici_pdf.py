@@ -56,6 +56,8 @@ with the `.xls` and may differ.
 """
 
 import re
+from bisect import bisect_right
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -167,18 +169,18 @@ class IciciPdfParser:
         0.95 for the same reason as the `.xls` parser: the header alone is
         strong evidence, not proof.
         """
-        pages = {word.page for word in data.pdf_words}
-        found = any(_columns(_words_on(data.pdf_words, page)) is not None for page in pages)
+        pages = _by_page(data.pdf_words)
+        found = any(_columns(words) is not None for words in pages.values())
         return 0.95 if found else 0.0
 
     def parse(self, data: ParserInput) -> ParsedStatement:
         """Read every page's rows, then the period and account from page 1's title."""
-        pages = sorted({word.page for word in data.pdf_words})
+        pages = _by_page(data.pdf_words)
+        first_page = min(pages, default=None)
         parts: list[_RowParts] = []
         title: list[str] = []
         header_seen = False
-        for page in pages:
-            words = _words_on(data.pdf_words, page)
+        for page, words in sorted(pages.items()):
             columns = _columns(words)
             if columns is None:
                 # A page without the header (the legend page, say) may not
@@ -187,7 +189,7 @@ class IciciPdfParser:
                 if any(_is_date_word(word) for word in words):
                     raise ParseError(f"page {page} has dates but no ICICI column header")
                 continue
-            if page == pages[0]:
+            if page == first_page:
                 title = _title_lines(words, columns)
             header_seen = True
             continuation, page_parts = _page_parts(words, columns, page, len(parts) + 1)
@@ -217,8 +219,16 @@ class IciciPdfParser:
 # --- Columns and rows -------------------------------------------------------
 
 
-def _words_on(words: Sequence[PdfWord], page: int) -> list[PdfWord]:
-    return [word for word in words if word.page == page]
+def _by_page(words: Sequence[PdfWord]) -> dict[int, list[PdfWord]]:
+    """The words of each page, in one pass over all of them.
+
+    Filtering every word once per page was quadratic in the page count, and
+    was done twice, by `detect` and `parse` (review of Step 9).
+    """
+    pages: dict[int, list[PdfWord]] = defaultdict(list)
+    for word in words:
+        pages[word.page].append(word)
+    return pages
 
 
 def _is_date_word(word: PdfWord) -> bool:
@@ -314,14 +324,15 @@ def _remark_lines(
         for word in body
         if word.x0 >= columns.remarks_left and word.x1 <= columns.remarks_right
     ]
+    # Where each row's band starts, top to bottom. A word belongs to the
+    # LAST row whose band starts at or above it: a binary search, instead of
+    # comparing every word with every row (review of Step 9).
+    starts = [anchor.top - _ROW_STARTS_ABOVE for anchor in anchors]
     above: list[PdfWord] = []
     owned: list[list[PdfWord]] = [[] for _ in anchors]
     for word in in_column:
-        owner = None
-        for index, anchor in enumerate(anchors):
-            if anchor.top - _ROW_STARTS_ABOVE <= word.top:
-                owner = index
-        if owner is None:
+        owner = bisect_right(starts, word.top) - 1
+        if owner < 0:
             above.append(word)
         else:
             owned[owner].append(word)
