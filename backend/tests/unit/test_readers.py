@@ -7,6 +7,7 @@ whole xlrd path is exercised exactly as it will be for a real upload.
 
 import datetime
 import io
+from pathlib import Path
 
 import pytest
 import xlrd
@@ -14,7 +15,6 @@ import xlwt
 
 from app.parsers.base import FileType, ParseError
 from app.parsers.readers import (
-    READABLE_FILE_TYPES,
     _cell_to_text,
     detect_file_type,
     read_csv,
@@ -23,6 +23,7 @@ from app.parsers.readers import (
     read_xls,
 )
 from app.utils.money import parse_amount_to_paise
+from tests.fixtures.icici_pdf import build_icici_pdf
 
 OLE2 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
@@ -264,18 +265,15 @@ def test_read_statement_as_trusts_the_type_it_is_given() -> None:
     assert data.rows[1] == ["01/08/2026", "SHOP"]
 
 
-def test_every_readable_type_is_read_and_pdf_is_not_yet() -> None:
-    """READABLE_FILE_TYPES is what the upload request checks against, so it
-    must say exactly what read_statement_as can read."""
-    assert READABLE_FILE_TYPES == {FileType.CSV, FileType.XLS}
-    with pytest.raises(ParseError, match="PDF statements are not supported yet"):
-        read_statement_as(FileType.PDF, b"%PDF-1.7\nrest")
-
-
-def test_read_statement_refuses_a_pdf_for_now() -> None:
-    """PDF parsing is Phase 2; the message must say so, not "unsupported"."""
-    with pytest.raises(ParseError, match="PDF statements are not supported yet"):
-        read_statement("statement.pdf", b"%PDF-1.7\nrest")
+def test_a_damaged_pdf_is_one_plain_parse_error() -> None:
+    """pdfplumber's own errors are internal; the user gets one sentence,
+    through both entry points (by name, and by the type stored at upload)."""
+    for read in (
+        lambda: read_statement("statement.pdf", b"%PDF-1.7\nnot really a pdf"),
+        lambda: read_statement_as(FileType.PDF, b"%PDF-1.7\nnot really a pdf"),
+    ):
+        with pytest.raises(ParseError, match="^this PDF could not be read$"):
+            read()
 
 
 def test_a_false_boolean_cell_becomes_text() -> None:
@@ -389,3 +387,29 @@ def test_a_workbook_with_no_sheets_is_rejected(monkeypatch: pytest.MonkeyPatch) 
 
     with pytest.raises(ParseError, match="workbook has no sheets"):
         read_xls(OLE2 + b"the content is irrelevant: xlrd is stubbed")
+
+
+# --- PDF (Phase 2 Step 9) ----------------------------------------------------------
+
+
+def test_a_pdf_is_read_into_lines_and_positioned_words(tmp_path: Path) -> None:
+    """Lines of text for detect() and header fields; words with their boxes
+    for the parser to rebuild the table from (ADR 019)."""
+    content = build_icici_pdf(tmp_path / "statement.pdf").read_bytes()
+
+    data = read_statement("statement.pdf", content)
+
+    assert data.file_type is FileType.PDF
+    assert any(row[0].startswith("Statement of Transactions") for row in data.rows)
+    remarks = next(word for word in data.pdf_words if word.text == "Remarks")
+    assert remarks.page == 1
+    assert remarks.x0 == pytest.approx(260.0, abs=0.5)
+    assert remarks.top < remarks.bottom
+
+
+def test_a_password_protected_pdf_has_its_own_message(tmp_path: Path) -> None:
+    """Until Step 10, the user must learn the PASSWORD is the problem."""
+    content = build_icici_pdf(tmp_path / "locked.pdf", password="1234").read_bytes()
+
+    with pytest.raises(ParseError, match="password-protected"):
+        read_statement_as(FileType.PDF, content)

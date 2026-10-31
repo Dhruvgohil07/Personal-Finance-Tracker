@@ -150,13 +150,43 @@ class ParserInput:
     blank rows: `detect()` needs the header to recognise the bank, so the
     reader must not throw it away.
 
-    `frozen=True` stops the two fields being reassigned. It does not
+    `frozen=True` stops the fields being reassigned. It does not
     deep-freeze the lists inside (Python has no cheap way to do that), so
     by convention parsers read `rows` and never mutate it.
+
+    **A PDF also carries `pdf_words`** (Phase 2 Step 9, ADR 019). A PDF is
+    not a table of cells: it is text drawn at positions on a page, and a
+    statement's columns exist only as x positions. Rebuilding its rows -
+    which column a number sits in, which lines belong to which transaction
+    - needs those positions, so the reader passes every word with its box.
+    For a PDF, `rows` holds each visual line's text as a one-cell row, so
+    `detect()` and header searches still work on plain text. The parser
+    stays pure: it gets plain data, never a pdfplumber object.
     """
 
     file_type: FileType
     rows: list[list[str]] = field(default_factory=list)
+    pdf_words: list["PdfWord"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PdfWord:
+    """One word of a PDF page and where it was drawn (ADR 019).
+
+    PDF coordinates in points (1/72 inch), as pdfplumber reports them:
+    `x0`/`x1` from the page's left edge, `top`/`bottom` from its TOP edge,
+    so a larger `top` is further down the page. `page` is 1-based.
+
+    A "word" is a run of characters without a space, so "UPI/NAME/VPA" is
+    one word and "YES BANK" is two.
+    """
+
+    text: str
+    page: int
+    x0: float
+    x1: float
+    top: float
+    bottom: float
 
 
 @dataclass(frozen=True)

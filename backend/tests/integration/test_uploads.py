@@ -694,25 +694,18 @@ def test_deleting_the_account_deletes_its_transactions(
 # --- Files we refuse --------------------------------------------------------
 
 
-def test_a_pdf_is_rejected(
-    client: TestClient, alice: dict[str, str], account_id: str, db: Session
+def test_a_damaged_pdf_is_accepted_then_fails_with_a_message(
+    client: TestClient, alice: dict[str, str], account_id: str
 ) -> None:
-    """PDF parsing is Phase 2 Step 9. The file's signature says it is a
-    PDF, so it is refused in the request - no row, no stored file, no job -
-    and the same file can be uploaded once PDFs are supported."""
-    response = post_upload(
-        client,
-        alice,
-        content=b"%PDF-1.7\n%fake\n",
-        account_id=account_id,
-        filename="statement.pdf",
+    """PDFs are imported since Phase 2 Step 9. The signature alone cannot
+    tell a damaged PDF from a good one, so it is accepted (202) and the
+    worker reports it on the upload, like any unreadable file."""
+    body = import_file(
+        client, alice, content=b"%PDF-1.7\n%fake\n", account_id=account_id, filename="s.pdf"
     )
 
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "INVALID_STATEMENT"
-    assert response.json()["error"]["message"] == imports_service.PDF_NOT_SUPPORTED_MESSAGE
-    assert db.scalar(select(func.count()).select_from(StatementUpload)) == 0
-    assert count_blobs(db) == 0
+    assert body["status"] == "failed"
+    assert body["error_message"] == "this PDF could not be read"
 
 
 def test_an_empty_file_is_rejected(

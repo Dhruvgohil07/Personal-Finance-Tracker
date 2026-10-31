@@ -67,7 +67,7 @@ from app.parsers.base import FileType, ParsedStatement, ParseError, RawRow, Stat
 from app.parsers.fingerprint import fingerprints_for
 from app.parsers.generic_csv import ColumnMapping, GenericCsvParser
 from app.parsers.normalize import normalize_row
-from app.parsers.readers import READABLE_FILE_TYPES, detect_file_type, read_statement_as
+from app.parsers.readers import detect_file_type, read_statement_as
 from app.parsers.reconcile import Issue, reconcile, to_chronological
 from app.parsers.registry import ParserRegistry, build_default_registry
 from app.services import accounts as accounts_service
@@ -92,12 +92,6 @@ MAPPING_NEEDS_CSV_MESSAGE = "A column mapping can only be used with a CSV file."
 WRONG_ACCOUNT_NUMBER_MESSAGE = (
     "This statement is for a different account number than the account you selected."
 )
-# For a detected type the readers cannot read yet (`READABLE_FILE_TYPES`).
-# Today that is only PDF, until the PDF parser exists (Phase 2 Step 9). The
-# type is known from the signature, so there is no reason to store the file
-# and let the worker discover the same thing.
-PDF_NOT_SUPPORTED_MESSAGE = "PDF statements are not supported yet; upload the .xls or CSV version."
-
 # The `error_message` of a failed upload, for the failures that are not the
 # file's fault. Each one tells the user what to do next.
 QUEUE_UNAVAILABLE_MESSAGE = (
@@ -591,10 +585,11 @@ def parse_statement(
     try:
         data = read_statement_as(file_type, content)
     except ParseError as exc:
-        # The request already refused empty files, unsupported types and
-        # PDFs (`_supported_file_type`), so in the worker this is a file
-        # whose signature is right but whose contents cannot be read: a
-        # damaged .xls, or a "CSV" that is not text.
+        # The request already refused empty files and unsupported types
+        # (`_supported_file_type`), so in the worker this is a file whose
+        # signature is right but whose contents cannot be read: a damaged
+        # .xls or PDF, a password-protected PDF (until Step 10), or a "CSV"
+        # that is not text.
         raise InvalidStatementError(str(exc)) from None
 
     parser: StatementParser | None = _registry().detect(data)
@@ -746,16 +741,15 @@ def _supported_file_type(filename: str, content: bytes) -> FileType:
     no signature); nothing is parsed. That is enough to refuse an empty
     file, a Word document or an `.xlsx` while the user is still waiting
     for the response.
+
+    Every type it can detect is readable since PDFs arrived (Phase 2 Step
+    9). A PDF the worker then cannot open - a password-protected one, until
+    Step 10 - fails there with a message, like any unreadable file.
     """
     try:
-        file_type = detect_file_type(filename, content)
+        return detect_file_type(filename, content)
     except ParseError as exc:
         raise InvalidStatementError(str(exc)) from None
-    # The readers' own list of what they can read, so this check and the
-    # worker cannot disagree (only PDF is detected but unreadable today).
-    if file_type not in READABLE_FILE_TYPES:
-        raise InvalidStatementError(PDF_NOT_SUPPORTED_MESSAGE)
-    return file_type
 
 
 def _issues_to_json(issues: list[Issue] | None) -> list[dict[str, object]] | None:

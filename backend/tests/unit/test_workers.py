@@ -149,12 +149,11 @@ def test_a_column_mapping_survives_the_trip_through_the_database() -> None:
 @pytest.mark.parametrize(
     ("filename", "content", "message"),
     [
-        ("statement.pdf", b"%PDF-1.7\n", imports_service.PDF_NOT_SUPPORTED_MESSAGE),
         ("statement.xls", b"", "file is empty"),
         (
             "notes.docx",
             b"just some notes",
-            "unsupported file type; upload a CSV or an .xls statement",
+            "unsupported file type; upload a PDF, .xls or CSV statement",
         ),
     ],
 )
