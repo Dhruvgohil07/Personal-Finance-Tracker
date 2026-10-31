@@ -153,8 +153,9 @@ def read_pdf(content: bytes) -> ParserInput:
 
     - `pdf_words`: every word on every page, with its box;
     - `rows`: every visual line's text as a one-cell row, top to bottom,
-      page after page - enough for `detect()` and for header fields such
-      as the statement period.
+      page after page - the plain text, for any parser that needs no
+      positions. (The ICICI parser reads even its title from the words,
+      so it can tell the title block from the rows.)
 
     A password-protected PDF is refused with a clear message until Step 10
     adds passwords. Any other unreadable PDF is refused too: pdfplumber's

@@ -159,9 +159,9 @@ class ParserInput:
     statement's columns exist only as x positions. Rebuilding its rows -
     which column a number sits in, which lines belong to which transaction
     - needs those positions, so the reader passes every word with its box.
-    For a PDF, `rows` holds each visual line's text as a one-cell row, so
-    `detect()` and header searches still work on plain text. The parser
-    stays pure: it gets plain data, never a pdfplumber object.
+    For a PDF, `rows` also holds each visual line's text as a one-cell row,
+    for anything that only needs the plain text. The parser stays pure: it
+    gets plain data, never a pdfplumber object.
     """
 
     file_type: FileType

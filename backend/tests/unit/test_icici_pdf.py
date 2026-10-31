@@ -94,8 +94,18 @@ def row(
     return words
 
 
+def title_line(text: str) -> list[PdfWord]:
+    """Page 1's title, drawn above the column header like the real one."""
+    words, x = [], 30.0
+    for part in text.split(" "):
+        words.append(word(part, 1, x, 120.0))
+        x = words[-1].x1 + CHAR
+    return words
+
+
 def statement(*words: list[PdfWord], title: str | None = None) -> ParserInput:
-    flat = [w for group in words for w in group]
+    groups = [title_line(title), *words] if title is not None else list(words)
+    flat = [w for group in groups for w in group]
     rows = [[title]] if title is not None else []
     return ParserInput(FileType.PDF, rows=rows, pdf_words=flat)
 
@@ -336,11 +346,11 @@ TITLE = "Statement of Transactions in Savings Account No. 084600001234 in INR fo
 def test_the_period_is_read_from_the_title(
     period: str, expected: tuple[date | None, date | None]
 ) -> None:
-    assert _find_period([["header"], [TITLE + period]]) == expected
+    assert _find_period(["header", TITLE + period]) == expected
 
 
 def test_no_period_line_is_no_period() -> None:
-    assert _find_period([["Statement of Transactions"]]) == (None, None)
+    assert _find_period(["Statement of Transactions"]) == (None, None)
 
 
 @pytest.mark.parametrize(
@@ -354,7 +364,7 @@ def test_no_period_line_is_no_period() -> None:
     ],
 )
 def test_only_the_last_four_digits_leave_the_title(title: str, last4: str | None) -> None:
-    assert _find_account_last4([[title]]) == last4
+    assert _find_account_last4([title]) == last4
 
 
 def test_the_parsed_statement_carries_period_and_account() -> None:
@@ -367,3 +377,32 @@ def test_the_parsed_statement_carries_period_and_account() -> None:
         date(2026, 8, 31),
         "1234",
     )
+
+
+def test_the_account_is_never_read_from_below_the_header() -> None:
+    """A narration's "account no ..." must never supply the last four digits:
+    only page 1's title block is searched (review of Step 9)."""
+    remarks = (("A", False), ("IMPS/account no 987654329999/ref", False))
+    words = statement(header(1), row(1, FIRST_ROW, remarks=remarks), title="Savings statement")
+    # As the reader builds it: EVERY visual line is in `rows`, narrations too.
+    data = ParserInput(
+        FileType.PDF,
+        rows=[["Savings statement"], ["IMPS/account no 987654329999/ref"]],
+        pdf_words=words.pdf_words,
+    )
+
+    parsed = PARSER.parse(data)
+
+    assert parsed.account_last4 is None
+    assert (parsed.period_start, parsed.period_end) == (None, None)
+
+
+def test_a_title_on_a_page_without_the_header_is_not_read() -> None:
+    """The title block is page 1's, and only when page 1 is a statement page."""
+    data = statement(
+        title_line(TITLE + "August 1, 2026 - August 31, 2026"),  # page 1, no header
+        header(2),
+        row(2, FIRST_ROW),
+    )
+
+    assert PARSER.parse(data).account_last4 is None
