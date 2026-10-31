@@ -416,3 +416,62 @@ def test_a_title_on_a_page_without_the_header_is_not_read() -> None:
     )
 
     assert PARSER.parse(data).account_last4 is None
+
+
+# --- Remarks carried over to the next page (review of Step 9, decided with Dhruv) -----------
+
+# The header's last line ends at HEADER_TOP + 18; carried-over remarks start
+# right under it, as the first remark line of every real page does (6.9 pt).
+CONTINUED_TOP = HEADER_TOP + 25
+
+
+def test_remarks_carried_over_to_the_next_page_join_their_row() -> None:
+    """The last row of page 1 continues at the top of page 2, its txn id
+    split mid-token across the page break - and the narration is whole."""
+    first_page = row(
+        1,
+        FIRST_ROW,
+        serial="1",
+        remarks=(("MOON CAFE", False), ("UPI/MOON CAFE/q123456789@ybl/NO", False)),
+    )
+    carried = [
+        *remark_line("REMARK/YES BANK", 2, CONTINUED_TOP),
+        *remark_line("L/512345678901/ICI4f2a9c1e7b3d5f6a8c0e2b", 2, CONTINUED_TOP + 10, full=True),
+        *remark_line("4d6f8a1c3e", 2, CONTINUED_TOP + 20),
+    ]
+    second_page = row(2, CONTINUED_TOP + 60, serial="2", day="02.08.2026")
+
+    rows = PARSER.parse(statement(header(1), first_page, header(2), carried, second_page)).rows
+
+    assert [r.raw_description for r in rows] == [UPI_NARRATION, ""]
+
+
+def test_a_page_of_only_carried_over_remarks_keeps_them_and_drops_its_footer() -> None:
+    carried = remark_line("BANK", 2, CONTINUED_TOP)
+    footer = remark_line("www.icicibank.com", 2, 780.0)
+    data = statement(
+        header(1),
+        row(1, FIRST_ROW, remarks=(("A", False), ("UPI/A/a@x/NO", False))),
+        header(2),
+        carried,
+        footer,
+        header(3),
+        row(3, FIRST_ROW, serial="2", day="03.08.2026"),
+    )
+
+    assert [r.raw_description for r in PARSER.parse(data).rows] == ["UPI/A/a@x/NO BANK", ""]
+
+
+def test_text_above_a_pages_first_row_that_is_not_carried_over_is_an_error() -> None:
+    """Not under the header (a gap first), not in a row: nothing explains it."""
+    stray = remark_line("STRAY", 2, CONTINUED_TOP + 20)
+    data = statement(
+        header(1),
+        row(1, FIRST_ROW),
+        header(2),
+        stray,
+        row(2, CONTINUED_TOP + 60, serial="2", day="02.08.2026"),
+    )
+
+    with pytest.raises(ParseError, match="page 2 has remark text above its first transaction"):
+        PARSER.parse(data)
