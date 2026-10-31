@@ -366,14 +366,29 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   `.xls`, 177/178 narrations rebuild the `.xls` layout exactly.** The same rows as
   `.xls` and as PDF give 100% duplicates (synthetic, both orders).
   1399 tests, 100% coverage
+- [x] Step 9 code review (`/code-review high` on PR 24, 8 findings) — all 8 addressed
+  (ADR 019 amendment):
+  1. the account and period come only from page 1's title block
+  2. any failure while reading a PDF is one plain `ParseError`
+  3. remarks carried over to the next page join the previous row (decided with
+     Dhruv)
+  4. the name line matches a name field ending in a space
+  5. file types are dispatched by name
+  6. the header's third line is header
+  7. a local real-file cross-check test, `tests/unit/test_real_samples.py` (decided
+     with Dhruv)
+  8. words split by page once; row owners found by binary search
+
+  The real PDF parses identically after each fix. 1409 tests (+1 skipped: the
+  real-samples check), 100% coverage
 
 ## In progress
 - (nothing)
 
 ## Next up
 - **Real cross-check of Step 9:** put an ICICI `.xls` of the PDF's exact period in
-  `samples/`, then run the counts-only comparison (every PDF row must match an `.xls`
-  row). The two current samples share no day
+  `samples/`, then run `uv run pytest tests/unit/test_real_samples.py` (counts only;
+  skipped until such a pair exists). The two current samples share no day
 - Phase 2 Step 10: password-protected PDFs (new dependency `pypdf`, added with `uv add`)
 - Step 11 (acceptance): its self-transfer check needs a second real account's statement
 

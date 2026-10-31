@@ -397,3 +397,8 @@ and Step 5's narration rules).
   word-position rows. The joining rule's 25 pt threshold was measured, after a first
   guess of 10 pt failed on the real file. `uv` had to be installed (winget) to add
   `fpdf2`.
+- **Step 9 review** (`/code-review high` on PR 24, 8 findings, all addressed; ADR 019
+  amendment). No migration or new ADR. Decided with Dhruv:
+  - remarks carried over to the next page join the previous row;
+  - the real-file cross-check is a local test (`tests/unit/test_real_samples.py`)
+    that skips without a same-period pair.
