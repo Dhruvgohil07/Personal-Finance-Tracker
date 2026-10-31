@@ -174,7 +174,7 @@ class IciciPdfParser:
     def parse(self, data: ParserInput) -> ParsedStatement:
         """Read every page's rows, then the period and account from page 1's title."""
         pages = sorted({word.page for word in data.pdf_words})
-        rows: list[RawRow] = []
+        parts: list[_RowParts] = []
         title: list[str] = []
         header_seen = False
         for page in pages:
@@ -190,10 +190,21 @@ class IciciPdfParser:
             if page == pages[0]:
                 title = _title_lines(words, columns)
             header_seen = True
-            rows.extend(_page_rows(words, columns, page, first_row_number=len(rows) + 1))
+            continuation, page_parts = _page_parts(words, columns, page, len(parts) + 1)
+            if continuation:
+                # Remarks the bank carried over from the previous page's last
+                # row (decided with Dhruv, review of Step 9). On the first
+                # statement page there is no row to carry them over from.
+                if not parts:
+                    raise ParseError(f"page {page} has remark text above its first transaction")
+                parts[-1].remarks.extend(continuation)
+            parts.extend(page_parts)
         if not header_seen:
             raise ParseError("this file does not look like an ICICI statement")
 
+        # Only now, with every page read: a row's remarks may still have
+        # grown with the next page's continuation.
+        rows = [_parse_row(part) for part in parts]
         period_start, period_end = _find_period(title)
         return ParsedStatement(
             rows=rows,
@@ -244,42 +255,66 @@ def _columns(words: Sequence[PdfWord]) -> _Columns | None:
     )
 
 
-def _page_rows(
+@dataclass
+class _RowParts:
+    """One transaction's pieces, gathered before it becomes a `RawRow`.
+
+    Not frozen: `remarks` may still grow when the next page carries the
+    rest of this row's remarks over (see `parse`).
+    """
+
+    line: list[PdfWord]  # the dated line
+    anchor: PdfWord  # its date
+    remarks: list[_Line]
+    columns: _Columns
+    fallback_number: int
+
+
+def _page_parts(
     words: Sequence[PdfWord], columns: _Columns, page: int, first_row_number: int
-) -> list[RawRow]:
-    """The transactions on one page, top to bottom."""
+) -> tuple[list[_Line], list[_RowParts]]:
+    """One page's transactions, plus remark lines carried over from the previous page."""
     body = [word for word in words if word.top > columns.header_bottom]
     # A dated line is a date in the columns LEFT of the remarks.
     anchors = sorted(
         (word for word in body if _is_date_word(word) and word.x1 <= columns.remarks_left),
         key=lambda word: word.top,
     )
-    remark_lines = _remark_lines(body, columns, anchors, page)
-    return [
-        _parse_row(
-            _same_line(body, anchor),
-            anchor,
-            remark_lines[index],
-            columns,
+    continuation, remark_lines = _remark_lines(body, columns, anchors, page)
+    parts = [
+        _RowParts(
+            line=_same_line(body, anchor),
+            anchor=anchor,
+            remarks=remark_lines[index],
+            columns=columns,
             fallback_number=first_row_number + index,
         )
         for index, anchor in enumerate(anchors)
     ]
+    return continuation, parts
 
 
 def _remark_lines(
     body: Sequence[PdfWord], columns: _Columns, anchors: Sequence[PdfWord], page: int
-) -> list[list[_Line]]:
+) -> tuple[list[_Line], list[list[_Line]]]:
     """Each row's remark lines: from just above its dated line to the next row's.
 
-    Text in the remarks column that belongs to no row is an error rather
-    than dropped - except the page footer, recognised by the gap above it.
+    Also returns the lines ABOVE the page's first row: remarks the bank
+    carried over from the previous page's last row. They run on from just
+    under the header, 10 pt apart (the first remark line of every real page
+    starts 6.9 pt below it), so they end at the first larger gap - which on
+    a page without rows is the footer.
+
+    Text in the remarks column that belongs to nothing - neither a row, a
+    carried-over line nor the footer below the last row - is an error
+    rather than dropped.
     """
     in_column = [
         word
         for word in body
         if word.x0 >= columns.remarks_left and word.x1 <= columns.remarks_right
     ]
+    above: list[PdfWord] = []
     owned: list[list[PdfWord]] = [[] for _ in anchors]
     for word in in_column:
         owner = None
@@ -287,21 +322,36 @@ def _remark_lines(
             if anchor.top - _ROW_STARTS_ABOVE <= word.top:
                 owner = index
         if owner is None:
-            raise ParseError(f"page {page} has remark text above its first transaction")
-        owned[owner].append(word)
+            above.append(word)
+        else:
+            owned[owner].append(word)
+
+    above_lines = _group_lines(above)
+    continuation = _until_gap(above_lines, columns.header_bottom)
+    if anchors and len(continuation) != len(above_lines):
+        raise ParseError(f"page {page} has remark text above its first transaction")
 
     rows = [_group_lines(words) for words in owned]
     if anchors:
         # Below the page's LAST row, cut at the first gap: that is the footer.
-        last, previous_top = rows[-1], anchors[-1].top
-        kept: list[_Line] = []
-        for line in last:
-            if line.top > anchors[-1].top and line.top - previous_top > _MAX_LINE_GAP:
-                break
-            kept.append(line)
-            previous_top = max(previous_top, line.top)
-        rows[-1] = kept
-    return rows
+        rows[-1] = _until_gap(rows[-1], anchors[-1].top)
+    return continuation, rows
+
+
+def _until_gap(lines: Sequence[_Line], start: float) -> list[_Line]:
+    """The lines that run on from `start` without a gap wider than a line.
+
+    Lines at or above `start` are always kept (a row's first remark line
+    sits above its dated line).
+    """
+    kept: list[_Line] = []
+    previous = start
+    for line in lines:
+        if line.top > start and line.top - previous > _MAX_LINE_GAP:
+            break
+        kept.append(line)
+        previous = max(previous, line.top)
+    return kept
 
 
 def _group_lines(words: Sequence[PdfWord]) -> list[_Line]:
@@ -322,14 +372,10 @@ def _same_line(words: Sequence[PdfWord], anchor: PdfWord) -> list[PdfWord]:
     )
 
 
-def _parse_row(
-    line: Sequence[PdfWord],
-    anchor: PdfWord,
-    remarks: Sequence[_Line],
-    columns: _Columns,
-    fallback_number: int,
-) -> RawRow:
+def _parse_row(parts: _RowParts) -> RawRow:
     """One transaction from its dated line and its remark lines."""
+    line, anchor, remarks, columns = parts.line, parts.anchor, parts.remarks, parts.columns
+    fallback_number = parts.fallback_number
     serial = next(
         (word.text for word in line if word.x1 <= anchor.x0 and _SERIAL.fullmatch(word.text)),
         None,
