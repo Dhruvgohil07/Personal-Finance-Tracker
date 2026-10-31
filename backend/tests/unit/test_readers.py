@@ -408,6 +408,14 @@ def test_a_pdf_is_read_into_lines_and_positioned_words(tmp_path: Path) -> None:
     assert remarks.top < remarks.bottom
 
 
+def test_a_type_without_a_reader_is_refused_not_read_as_a_pdf() -> None:
+    """Every FileType has a reader today; a future one must be refused by
+    name until its reader exists (review of Step 9). A plain string stands
+    in for that future member."""
+    with pytest.raises(ParseError, match="^this file type cannot be read yet$"):
+        read_statement_as("xlsx", b"PK\x03\x04")  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("error", [IndexError("list index out of range"), KeyError("Root")])
 def test_any_failure_inside_pdfplumber_is_one_plain_parse_error(
     error: Exception, monkeypatch: pytest.MonkeyPatch

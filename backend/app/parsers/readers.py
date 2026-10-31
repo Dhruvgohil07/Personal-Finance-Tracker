@@ -136,7 +136,12 @@ def read_statement_as(file_type: FileType, content: bytes) -> ParserInput:
         return read_csv(content)
     if file_type is FileType.XLS:
         return read_xls(content)
-    return read_pdf(content)
+    if file_type is FileType.PDF:
+        return read_pdf(content)
+    # Each type by name, and a refusal for anything else: a type added to
+    # detection before its reader exists must not be handed to pdfplumber
+    # and fail as "this PDF could not be read" (review of Step 9).
+    raise ParseError("this file type cannot be read yet")
 
 
 def read_pdf(content: bytes) -> ParserInput:
