@@ -369,8 +369,11 @@ def _narration(lines: Sequence[_Line], columns: _Columns) -> str:
     if len(lines) >= 2:
         rest = _join(lines[1:], columns)
         fields = rest.split("/")
-        # The name line repeats the UPI name field (module docstring).
-        if len(fields) > 1 and fields[0] == "UPI" and fields[1] == lines[0].text:
+        # The name line repeats the UPI name field (module docstring). The
+        # field may end in a space - the bank cut the name after one, and
+        # the word after it starts with "/" ("UPI/RAM KUMAR /q1@ybl") -
+        # while a line never does, so compare without it (review of Step 9).
+        if len(fields) > 1 and fields[0] == "UPI" and fields[1].strip() == lines[0].text:
             return rest
     return _join(lines, columns)
 

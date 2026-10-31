@@ -161,6 +161,16 @@ def test_a_full_line_of_several_words_still_broke_at_a_space() -> None:
     assert parsed.raw_description == "UPI/A B/c@d/NO REMARK"
 
 
+def test_the_name_line_is_dropped_when_the_name_field_ends_in_a_space() -> None:
+    """The bank cut the name right after a space: the field is "RAM KUMAR "
+    (the next word starts with "/"), the name line "RAM KUMAR" (review)."""
+    remarks = (("RAM KUMAR", False), ("UPI/RAM KUMAR /q12@ybl/NO", False))
+
+    [parsed] = PARSER.parse(statement(header(1), row(1, FIRST_ROW, remarks=remarks))).rows
+
+    assert parsed.raw_description == "UPI/RAM KUMAR /q12@ybl/NO"
+
+
 def test_a_first_line_that_is_not_the_upi_name_is_kept() -> None:
     """Dropped only when it repeats the UPI name field (decided with Dhruv)."""
     remarks = (("ACME CORP", False), ("NEFT-SALARY-ACME", False))
