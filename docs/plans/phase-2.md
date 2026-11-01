@@ -402,3 +402,13 @@ and Step 5's narration rules).
   - remarks carried over to the next page join the previous row;
   - the real-file cross-check is a local test (`tests/unit/test_real_samples.py`)
     that skips without a same-period pair.
+- **Step 10:** done as **ADR 020** (the plan said "ADR 018"; see the Step 9 note),
+  with no migration. Additions to the plan as written:
+  - a wrong password on `POST /uploads` stores nothing (400). "Stays
+    `needs_password`" applies to `/password`;
+  - re-sending a waiting locked file answers 409 `PASSWORD_REQUIRED` with the waiting
+    upload's id, and a password sent along is not used (no second unlock route
+    around the rate limit);
+  - a PDF with only an owner password is unlocked without asking;
+  - a PDF pypdf cannot open is passed on to the worker unchanged (ADR 013);
+  - `fail_upload` also fails `needs_password` uploads (`NOT_FINAL_STATUSES`).
