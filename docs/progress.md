@@ -396,6 +396,21 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   ADR 020. No migration. Live check against the Docker worker: 409 → 400 → 202 →
   `completed`, no password in any log.
   1464 tests (+1 skipped), 100% coverage
+- [x] Step 10 code review (`/code-review high` on PR 25, 10 findings) — all 10 addressed
+  (ADR 020 amendment):
+  1. the unlocked copy is size-checked (413). The request's pypdf cost was measured
+     (0.27 s for 9 MB; pypdf's own budgets refuse object bombs) and no timeout added
+  2. no row lock or connection held while pypdf runs; the store step re-checks
+  3. a PDF pypdf cannot decrypt goes to the worker unchanged
+  4. a missing stored file says "no longer available"
+  5. the race loser still gets `PASSWORD_REQUIRED` + the upload id
+  6. `select_owned_upload` shared
+  7. `process_upload` uses `_decrypted`
+  8. test helpers shared
+  9. the PDF is parsed once
+  10. the message constant moved to `readers.py`
+
+  The five new behaviour tests were checked to fail on the pre-review code.
 
 ## In progress
 - (nothing)
@@ -750,6 +765,10 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
      sibling now compare against the message constants
 
 ## Known issues
+- Unlocking a password-protected PDF runs pypdf inside the API request, with no hard
+  timeout. It is bounded by the upload limit and pypdf's own parsing budgets
+  (measured worst case ~2-4 s for a 10 MB synthetic file, ADR 020 amendment). If that
+  ever matters, run the unlock in a process with a timeout
 - **Intermittent (seen 2026-10-27, Step 7 review):**
   `test_upload_storage.py::test_a_users_uploads_are_found_through_the_user_index[upload_list]`
   failed once in four full runs. It passes alone (3/3) and in the next full run, and
