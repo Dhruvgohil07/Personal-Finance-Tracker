@@ -57,6 +57,12 @@ UPLOAD_LIMIT = "10/hour"  # statement uploads: per user (used from Step 7)
 # UPLOAD_POLL_INTERVAL_SECONDS (Retry-After); 120/min leaves room for a few
 # uploads polled at once and for a client that polls a little faster.
 UPLOAD_POLL_LIMIT = "120/minute"
+# POST /uploads/{id}/password: per user (Phase 2 plan). Each request is one
+# guess at a statement password, which is often short and guessable (bank
+# PDFs commonly use part of a name plus a date of birth), so it gets the
+# same tight limit as login. Named UNLOCK rather than PASSWORD so the
+# security linter does not take the constant for a hardcoded password.
+UNLOCK_LIMIT = "5/minute"
 GENERAL_LIMIT = "100/minute"  # everything else: per user, or per IP if logged out
 
 

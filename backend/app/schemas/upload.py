@@ -19,7 +19,14 @@ import uuid
 from datetime import date, datetime
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StringConstraints,
+    model_validator,
+)
 
 from app.models import UploadStatus
 from app.parsers.base import FileType
@@ -148,6 +155,9 @@ class UploadResponse(BaseModel):
                        `reconciliation_issues` lists the rows to look at;
     - `failed`       - `error_message` says why, in words meant for the user.
 
+    `needs_password` is not final either, but polling will not change it:
+    the PDF is locked, and waits for POST /uploads/{id}/password.
+
     `rows_parsed = rows_inserted + rows_duplicate`. A re-uploaded
     overlapping statement therefore shows a high `rows_duplicate` and only
     the genuinely new rows in `rows_inserted` (SPEC §6.3). All three are 0
@@ -179,6 +189,30 @@ class UploadResponse(BaseModel):
     # internal dedupe key, and the client already has the file it sent.
     # `column_mapping` is left out too: the client sent it, and it is only
     # stored so the worker can read it.
+
+
+# An upper bound on a statement password, not a rule about it. The PDF
+# standard uses at most 127 bytes of a password, and real bank passwords
+# are around 8-12 characters; the cap only stops a megabyte "password"
+# from being fed to the decryption.
+MAX_PDF_PASSWORD_LENGTH = 128
+
+
+class UploadPasswordRequest(BaseModel):
+    """The password of a locked PDF (POST /uploads/{id}/password).
+
+    `SecretStr` instead of `str`: the value is still there for the code
+    that needs it (`.get_secret_value()`), but printing the model - in a
+    log line, an error, a debugger - shows `**********`. And our 422
+    handler never echoes what was sent (app/core/errors.py), so a too-long
+    password is not repeated back either.
+
+    Not stripped of spaces: a space can be part of a password.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    password: SecretStr = Field(min_length=1, max_length=MAX_PDF_PASSWORD_LENGTH)
 
 
 def column_mapping_json_example() -> dict[str, Any]:

@@ -45,9 +45,9 @@ import structlog
 from sqlalchemy import and_, delete, select
 from sqlalchemy.orm import Session, aliased
 
-from app.models import RefreshToken, StatementUpload, UploadBlob, UploadStatus
+from app.models import RefreshToken, StatementUpload, UploadBlob
 from app.services.imports import (
-    UNFINISHED_STATUSES,
+    NOT_FINAL_STATUSES,
     JobIsWaiting,
     fail_stale_uploads,
     fail_uploads_where,
@@ -65,9 +65,10 @@ UPLOAD_EXPIRED_MESSAGE = "This upload expired before it could be imported. Pleas
 # deleting (see `_delete_dead_token_families`). No request takes an hour.
 DEAD_FAMILY_GRACE = timedelta(hours=1)
 
-# Uploads that may still be waiting for their stored file. Everything else
+# Uploads that may still be waiting for their stored file: the ones not
+# final yet (pending, processing, needs_password). Everything else
 # (completed, needs_review, failed) is final and has no use for one.
-_WAITING_FOR_FILE = (*UNFINISHED_STATUSES, UploadStatus.NEEDS_PASSWORD)
+_WAITING_FOR_FILE = NOT_FINAL_STATUSES
 
 
 @dataclass(frozen=True)
