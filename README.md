@@ -312,9 +312,9 @@ transfer automatically ([ADR 018](docs/decisions/018-self-transfer-matching.md))
 
 | Missing | Arrives in |
 |---|---|
-| Web UI, and search that uses its index (`q=`) | Phase 3 |
-| Creating your own categories, `/me`, `DELETE /me`, CSV export | Phase 3 |
-| `/insights/trend`, `/insights/top-merchants` | later phase (see [SPEC](docs/SPEC.md)) |
+| Web UI, `GET /me`, `DELETE /me` | Phase 3 ([plan](docs/plans/phase-3.md)) |
+| Creating your own categories, CSV export, `/insights/trend`, `/insights/top-merchants` | Phase 4 |
+| Search that uses its trigram index (`q=` works, unindexed) | not scheduled yet |
 | LLM categorization for what the rules cannot place | Phase 4 |
 | Recurring payments, budgets, alerts | Phases 4–5 |
 | Parsers for banks other than ICICI | when real samples exist ([SPEC §6.2](docs/SPEC.md)) |
