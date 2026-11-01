@@ -152,3 +152,16 @@ explicit "I looked, nothing fits").
 - The categorizer never sets `is_self_transfer` and never picks a transfer-kind
   category; self transfers are Step 8.
 - No migration: `category_source`'s values and `merchant_id` already existed.
+
+## Amendment — Phase 2 acceptance (2026-11-01)
+
+A sixth merchant shape, found by the acceptance run on the real October PDF:
+Google Pay for Business's **handle**, `…@okbizaxis`. ICICI prints the id cut at
+14 characters, so it appears as `…@okbizax`, and it is matched as the prefix
+`[^@]*@okbiz`. 45 debits to 3 payees used it and were filed as "Transfers to
+People". With the pattern they are `none` until corrected (decided with Dhruv).
+The pattern is the handle only: `@okaxis`, Google Pay's personal handle, stays
+a person, and so does an id that merely starts with "okbiz". Rule learning asks
+the same question (`looks_like_person`), so correcting such a payment now teaches
+a merchant rule instead of a VPA rule. See
+[docs/phase-2-acceptance.md](../phase-2-acceptance.md).
