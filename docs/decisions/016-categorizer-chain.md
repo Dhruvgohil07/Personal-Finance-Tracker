@@ -153,15 +153,46 @@ explicit "I looked, nothing fits").
   category; self transfers are Step 8.
 - No migration: `category_source`'s values and `merchant_id` already existed.
 
-## Amendment — Phase 2 acceptance (2026-11-01)
+## Amendment — Phase 2 acceptance (2026-11-01, revised in the review of PR 26)
 
-A sixth merchant shape, found by the acceptance run on the real October PDF:
-Google Pay for Business's **handle**, `…@okbizaxis`. ICICI prints the id cut at
-14 characters, so it appears as `…@okbizax`, and it is matched as the prefix
-`[^@]*@okbiz`. 45 debits to 3 payees used it and were filed as "Transfers to
-People". With the pattern they are `none` until corrected (decided with Dhruv).
-The pattern is the handle only: `@okaxis`, Google Pay's personal handle, stays
-a person, and so does an id that merely starts with "okbiz". Rule learning asks
-the same question (`looks_like_person`), so correcting such a payment now teaches
-a merchant rule instead of a VPA rule. See
-[docs/phase-2-acceptance.md](../phase-2-acceptance.md).
+**A business handle.** The acceptance run on the real October PDF found 45 debits
+to 3 payees on Google Pay for Business's handle, `…@okbizaxis`. The merchant
+shapes only looked at the id before the `@`, so these were filed as "Transfers to
+People". They are now `none` until corrected (decided with Dhruv).
+
+**How it is matched.** Handles that payment apps give only to businesses are a
+list of their own, `_BUSINESS_HANDLES` (one entry so far), separate from the QR
+shapes. ICICI cuts the VPA at 14 characters (ADR 015), so how much of the handle
+is printed depends on the id's length. A handle counts as a business one when it
+is printed whole, or, when the VPA is exactly 14 characters long, when at least
+3 characters of it survive (`okb…`). Google Pay's personal handles are `okaxis`,
+`okhdfcbank`, `okicici` and `oksbi`, so `okb` is already unambiguous and `ok` is
+not. A handle cut to `ok` or less, or a VPA cut before its `@`, stays a person.
+That is wrong sometimes, but no worse than before. Real counts:
+- PDF: 45 rows business; no VPA cut before the `@`.
+- `.xls`: 1 row business (`…@okb`); 2 cut to `ok` and 1 to `o`, undecidable;
+  64 VPAs cut before the `@`.
+
+A handle is added only when a real statement shows it (SPEC §6.2). Still
+unverified: 47 PDF rows on Paytm's handles (`pty`, `ptys`), which serve both
+people and shops.
+
+**Rows already stored.** Rows are categorized on import and re-run on a rule
+change, so a change to the chain itself would reach only new imports.
+`python -m app.workers.recategorize_all` queues `recategorize_user` for every
+user. Run it after deploying any change to merchant shapes, keywords or the
+dictionary. Hand-chosen categories are never touched.
+
+**Rule learning** asks the same question (`looks_like_person`): correcting such a
+payment now teaches a rule on its merchant key instead of its VPA, which suits 8
+ids belonging to 3 payees.
+
+**For Phase 4 (privacy).** A row that is not P2P is a candidate for the LLM step,
+which sends its merchant key. A shop on a business handle or a PhonePe QR code is
+often registered under its owner's own name, and CLAUDE.md §7.4 forbids sending
+names of individuals. So "not a person" does not make a merchant key safe to send.
+Phase 4 must decide what it sends on its own terms, not inherit this heuristic.
+The constraint was already true of QR-code merchants; this change only moves more
+rows into that group.
+
+See [docs/phase-2-acceptance.md](../phase-2-acceptance.md).

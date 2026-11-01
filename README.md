@@ -235,9 +235,20 @@ Most rows arrive **already categorized**. `category_source` says how
 | `heuristic` | a guess: a UPI payment to or from a person, or one half of a transfer between your own accounts (`is_self_transfer: true`) |
 | `none` | nothing matched — this is what "needs your attention" means |
 
-On the real ICICI statements, 51% (August `.xls`) and 75% (October PDF)
-of the rows were categorized this way, with no LLM
+On the real ICICI statements, 50% (August `.xls`, just over half) and 75%
+(October PDF) of the rows were categorized this way, with no LLM
 ([acceptance run](docs/phase-2-acceptance.md)).
+
+Rows are categorized when they are imported. After changing the
+categorizer itself (a merchant shape, a keyword, the dictionary), re-run
+everyone's stored rows from `backend/`:
+
+```bash
+uv run python -m app.workers.recategorize_all
+```
+
+It queues one job per user for the worker, and never touches a category
+you chose by hand.
 
 ### 5. Categorize one by hand
 

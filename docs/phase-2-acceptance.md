@@ -26,13 +26,14 @@ which CI runs (the same decision as in Phase 1).
 | Overlapping statements merge with no duplicates, incl. `.xls` + PDF | **PASS** (synthetic); real: not covered | A2, A3, B5; see [Not covered](#not-covered) |
 | A password-protected PDF imports, the password is never persisted | **PASS** | A5, B5, the test suite |
 | A broken statement lands in `needs_review` with the bad rows listed | **PASS** | A6 |
-| More than half of the real statement auto-categorizes without an LLM | **PASS**: `.xls` 89/175 = **50.9%**, PDF 133/178 = **74.7%** | B6 |
+| More than half of the real statement auto-categorizes without an LLM | **PASS**: `.xls` 88/175 = **50.3%**, PDF 133/178 = **74.7%** | B6, `test_real_samples.py` |
 | Self transfers between two accounts are detected and excluded | **PASS** (synthetic); real: not covered | A8; see [Not covered](#not-covered) |
 | `ruff`, `pytest` at 100% coverage, CI green | **PASS** locally; CI on this PR | — |
 | Not done on purpose: parsers for other banks | as planned | SPEC §6.2 |
 
 Part A: **21/21** checks. Part B: **13/13** checks. Both were re-run after
-the one fix this run produced ([below](#a-finding-the-run-fixed)).
+the fix this run produced, and again after its code review
+([below](#a-finding-the-run-fixed)).
 
 ---
 
@@ -74,7 +75,7 @@ Both name the same account (the last 4 digits agree), and the periods do
 | B3 | `GET /transactions` order keeps the balance chain: `.xls` **174/174** links, PDF **177/177** | PASS |
 | B4 | The same real file again: `409` | PASS |
 | B5 | The real PDF, locked with a test password (AES-128): `409 PASSWORD_REQUIRED`, then unlocked: **0 inserted, 178 duplicates** of the plain PDF's rows | PASS |
-| B6 | Auto-categorized without an LLM: `.xls` **89/175 = 50.9%**, PDF **133/178 = 74.7%** | PASS |
+| B6 | Auto-categorized without an LLM: `.xls` **88/175 = 50.3%**, PDF **133/178 = 74.7%** | PASS |
 | B7 | `GET /insights/summary?month=2026-08` equals the `.xls` rows' own debit and credit totals, 175 transactions | PASS |
 | B8 | All acceptance uploads deleted again; no real transaction left in the database | PASS |
 
@@ -92,13 +93,14 @@ How B6 breaks down, by `category_source`:
 
 | | `heuristic` | `merchant` | `keyword` | `none` |
 |---|---|---|---|---|
-| `.xls` (August) | 68 | 16 | 5 | 86 |
+| `.xls` (August) | 67 | 16 | 5 | 87 |
 | PDF (October) | 125 | 6 | 2 | 45 |
 
 `heuristic` here is person-to-person UPI (no self transfers in either file:
-there is only one real account). The August `.xls` only just clears the
-target. Its `none` rows are mostly merchant QR payments to shops not in the
-dictionary. Phase 4's LLM step is what the plan relies on for the rest
+there is only one real account). **The August `.xls` clears the target by
+one row**, so `tests/unit/test_real_samples.py` now re-measures both files'
+share from the pure chain on every local run and fails below half. Its `none`
+rows are mostly merchant QR payments to shops not in the dictionary. Phase 4's LLM step is what the plan relies on for the rest
 (target > 85%).
 
 ## A finding the run fixed
@@ -113,17 +115,26 @@ payments therefore looked like transfers to people and were filed as
 "Transfers to People".
 
 The parser was not at fault: the raw PDF text prints the ids exactly that
-way. The fix, decided with Dhruv, is one more merchant pattern
-(`[^@]*@okbiz`, matched as a prefix because of the 14-character cut), with
-tests for the full and the cut handle. The tests also check that `@okaxis`
-(Google Pay's personal handle) and an id that merely starts with "okbiz"
-stay people. After the fix those 45 rows are `none`, waiting for a
-correction or Phase 4, and the PDF's share is 74.7%. The August `.xls` has
-no such handle and is unchanged.
+way. The fix, decided with Dhruv, gives handles that only businesses get a
+list of their own, matched in a way that survives the 14-character cut: a
+handle counts if it is printed whole, or, when the VPA is cut, if at least
+`okb` of it is left. Google Pay's personal handles (`okaxis`, `okicici`, ...)
+share only `ok`, so a handle cut to `ok` stays a person (ADR 016 amendment).
 
-The two files are different months, so the run cannot show whether the
-same payee is categorized the same way in both formats. Both formats cut
-the id at 14 characters, though, so they print the same handle.
+After the fix:
+- **PDF:** those 45 rows are `none`, waiting for a correction or Phase 4,
+  and the share is 74.7%.
+- **August `.xls`:** the first version of this document said it had no such
+  handle. That was wrong: the check then only saw the full `@okbiz` prefix.
+  Counted properly, it has **1** row cut to `@okb` (now `none`, which takes
+  the share from 50.9% to 50.3%). It also has 2 rows cut to `@ok` and 1 to
+  `@o`, which cannot be decided, and 64 UPI ids cut before the `@`
+  altogether.
+
+Rows already stored keep what the chain decided when they were imported, so
+a change like this one is followed by
+`python -m app.workers.recategorize_all`, which re-runs every user's rows. It
+was run on the development database: 30 users, 30 jobs, no errors.
 
 ## Not covered
 
@@ -140,6 +151,9 @@ the id at 14 characters, though, so they print the same handle.
 - **The October summary.** The PDF covers 1–27 October, not a whole month,
   so `/insights/summary?month=2026-10` cannot be compared with the file's
   own totals. The balance chain (B3) covers its amounts instead.
+- **47 PDF rows on Paytm handles** (`pty`, `ptys`) are filed as people.
+  Paytm gives those handles to people and shops alike, so this was not
+  changed without evidence.
 - **Opening and closing balances against netbanking** for the October
   period. The balance chain cannot see a row missing at the very start or
   end of the table. In Phase 1 these were confirmed against netbanking for

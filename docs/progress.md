@@ -417,12 +417,28 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   live API + Docker worker) **21/21**; Part B (the real `.xls` and PDF) **13/13**:
   both reconcile, balance chain 174/174 and 177/177 in list order, the locked real
   PDF unlocks to 178/178 duplicates, no leaks in the logs. Auto-categorized without
-  an LLM: `.xls` **50.9%**, PDF **74.7%**. Found and fixed (decided with Dhruv): Google
+  an LLM: `.xls` **50.3%**, PDF **74.7%**. Found and fixed (decided with Dhruv): Google
   Pay for Business ids (`@okbizaxis`, cut to `@okbizax`) were filed as Transfers to
   People (45 PDF rows); now a merchant shape (ADR 016 amendment). Not covered (no real
   file): `.xls`+PDF overlap, self transfers, a real locked PDF. README updated for
   the worker, PDFs, passwords, auto-categorization and rules.
   1477 tests (+1 skipped), 100% coverage
+- [x] Step 11 code review (`/code-review high` on PR 26, 6 findings) — 5 fixed, 1 recorded
+  for Phase 4 (ADR 016 amendment, revised):
+  1. business handles are their own list, matched through ICICI's 14-character
+     cut (`okb…` is enough; `ok` stays a person)
+  2. `python -m app.workers.recategorize_all` re-runs every user's stored rows
+     after a chain change; run live on the dev database: 30 users, 30 jobs
+  3. **Phase 4 privacy rule recorded, not code:** "not a person" does not make a
+     merchant key safe to send to an LLM (shops often carry an owner's name)
+  4. business handles are kept apart from the QR shapes; added only on real
+     evidence
+  5. `test_real_samples.py` re-measures the >50% share on the real files
+  6. the acceptance doc's "no such handle in the `.xls`" was wrong. The `.xls`
+     has 1 (`@okb`), so August is now **88/175 = 50.3%**, one row above half
+
+  Part A 21/21 and Part B 13/13 re-run live after the fixes. 1486 tests (+1 skipped),
+  100% coverage
 
 ## In progress
 - (nothing)
@@ -438,6 +454,9 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   - **October opening/closing balances** against netbanking (Dhruv)
 
 ## Open decisions / questions
+- Phase 4 LLM step → open: CLAUDE.md §7.4 forbids sending names of individuals, and
+  merchant keys of QR-code or business-handle payees are often an owner's name. Phase 4
+  must decide what is safe to send on its own terms (ADR 016 amendment, review of PR 26)
 - Git workflow → decided: `main` protected (ruleset `protect-main`); every change via a
   feature branch + PR, green `backend` check required, rebase-merge only (CLAUDE.md §18)
 - RQ worker on Windows → decided: run as a Docker service (added in Phase 2 Step 2)
@@ -781,6 +800,9 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
      sibling now compare against the message constants
 
 ## Known issues
+- Categorization of UPI ids ICICI cut too short to read the handle (`…@ok`, or cut
+  before the `@`: 67 of the real `.xls`'s UPI rows) falls back to "person". 47 real PDF
+  rows on Paytm handles (`pty`, `ptys`) are filed as people, unverified (ADR 016 amendment)
 - Unlocking a password-protected PDF runs pypdf inside the API request, with no hard
   timeout. It is bounded by the upload limit and pypdf's own parsing budgets
   (measured worst case ~2-4 s for a 10 MB synthetic file, ADR 020 amendment). If that
