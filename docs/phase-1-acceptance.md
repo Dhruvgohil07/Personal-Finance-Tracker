@@ -107,7 +107,7 @@ uv run uvicorn app.main:app --reload
 ```
 
 Then open <http://127.0.0.1:8000/docs>. The steps below match the
-[README walkthrough](../README.md#walkthrough-phase-1); fill in the right
+[README walkthrough](../README.md#walkthrough); fill in the right
 column as you go.
 
 ### B1. Register and log in
