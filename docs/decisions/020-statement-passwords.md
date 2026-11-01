@@ -105,3 +105,43 @@ can help.
   file, and every value in Redis (job data decompressed) for both passwords. Each
   of the log, Redis and database checks was confirmed to fail on a deliberately
   planted leak.
+
+## Amendment — code review of PR 25 (10 findings, all addressed)
+
+1. **Untrusted PDF work in the request.** Measured (synthetic files, this
+   machine): a 9 MB, 1000-page statement unlocks in 0.27 s; a 5.5 MB file of
+   100 000 tiny objects in 2.3 s; a 23 MB file of 400 000 objects is refused by
+   pypdf's own parsing budget (`LimitReachedError`) after 3.6 s. The real ICICI
+   PDF has 81 objects. The request cost is therefore bounded by the upload limit
+   (10 MB) and pypdf's budgets, and no timeout was added. A worker process with
+   a hard timeout was considered and rejected for now, because it adds a process
+   pool to the API for a few seconds of worst case. What changed:
+   - the unlocked copy is size-checked: over `MAX_UPLOAD_MB` is a **413** (the
+     upload is failed when it came through `/password`);
+   - the unlock no longer holds a row lock or a database connection (point 2).
+2. **No row lock during the unlock.** `unlock_upload` now runs as three steps:
+   - read and check, then end the transaction;
+   - unlock with no transaction open;
+   - lock the row, check it is still `needs_password`, then store and enqueue.
+
+   A delete during an unlock now succeeds instead of answering "being imported
+   right now". A delete, an expiry or another request's unlock that happens in
+   between wins: 404 or 409, and nothing is stored or queued.
+3. **`decrypt()` raising is not ours to judge.** `unlock_pdf` now passes a file on
+   unchanged when pypdf cannot decrypt it (an unsupported variant, a damaged
+   encryption dictionary), not only when it cannot open it. The worker decides,
+   as decision 4 above intends. Only a failure to *write* the copy (the password
+   was right) is still a 400 in the request.
+4. A missing stored file says "no longer available" (`file_missing`), like the
+   worker. A damaged one says "could not be read" (`file_unreadable`).
+5. The upload that loses the unique-index race now gets the same answer as a
+   later duplicate: `PASSWORD_REQUIRED` with the waiting upload's id.
+6. `select_owned_upload` (was `_owned`) is the one "this user's upload" query,
+   shared by GET, DELETE and the password endpoint.
+7. `process_upload` decrypts through the same `_decrypted` helper.
+8. Shared test helpers: `held_queue` moved to `tests/integration/conftest.py`,
+   `post_upload` takes a `password`, `is_encrypted` lives in the PDF fixtures.
+9. `unlock_pdf` parses the file once: one reader, `decrypt("")` then
+   `decrypt(password)` (a test pins one reader and two attempts).
+10. `PDF_UNREADABLE_MESSAGE` lives in `readers.py`; `pdf_unlock` imports it, so
+    reading a CSV or `.xls` no longer loads pypdf.
