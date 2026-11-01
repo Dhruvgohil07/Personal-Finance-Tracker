@@ -23,6 +23,12 @@ Two entry points, for the two moments categorization happens:
   takes effect on the past, and a deleted rule stops having one (decided
   with Dhruv, ADR 017). Run by the `recategorize_user` job.
 
+`recategorize_everyone` queues that job for every user. A change to the
+chain itself - a new merchant shape, a keyword, a dictionary entry - only
+reaches rows imported afterwards; run `python -m
+app.workers.recategorize_all` after deploying one, so the rows already
+stored follow too (review of Step 11).
+
 A category the user chose by hand (`user_manual`) is never touched by
 either: both queries leave those rows out, and the chain's own guard says
 the same, belt and braces.
@@ -57,6 +63,7 @@ from app.models import (
     Merchant,
     StatementUpload,
     Transaction,
+    User,
 )
 from app.parsers.narration import counterparty_name, dictionary_key
 from app.workers.queue import enqueue_recategorization
@@ -229,6 +236,23 @@ def recategorize_after_commit(db: Session, queue: Queue, user_id: uuid.UUID) -> 
     except RedisError:
         log.warning("recategorize_enqueue_failed_running_inline", user_id=str(user_id))
         recategorize_user(db, user_id)
+
+
+def recategorize_everyone(db: Session, queue: Queue) -> int:
+    """Queue a `recategorize_user` job for every user; return how many.
+
+    For a change to the chain ITSELF (see the module docstring): every
+    other trigger re-runs one user, after something that user did. One job
+    per user, not one job for all, so each runs under that user's own lock
+    and a failure stays with one user (RQ retries it like any other).
+
+    Raises `redis.exceptions.RedisError` if Redis is down: unlike a rule
+    change, nobody is waiting on this, and it is simply run again later.
+    """
+    user_ids = list(db.scalars(select(User.id).order_by(User.id)))
+    for user_id in user_ids:
+        enqueue_recategorization(queue, user_id)
+    return len(user_ids)
 
 
 def has_detected_self_transfer(db: Session, user_id: uuid.UUID, where: ColumnElement[bool]) -> bool:
