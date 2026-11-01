@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 import zlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -94,21 +94,6 @@ def account_id(client: TestClient, alice: dict[str, str]) -> str:
 def statement(tmp_path: Path) -> bytes:
     """The default synthetic ICICI statement: five transactions."""
     return build_icici_xls(tmp_path / "statement.xls").read_bytes()
-
-
-@pytest.fixture
-def held_queue(client: TestClient, sync_queue: Queue) -> Iterator[Queue]:
-    """A real queue that nobody works on: jobs wait in Redis until run by hand.
-
-    Swapped into the app for this test only, in place of `sync_queue`. It
-    has the test queue's name, so the development worker never sees it,
-    and it is emptied before and after so no job leaks between tests.
-    """
-    queue = Queue(sync_queue.name, connection=get_redis())
-    queue.empty()
-    client.app.dependency_overrides[get_queue] = lambda: queue
-    yield queue
-    queue.empty()
 
 
 def post_upload(

@@ -87,7 +87,7 @@ from app.parsers.reconcile import Issue, reconcile, to_chronological
 from app.parsers.registry import ParserRegistry, build_default_registry
 from app.services import accounts as accounts_service
 from app.services import categorization as categorization_service
-from app.services.uploads import UPLOAD_NOT_FOUND_MESSAGE
+from app.services.uploads import UPLOAD_NOT_FOUND_MESSAGE, select_owned_upload
 from app.workers.queue import enqueue_statement_processing, statement_job_waiting_check
 
 log = structlog.get_logger()
@@ -212,6 +212,8 @@ def create_upload(
     - `InvalidStatementError` (400)  - not a file type we can read
     - `IncorrectPasswordError` (400) - the password does not open the PDF;
                                        nothing is stored
+    - `PayloadTooLargeError` (413)   - also when an unlocked PDF's copy is
+                                       over the limit
     - `ServiceUnavailableError` (503) - the queue (Redis) is unreachable
 
     `password` is a pydantic `SecretStr`, not a `str`, all the way from the
@@ -313,9 +315,15 @@ def create_upload(
         # both passed the check and the database rejected the second.
         # For a unique INDEX (not a constraint) Postgres reports the
         # index's name in the same field, so the same check works.
-        if violates_constraint(exc, FILE_HASH_INDEX):
-            raise ConflictError(DUPLICATE_FILE_MESSAGE) from None
-        raise
+        if not violates_constraint(exc, FILE_HASH_INDEX):
+            raise
+        # Answer exactly as if this request had come second: look up the
+        # upload that won, so a locked PDF still gets PASSWORD_REQUIRED
+        # with the id its password must go to (review of Step 10).
+        winner = _live_upload(db, user_id, file_sha256)
+        if winner is not None:
+            _raise_duplicate(winner)
+        raise ConflictError(DUPLICATE_FILE_MESSAGE) from None
 
     if upload.status is UploadStatus.NEEDS_PASSWORD:
         # Stored, still locked, and NOT queued: there is nothing a worker
@@ -360,23 +368,36 @@ def unlock_upload(
     - `IncorrectPasswordError` (400) - the password does not open it; the
                                        upload stays `needs_password`, so the
                                        user can simply try again
+    - `ConflictError` (409)          - our stored file is gone or damaged;
+                                       the upload is failed
+    - `InvalidStatementError` (400) /
+      `PayloadTooLargeError` (413)   - the unlocked copy cannot be written,
+                                       or is over the limit; failed
     - `ServiceUnavailableError` (503) - the queue (Redis) is unreachable
 
-    The row is locked (`FOR UPDATE`) for the whole check-unlock-store
-    sequence, so two password requests for one upload cannot both unlock
-    it and enqueue it twice: the second waits, then finds it `pending`
-    and gets the 409.
+    Two short transactions with the slow part between them, holding nothing
+    (review of Step 10):
+
+    1. **Read**: the upload must be the user's and `needs_password`, and
+       its stored file must decrypt. Then the transaction ends, so no row
+       lock is held and the database connection goes back to the pool.
+    2. **Unlock** with pypdf: CPU work, up to a few seconds for a large
+       file. Holding the row lock here would make a DELETE during it say
+       "being imported right now" and keep the hourly cleanup waiting.
+    3. **Store**: lock the row (`FOR UPDATE`), check it is STILL
+       `needs_password` - another password request may have unlocked it,
+       the user may have deleted it, the cleanup may have expired it -
+       then replace the file, set `pending`, commit, and enqueue. Two
+       password requests can both get to step 3, but only the first finds
+       `needs_password`; the second gets the 409, so it is enqueued once.
 
     The stored file is REPLACED: the locked PDF (encrypted with our key)
     becomes the unlocked PDF (encrypted with our key, under a new nonce).
     The file's 24-hour clock is not reset - it still counts from the
     upload - so a file can never be kept longer by sending passwords.
     """
-    upload = db.scalar(
-        select(StatementUpload)
-        .where(StatementUpload.id == upload_id, StatementUpload.user_id == user_id)
-        .with_for_update()
-    )
+    # 1. Read.
+    upload = db.scalar(select_owned_upload(user_id, upload_id))
     if upload is None:
         # Someone else's upload is a 404 too, like one that does not exist
         # (IDOR protection, CLAUDE.md rule 2).
@@ -384,33 +405,40 @@ def unlock_upload(
     if upload.status is not UploadStatus.NEEDS_PASSWORD:
         db.rollback()
         raise ConflictError(NOT_LOCKED_MESSAGE)
+    locked = _stored_file_or_fail(db, upload_id)
+    db.rollback()
 
-    blob = db.get(UploadBlob, upload_id)
-    # A missing blob is normally impossible: the cleanup deletes the file of
-    # a `needs_password` upload only together with failing it.
-    locked = _decrypted(blob, upload_id) if blob is not None else None
-    if blob is None or locked is None:
-        # Our stored copy is gone or damaged: no password can help, so the
-        # upload is failed (which frees the file for a fresh upload).
-        db.rollback()
-        fail_upload(db, upload_id, FILE_UNREADABLE_MESSAGE, reason="file_unreadable")
-        raise ConflictError(FILE_UNREADABLE_MESSAGE)
-
+    # 2. Unlock, with no transaction open.
     try:
         unlocked = unlock_pdf(locked, password.get_secret_value())
     except PdfLockedError:
         # Still locked: the password was wrong (`WrongPdfPasswordError`),
         # or blank. Nothing changes, and the user may try again - at
         # UNLOCK_LIMIT, which is what stops this being a guessing oracle.
-        db.rollback()
         raise IncorrectPasswordError from None
     except ParseError as exc:
         # The password matched but pypdf could not write the copy out.
-        # Trying again would fail the same way.
-        db.rollback()
+        # The same file fails the same way every time, so it is failed.
         fail_upload(db, upload_id, str(exc), reason="invalid_statement")
         raise InvalidStatementError(str(exc)) from None
+    if _over_upload_limit(unlocked):
+        fail_upload(db, upload_id, _unlocked_too_large_message(), reason="too_large")
+        raise PayloadTooLargeError(_unlocked_too_large_message())
 
+    # 3. Store, under the row lock, if nothing changed meanwhile.
+    upload = db.scalar(
+        select_owned_upload(user_id, upload_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if upload is None:
+        raise NotFoundError(UPLOAD_NOT_FOUND_MESSAGE)
+    if upload.status is not UploadStatus.NEEDS_PASSWORD:
+        db.rollback()
+        raise ConflictError(NOT_LOCKED_MESSAGE)
+    # Still `needs_password` under the lock, so the file is still there:
+    # it is only ever deleted together with a status change.
+    blob = db.get_one(UploadBlob, upload_id, populate_existing=True)
     encrypted = encrypt_file(unlocked, upload_id)
     blob.encrypted_content = encrypted.ciphertext
     blob.nonce = encrypted.nonce
@@ -427,6 +455,29 @@ def unlock_upload(
     return upload
 
 
+def _stored_file_or_fail(db: Session, upload_id: uuid.UUID) -> bytes:
+    """The locked PDF stored for a `needs_password` upload, decrypted.
+
+    If our own copy is gone or damaged, no password can help: the upload is
+    failed (which frees the file for a fresh upload) and the 409 says why -
+    with the same message, and the same log reason, as the worker uses for
+    the same problem.
+    """
+    blob = db.get(UploadBlob, upload_id)
+    if blob is None:
+        # Normally impossible: the cleanup deletes the file of a
+        # `needs_password` upload only together with failing it.
+        db.rollback()
+        fail_upload(db, upload_id, FILE_MISSING_MESSAGE, reason="file_missing")
+        raise ConflictError(FILE_MISSING_MESSAGE)
+    content = _decrypted(blob, upload_id)
+    if content is None:
+        db.rollback()
+        fail_upload(db, upload_id, FILE_UNREADABLE_MESSAGE, reason="file_unreadable")
+        raise ConflictError(FILE_UNREADABLE_MESSAGE)
+    return content
+
+
 def _decrypted(blob: UploadBlob, upload_id: uuid.UUID) -> bytes | None:
     """A stored file's bytes, or None if our encryption says it was tampered with."""
     try:
@@ -435,6 +486,25 @@ def _decrypted(blob: UploadBlob, upload_id: uuid.UUID) -> bytes | None:
         )
     except FileDecryptionError:
         return None
+
+
+def _over_upload_limit(content: bytes) -> bool:
+    """Is an unlocked copy larger than an upload may be?
+
+    The upload itself was checked, but the copy pypdf writes is a different
+    file: usually the same size, yet nothing guarantees it (it may write
+    objects the bank had packed into compressed object streams one by one).
+    What we store must stay within the limit the user was promised, so the
+    copy is checked as well (review of Step 10).
+    """
+    return len(content) > get_settings().max_upload_bytes
+
+
+def _unlocked_too_large_message() -> str:
+    return (
+        f"This PDF is larger than the {get_settings().max_upload_mb} MB upload limit "
+        "once its password is removed."
+    )
 
 
 def _enqueue(db: Session, queue: Queue, upload: StatementUpload) -> None:
@@ -524,10 +594,13 @@ def process_upload(db: Session, upload_id: uuid.UUID) -> None:
         fail_upload(db, upload_id, FILE_MISSING_MESSAGE, reason="file_missing")
         return
 
+    content = _decrypted(blob, upload_id)
+    if content is None:
+        db.rollback()
+        fail_upload(db, upload_id, FILE_UNREADABLE_MESSAGE, reason="file_unreadable")
+        return
+
     try:
-        content = decrypt_file(
-            EncryptedFile(nonce=blob.nonce, ciphertext=blob.encrypted_content), upload_id
-        )
         # By the type the request decided, not by detecting it again: the
         # stored filename may be cut short (255 characters), and for a CSV
         # the name is the only sign of what it is.
@@ -536,10 +609,6 @@ def process_upload(db: Session, upload_id: uuid.UUID) -> None:
         )
         account = db.get_one(Account, upload.account_id)
         _check_statement_matches_account(account, statement)
-    except FileDecryptionError:
-        db.rollback()
-        fail_upload(db, upload_id, FILE_UNREADABLE_MESSAGE, reason="file_unreadable")
-        return
     except InvalidStatementError as exc:
         db.rollback()
         # The message is the parser's own, written to be shown to the user:
@@ -920,19 +989,23 @@ def _unlock_if_pdf(
       the real file when it arrives;
     - locked and the password is wrong: 400, and nothing is stored. The
       user simply sends the upload again, with the right password;
-    - pypdf opened it but could not write it out again: 400.
+    - pypdf opened it but could not write it out again: 400;
+    - the unlocked copy is over the upload limit: 413.
     """
     if file_type is not FileType.PDF:
         return content, UploadStatus.PENDING
     try:
         given = password.get_secret_value() if password is not None else None
-        return unlock_pdf(content, given), UploadStatus.PENDING
+        unlocked = unlock_pdf(content, given)
     except WrongPdfPasswordError:
         raise IncorrectPasswordError from None
     except PdfLockedError:
         return content, UploadStatus.NEEDS_PASSWORD
     except ParseError as exc:
         raise InvalidStatementError(str(exc)) from None
+    if _over_upload_limit(unlocked):
+        raise PayloadTooLargeError(_unlocked_too_large_message())
+    return unlocked, UploadStatus.PENDING
 
 
 def _issues_to_json(issues: list[Issue] | None) -> list[dict[str, object]] | None:
