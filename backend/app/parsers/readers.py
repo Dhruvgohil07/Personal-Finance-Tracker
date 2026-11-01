@@ -39,7 +39,6 @@ import xlrd
 from pdfminer.pdfdocument import PDFPasswordIncorrect
 
 from app.parsers.base import FileType, ParseError, ParserInput, PdfWord
-from app.parsers.pdf_unlock import PDF_UNREADABLE_MESSAGE
 
 # The first bytes of a file ("magic number"). These are fixed by the file
 # formats themselves, so they identify a file far better than its name.
@@ -55,6 +54,9 @@ _PDF_SIGNATURE = b"%PDF-"
 # it with its password cannot help - the request already failed to unlock
 # it - so the message does not suggest that.
 LOCKED_PDF_MESSAGE = "this PDF is password-protected and could not be unlocked"
+# Any other PDF that cannot be read. Shared with app/parsers/pdf_unlock.py,
+# which says the same when it cannot write an unlocked copy.
+PDF_UNREADABLE_MESSAGE = "this PDF could not be read"
 
 # A CSV is plain text and has no signature, so for CSV the file name is all
 # we have to go on.

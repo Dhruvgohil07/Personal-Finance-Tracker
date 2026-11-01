@@ -131,6 +131,11 @@ def encrypt_pdf(
     return output.getvalue()
 
 
+def is_encrypted(content: bytes) -> bool:
+    """Is this PDF password-protected (by any password, even an empty one)?"""
+    return PdfReader(io.BytesIO(content)).is_encrypted
+
+
 def _header(pdf: FPDF) -> None:
     """The two-line column header, labels placed where the parser looks."""
     top, bottom = HEADER_Y - LINE, HEADER_Y

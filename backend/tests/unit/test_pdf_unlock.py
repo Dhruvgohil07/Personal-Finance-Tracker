@@ -7,21 +7,16 @@ unlocking must not change a single word or position, or the worker would
 import a different statement than the one the bank sent.
 """
 
-import io
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pypdf import PdfReader, PdfWriter
 
 from app.parsers.base import ParseError
-from app.parsers.pdf_unlock import (
-    PDF_UNREADABLE_MESSAGE,
-    PdfLockedError,
-    WrongPdfPasswordError,
-    unlock_pdf,
-)
-from app.parsers.readers import read_pdf
-from tests.fixtures.icici_pdf import build_icici_pdf, encrypt_pdf
+from app.parsers.pdf_unlock import PdfLockedError, WrongPdfPasswordError, unlock_pdf
+from app.parsers.readers import PDF_UNREADABLE_MESSAGE, read_pdf
+from tests.fixtures.icici_pdf import build_icici_pdf, encrypt_pdf, is_encrypted
 
 PASSWORD = "dhru0101"
 # Every method pypdf can write; banks use RC4 and AES of various strengths.
@@ -32,10 +27,6 @@ ALGORITHMS = ("RC4-40", "RC4-128", "AES-128", "AES-256-R5", "AES-256")
 def plain(tmp_path: Path) -> bytes:
     """An ordinary, unlocked synthetic ICICI statement."""
     return build_icici_pdf(tmp_path / "statement.pdf").read_bytes()
-
-
-def is_encrypted(content: bytes) -> bool:
-    return PdfReader(io.BytesIO(content)).is_encrypted
 
 
 # --- Files that need nothing --------------------------------------------------
@@ -154,10 +145,14 @@ def test_the_unlocked_copy_does_not_contain_the_password(plain: bytes) -> None:
 # --- pypdf failing half-way ----------------------------------------------------------
 
 
-def test_a_damaged_encryption_dictionary_is_unreadable(
-    plain: bytes, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("password", [None, PASSWORD], ids=["no_password", "with_password"])
+def test_an_encryption_pypdf_cannot_decrypt_is_left_for_the_worker(
+    plain: bytes, monkeypatch: pytest.MonkeyPatch, password: str | None
 ) -> None:
-    """`decrypt` raising is not a wrong password: no password could fix it."""
+    """`decrypt` raising (a variant pypdf does not implement, a damaged
+    encryption dictionary) is not a wrong password, and not ours to judge
+    either: the file goes on unchanged, and pdfplumber gets its chance in
+    the worker (review of Step 10)."""
     locked = encrypt_pdf(plain, user_password=PASSWORD)
 
     def broken_decrypt(self: PdfReader, password: str) -> None:
@@ -165,9 +160,34 @@ def test_a_damaged_encryption_dictionary_is_unreadable(
 
     monkeypatch.setattr(PdfReader, "decrypt", broken_decrypt)
 
-    with pytest.raises(ParseError, match=f"^{PDF_UNREADABLE_MESSAGE}$") as raised:
-        unlock_pdf(locked, PASSWORD)
-    assert not isinstance(raised.value, PdfLockedError)
+    assert unlock_pdf(locked, password) is locked
+
+
+def test_the_empty_password_is_tried_once_and_the_file_parsed_once(
+    plain: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One reader, two `decrypt` calls: "" first, then the user's password
+    (review of Step 10: it used to parse the file three times)."""
+    locked = encrypt_pdf(plain, user_password=PASSWORD)
+    readers_built: list[object] = []
+    attempts: list[str] = []
+    real_init, real_decrypt = PdfReader.__init__, PdfReader.decrypt
+
+    def counting_init(self: PdfReader, *args: Any, **kwargs: Any) -> None:
+        readers_built.append(self)
+        real_init(self, *args, **kwargs)
+
+    def recording_decrypt(self: PdfReader, password: str) -> object:
+        attempts.append("empty" if password == "" else "given")
+        return real_decrypt(self, password)
+
+    monkeypatch.setattr(PdfReader, "__init__", counting_init)
+    monkeypatch.setattr(PdfReader, "decrypt", recording_decrypt)
+
+    unlock_pdf(locked, PASSWORD)
+
+    assert len(readers_built) == 1
+    assert attempts == ["empty", "given"]
 
 
 def test_a_copy_that_cannot_be_written_is_unreadable(

@@ -33,8 +33,7 @@ import io
 from pypdf import PasswordType, PdfReader, PdfWriter
 
 from app.parsers.base import ParseError
-
-PDF_UNREADABLE_MESSAGE = "this PDF could not be read"
+from app.parsers.readers import PDF_UNREADABLE_MESSAGE
 
 
 class PdfLockedError(ParseError):
@@ -60,15 +59,21 @@ def unlock_pdf(content: bytes, password: str | None = None) -> bytes:
     - Encrypted, no password given: `PdfLockedError`.
     - Encrypted, `password` does not open it: `WrongPdfPasswordError`.
 
-    **A PDF that pypdf cannot open at all is returned unchanged too.**
+    **A PDF that pypdf cannot open or decrypt is returned unchanged too.**
     Deciding that a file is unreadable is the worker's job (ADR 013), and
-    pdfplumber is more forgiving than pypdf with some damaged files: a PDF
-    pypdf refuses may still import. If it really is broken, the worker
-    reports "this PDF could not be read" on the upload, as for any other
-    damaged file.
+    pdfplumber is more forgiving than pypdf with some files: a PDF pypdf
+    refuses - a damaged one, or one with an encryption variant pypdf does
+    not implement - may still import. If it really cannot be read, the
+    worker reports that on the upload, as for any other bad file ("this
+    PDF is password-protected and could not be unlocked" for a locked one).
 
     Either password works: the user password (the one that opens the
     file) or the owner password (the one that sets its permissions).
+
+    One reader does all of it: the file is parsed once, and `decrypt` is
+    simply called again with the user's password if the empty one fails.
+    `decrypt` returns which password matched: USER_PASSWORD,
+    OWNER_PASSWORD, or NOT_DECRYPTED when neither did.
 
     The password is never put into an exception or anywhere else, and no
     pypdf exception travels along with ours: the ones raised while
@@ -76,46 +81,23 @@ def unlock_pdf(content: bytes, password: str | None = None) -> bytes:
     """
     try:
         reader = PdfReader(io.BytesIO(content))
-        encrypted = reader.is_encrypted
+        if not reader.is_encrypted:
+            return content
+        matched = reader.decrypt("")
+        if matched is PasswordType.NOT_DECRYPTED and password:
+            matched = reader.decrypt(password)
     except Exception:
         # Untrusted bytes, and pypdf raises many kinds of errors on a
-        # damaged file (PdfReadError, PdfStreamError, plain ValueError...).
-        # Not ours to judge; see the docstring.
-        return content
-    if not encrypted:
+        # damaged or unusual file (PdfReadError, PdfStreamError,
+        # NotImplementedError, its own LimitReachedError...). Not ours to
+        # judge; see the docstring.
         return content
 
-    reader = _opened_with(content, "")
-    if reader is None and password:
-        reader = _opened_with(content, password)
-        if reader is None:
+    if matched is PasswordType.NOT_DECRYPTED:
+        if password:
             raise WrongPdfPasswordError("the password does not open this PDF")
-    if reader is None:
         raise PdfLockedError("this PDF is password-protected")
     return _unlocked_copy(reader)
-
-
-def _opened_with(content: bytes, password: str) -> PdfReader | None:
-    """A reader on `content`, decrypted with `password`, or None if it does not open.
-
-    A fresh reader for every attempt: after a failed `decrypt()` the old
-    reader's state is pypdf's business, and starting clean costs nothing
-    worth saving (the file is in memory).
-
-    `decrypt` returns which password matched: USER_PASSWORD,
-    OWNER_PASSWORD, or NOT_DECRYPTED when neither did.
-    """
-    reader = PdfReader(io.BytesIO(content))
-    try:
-        matched = reader.decrypt(password)
-    except Exception:
-        # A damaged or unsupported encryption dictionary. Nothing a
-        # different password could fix, so this is "unreadable", not
-        # "wrong password".
-        raise ParseError(PDF_UNREADABLE_MESSAGE) from None
-    if matched is PasswordType.NOT_DECRYPTED:
-        return None
-    return reader
 
 
 def _unlocked_copy(reader: PdfReader) -> bytes:
