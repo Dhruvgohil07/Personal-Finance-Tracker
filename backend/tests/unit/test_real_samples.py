@@ -21,6 +21,12 @@ with a test password and unlocked again by `unlock_pdf`, must read exactly
 like the original (ADR 020). No real password-protected statement is in
 `samples/`, so the bank's own layout is what this proves survives the
 rewrite; the locking is ours.
+
+The review of Step 11 adds a third: every real statement must still
+auto-categorize MORE THAN HALF of its rows without an LLM, the Phase 2
+"Done when" bar (docs/phase-2-acceptance.md). The August `.xls` cleared it
+by two rows, so a change to the chain could quietly break it; this test
+re-measures it from the pure chain on every local run.
 """
 
 from collections import Counter
@@ -28,8 +34,12 @@ from pathlib import Path
 
 import pytest
 
+from app.categorizer.base import CategorySource, TxnFacts, categorize
+from app.categorizer.handlers import build_chain
+from app.db.seed_data import COMMON_MERCHANTS
 from app.parsers.base import ParsedStatement
-from app.parsers.normalize import normalize_description
+from app.parsers.narration import counterparty_name, dictionary_key
+from app.parsers.normalize import normalize_description, normalize_row
 from app.parsers.pdf_unlock import unlock_pdf
 from app.parsers.readers import read_pdf, read_statement
 from app.parsers.registry import build_default_registry
@@ -117,3 +127,36 @@ def test_a_real_pdf_locked_and_unlocked_reads_exactly_the_same(algorithm: str) -
             f"{same_words} of {len(original.pdf_words)} words unchanged "
             f"({len(unlocked.pdf_words)} after unlocking)"
         )
+
+
+def test_more_than_half_of_each_real_statement_categorizes_without_an_llm() -> None:
+    """The same chain an import runs, with the seeded merchant dictionary and
+    no user rules (a new user's view). Self-transfer detection needs two
+    accounts and is left out: it can only add categorized rows."""
+    statements = _statements(".xls") + _statements(".pdf")
+    if not statements:
+        pytest.skip("samples/ holds no statement")
+    merchants = {m.normalized_key: m.default_category_slug for m in COMMON_MERCHANTS}
+    chain = build_chain(rules=[], merchant_categories=merchants)
+
+    for statement in statements:
+        rows = [normalize_row(row) for row in statement.rows]
+        decided = sum(
+            categorize(
+                TxnFacts(
+                    direction=row.raw.direction,
+                    channel=row.channel,
+                    normalized_description=row.normalized_description,
+                    merchant_key=row.merchant_key,
+                    counterparty_vpa=row.counterparty_vpa,
+                    dictionary_key=dictionary_key(row.merchant_key, merchants.keys()),
+                    counterparty_name=counterparty_name(row.raw.raw_description),
+                    category_source=CategorySource.NONE,
+                ),
+                chain,
+            )
+            is not None
+            for row in rows
+        )
+        # Counts only - see the module docstring.
+        assert decided * 2 > len(rows), f"only {decided} of {len(rows)} rows categorized"

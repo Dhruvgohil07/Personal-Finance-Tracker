@@ -280,21 +280,30 @@ def _income_slug(facts: TxnFacts) -> str | None:
 
 # --- 5. Person-to-person heuristic (SPEC §8.3) ----------------------------------
 
-# Merchant QR codes, recognised by the VPA's SHAPE. The first five were seen
-# in the August .xls (75 of its UPI rows), the business handle in the October
-# PDF (45 rows, Phase 2 acceptance): a payment to one of these is a shop,
-# never a person, even when the shop is not in the dictionary.
+# Merchant QR codes, recognised by the VPA's SHAPE before the "@". All five
+# seen in the August .xls (75 of its UPI rows): a payment to one of these is
+# a shop, never a person, even when the shop is not in the dictionary.
 _MERCHANT_VPA = re.compile(
     r"q\d{8,}@"  # PhonePe merchant QR: "Q123456789@ybl"
     r"|gpay-\d"  # Google Pay for Business: "gpay-123456789..."
     r"|paytmqr"  # Paytm QR: "paytmqr1234567..."
     r"|paytm-\d"  # Paytm merchant: "paytm-12345678..."
     r"|vyapar\.\d"  # HDFC Vyapar merchant app: "vyapar.1234567..."
-    # Google Pay for Business's HANDLE, whatever the id before it:
-    # "ab1234@okbizaxis". Matched as a prefix because ICICI cuts the VPA at
-    # 14 characters (ADR 015), so the real file prints "ab1234@okbizax".
-    r"|[^@]*@okbiz"
 )
+
+# Handles (the part after the "@") that payment apps give ONLY to
+# businesses, whatever the id before them. Kept apart from the shapes above
+# because a handle survives ICICI's cut differently (`_has_business_handle`).
+# Found by the Phase 2 acceptance run: 45 debits in the real October PDF.
+# Add a handle here only when a real statement shows it (SPEC §6.2: no
+# guessed formats).
+_BUSINESS_HANDLES = ("okbizaxis",)  # Google Pay for Business: "ab1234@okbizaxis"
+
+# How many characters of a CUT handle must survive to say it is a business
+# one. "okb" already is: Google Pay's personal handles are okaxis,
+# okhdfcbank, okicici and oksbi. "ok" could be any of them, so it is left a
+# person - wrongly, sometimes, but the guess is no worse than before.
+_MIN_CUT_HANDLE = 3
 
 # Words that say a counterparty is a business even though its VPA looks
 # personal (small shops often take payments on a personal UPI id). SPEC §8.3
@@ -343,7 +352,8 @@ class P2PHandler:
     All of these must hold:
 
     - the channel is UPI and the row has a counterparty VPA
-    - the VPA is not a merchant QR code (`_MERCHANT_VPA`)
+    - the VPA is not a merchant QR code (`_MERCHANT_VPA`) and its handle is
+      not a business one (`_has_business_handle`)
     - no business word in the counterparty's NAME (`_BUSINESS_WORDS`). When
       the layout is known, only the name field is read: a remark such as
       "hotel" says what the money was for, not who received it. Otherwise
@@ -378,10 +388,39 @@ def looks_like_person(facts: TxnFacts) -> bool:
     vpa = facts.counterparty_vpa
     if facts.channel is not Channel.UPI or not vpa:
         return False
-    if _MERCHANT_VPA.match(vpa):
+    if _MERCHANT_VPA.match(vpa) or _has_business_handle(vpa):
         return False
     who = facts.counterparty_name or facts.normalized_description
     return not _words(who) & _BUSINESS_WORDS
+
+
+def _has_business_handle(vpa: str) -> bool:
+    """Is the VPA's handle one of `_BUSINESS_HANDLES`, even when ICICI cut it?
+
+    ICICI cuts the VPA at `ICICI_VPA_WIDTH` characters (ADR 015), so how
+    much of the handle survives depends on the id's length:
+
+        real VPA                 printed            decided
+        "ab@okbizaxis"           "ab@okbizaxis"     business (not cut)
+        "ab1234@okbizaxis"       "ab1234@okbizax"   business (the real file)
+        "shop12345@okbizaxis"    "shop12345@okbi"   business
+        "shopname12@okbizaxis"   "shopname12@okb"   business
+        "shopname123@okbizaxis"  "shopname123@ok"   person: "ok" could be okaxis
+
+    A handle shorter than the full one counts only when the VPA is exactly
+    at the cut width - otherwise the bank printed it whole, and a short
+    handle is a different handle.
+    """
+    _local, at, handle = vpa.partition("@")
+    if not at or not handle:
+        return False
+    was_cut = len(vpa) == ICICI_VPA_WIDTH
+    for business in _BUSINESS_HANDLES:
+        if handle.startswith(business):
+            return True
+        if was_cut and len(handle) >= _MIN_CUT_HANDLE and business.startswith(handle):
+            return True
+    return False
 
 
 # --- The chain ------------------------------------------------------------------

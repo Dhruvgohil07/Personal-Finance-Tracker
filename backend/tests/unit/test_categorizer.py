@@ -331,21 +331,42 @@ def test_money_received_from_a_person_is_other_income() -> None:
         "paytmqr1234567",
         "paytm-12345678",
         "vyapar.1234567",
-        # Google Pay for Business's handle (the real October PDF), in full
-        # and as ICICI prints it, cut at 14 characters
-        "ab1234@okbizaxis",
-        "ab1234@okbizax",
     ],
 )
 def test_a_merchant_qr_code_is_not_a_person(vpa: str) -> None:
     assert P2PHandler().decide(upi("MOONCAFE", vpa)) is None
 
 
-@pytest.mark.parametrize("vpa", ["ab1234@okaxis", "okbiz@ybl", "okbizaxis@ybl"])
-def test_a_personal_handle_or_okbiz_before_the_at_is_still_a_person(vpa: str) -> None:
-    """Only the HANDLE marks a business: Google Pay's personal handle
-    (@okaxis) stays a person, and so does an id that merely starts with
-    "okbiz" on a personal handle."""
+@pytest.mark.parametrize(
+    "vpa",
+    [
+        # Google Pay for Business's handle (the real October PDF): whole,
+        # and as ICICI prints it when the cut at 14 characters takes more
+        # and more of it (review of Step 11)
+        "ab@okbizaxis",
+        "ab1234@okbizax",
+        "shop12345@okbi",
+        "shopname12@okb",
+    ],
+)
+def test_a_business_handle_is_not_a_person(vpa: str) -> None:
+    assert P2PHandler().decide(upi("MOONCAFE", vpa)) is None
+
+
+@pytest.mark.parametrize(
+    "vpa",
+    [
+        "ab1234@okaxis",  # Google Pay's personal handle
+        "okbiz@ybl",  # "okbiz" before the "@" says nothing
+        "okbizaxis@ybl",
+        "shopname123@ok",  # cut to "ok": could be okaxis, okicici, ...
+        "ab@okb",  # not at the cut width: printed whole, a different handle
+        "abcdefghijklmn",  # cut before the "@": no handle at all
+    ],
+)
+def test_a_personal_or_unknowable_handle_is_still_a_person(vpa: str) -> None:
+    """Only the HANDLE marks a business, and only when enough of it is
+    printed to tell it from Google Pay's personal handles."""
     assert P2PHandler().decide(upi("ASHAVERMA", vpa)) is not None
 
 
