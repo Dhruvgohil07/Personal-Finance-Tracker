@@ -1,7 +1,8 @@
 # Progress
 
 ## Current phase
-Phase 2 — Real-world imports (plan: docs/plans/phase-2.md, approved 2026-10-14).
+Phase 2 — Real-world imports is COMPLETE once the Step 11 PR merges (plan:
+docs/plans/phase-2.md, acceptance: docs/phase-2-acceptance.md). Next: plan Phase 3.
 Phase 1 — Backend MVP is COMPLETE (plan: docs/plans/phase-1.md, acceptance:
 docs/phase-1-acceptance.md).
 
@@ -412,14 +413,29 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
 
   The five new behaviour tests were checked to fail on the pre-review code.
 
+- [x] Step 11: Phase 2 acceptance — `docs/phase-2-acceptance.md`. Part A (synthetic,
+  live API + Docker worker) **21/21**; Part B (the real `.xls` and PDF) **13/13**:
+  both reconcile, balance chain 174/174 and 177/177 in list order, the locked real
+  PDF unlocks to 178/178 duplicates, no leaks in the logs. Auto-categorized without
+  an LLM: `.xls` **50.9%**, PDF **74.7%**. Found and fixed (decided with Dhruv): Google
+  Pay for Business ids (`@okbizaxis`, cut to `@okbizax`) were filed as Transfers to
+  People (45 PDF rows); now a merchant shape (ADR 016 amendment). Not covered (no real
+  file): `.xls`+PDF overlap, self transfers, a real locked PDF. README updated for
+  the worker, PDFs, passwords, auto-categorization and rules.
+  1477 tests (+1 skipped), 100% coverage
+
 ## In progress
 - (nothing)
 
 ## Next up
-- **Real cross-check of Step 9:** put an ICICI `.xls` of the PDF's exact period in
-  `samples/`, then run `uv run pytest tests/unit/test_real_samples.py` (counts only;
-  skipped until such a pair exists). The two current samples share no day
-- Step 11 (acceptance): its self-transfer check needs a second real account's statement
+- **Phase 3 plan**: list the tasks and files for approval, then save
+  `docs/plans/phase-3.md` (frontend; `q=` search; user categories, `/me`,
+  `DELETE /me`, CSV export)
+- Carried over from the Phase 2 acceptance (each needs a real file, no code):
+  - **Real `.xls`/PDF cross-check:** put an ICICI `.xls` of the PDF's exact period
+    in `samples/`, then run `uv run pytest tests/unit/test_real_samples.py`
+  - **Real self transfers:** a second real account's statement
+  - **October opening/closing balances** against netbanking (Dhruv)
 
 ## Open decisions / questions
 - Git workflow → decided: `main` protected (ruleset `protect-main`); every change via a

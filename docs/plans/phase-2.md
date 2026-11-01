@@ -412,3 +412,9 @@ and Step 5's narration rules).
   - a PDF with only an owner password is unlocked without asking;
   - a PDF pypdf cannot open is passed on to the worker unchanged (ADR 013);
   - `fail_upload` also fails `needs_password` uploads (`NOT_FINAL_STATUSES`).
+- **Step 11:** the acceptance run found one categorizer gap on the real October
+  PDF: Google Pay for Business ids (`@okbizaxis`) were taken for people. Fixed in
+  this step (decided with Dhruv; ADR 016 amendment). The acceptance scripts are not
+  committed, as in Phase 1. Three checks need real files that do not exist yet and
+  are carried into `docs/progress.md` "Next up": an `.xls`/PDF overlap, a second
+  account, a real locked PDF.

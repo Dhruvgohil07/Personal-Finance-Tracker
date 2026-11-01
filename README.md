@@ -5,13 +5,16 @@
 Upload your bank statements (CSV/PDF) and get categorized spending,
 subscriptions, budgets and alerts — built for Indian banks.
 
-**Status:** Phase 1 (backend MVP) — a working API you can drive from
+**Status:** Phase 2 (real-world imports) — a working API you can drive from
 `/docs`: register, log in, add a bank account, upload a real ICICI
-statement, read your transactions, categorize them by hand, and see a
-monthly summary and a category breakdown. No frontend yet (Phase 3) and no
-automatic categorization yet (Phase 2). See
-[docs/progress.md](docs/progress.md) and the
-[walkthrough](#walkthrough-phase-1) below.
+statement (`.xls` or PDF, password-protected or not), and a background
+worker imports it, checks its balances and categorizes most transactions
+automatically. Read your transactions, correct a category (and teach a rule
+for similar ones), and see a monthly summary and a category breakdown, with
+transfers between your own accounts left out. No frontend yet (Phase 3).
+See [docs/progress.md](docs/progress.md), the
+[walkthrough](#walkthrough) below and the
+[Phase 2 acceptance run](docs/phase-2-acceptance.md).
 
 **Stack:** Python 3.12 · FastAPI · PostgreSQL 16 · SQLAlchemy 2 + Alembic ·
 Redis + RQ · structlog · pytest · ruff · uv. Frontend (Next.js) from Phase 3.
@@ -66,7 +69,7 @@ uv run uvicorn app.main:app --reload
 - Health check: <http://127.0.0.1:8000/api/v1/health> — `200` when Postgres
   and Redis are reachable, `503` (with the failing check named) when not
 
-## Walkthrough (Phase 1)
+## Walkthrough
 
 Everything below runs from <http://127.0.0.1:8000/docs>. Each endpoint has a
 **Try it out** button; the only manual step is pasting your access token
@@ -122,9 +125,10 @@ picker:
 
 | Field | Value |
 |---|---|
-| `file` | your `.xls` statement (ICICI gives legacy Excel — [ADR 004](docs/decisions/004-xls-support.md)) |
+| `file` | your ICICI statement: `.xls` (legacy Excel — [ADR 004](docs/decisions/004-xls-support.md)) or PDF ([ADR 019](docs/decisions/019-pdf-parsing.md)) |
 | `account_id` | the id from step 2 |
 | `column_mapping` | leave empty |
+| `password` | only for a password-protected PDF; otherwise leave empty |
 
 Answers `202 Accepted` with the upload still `pending`: the worker imports
 it in the background. Copy its `id` and poll `GET /api/v1/uploads/{id}`
@@ -163,10 +167,24 @@ Things worth trying here:
   and only the new ones in `rows_inserted`. That is dedupe by fingerprint
   ([ADR 006](docs/decisions/006-dedupe-fingerprint.md)) and it is what makes
   imports idempotent.
-- **Upload a PDF** → `400 INVALID_STATEMENT`. PDF parsing arrives later in Phase 2.
+- **Upload the same statement as `.xls` and as PDF** → the second one is
+  100% `rows_duplicate`: both formats rebuild the narration the same way,
+  so the fingerprints agree.
+- **Upload a password-protected PDF without `password`** → `409
+  PASSWORD_REQUIRED`, with the waiting upload's id in
+  `error.details.upload_id`; `GET /uploads/{id}` shows `needs_password`.
+  Send the password to `POST /api/v1/uploads/{id}/password` as
+  `{"password": "..."}` → `202`, then poll as above. A wrong password is
+  `400 INCORRECT_PASSWORD` and you can try again (5 tries a minute). The
+  PDF is unlocked in memory during that request and stored without its
+  password, so the password is never saved anywhere — not in the
+  database, not in the job queue, not in the logs
+  ([ADR 020](docs/decisions/020-statement-passwords.md)). Sending
+  `password` with the upload itself skips the 409. An upload left waiting
+  expires after 24 hours.
 - `column_mapping` is only for a CSV that no bank parser recognises. It
   names the columns by their **header label**, so a headerless CSV is not
-  supported in Phase 1. `/docs` shows the exact example:
+  supported. `/docs` shows the exact example:
 
   ```json
   { "date_column": "Date", "description_column": "Narration",
@@ -201,7 +219,25 @@ GET /api/v1/transactions?from=2026-08-01&to=2026-08-31&direction=debit&limit=20
   count and no "page 3 of 20" — deliberately.
 
 Each row carries `amount_paise` (canonical) and `amount_display`
-(`"₹1,250.50"`, for reading).
+(`"₹1,250.50"`, for reading), plus what the importer read from the
+narration: `channel` (`upi`, `imps`, `atm`, ...), `counterparty_vpa` and
+`merchant_key`.
+
+Most rows arrive **already categorized**. `category_source` says how
+([ADR 016](docs/decisions/016-categorizer-chain.md)):
+
+| `category_source` | Meaning |
+|---|---|
+| `user_manual` | you set it by hand; nothing automatic ever changes it |
+| `user_rule` | one of your rules matched (see step 5) |
+| `merchant` | a known merchant, from the seeded dictionary |
+| `keyword` | a word in the narration (refund, ATM, interest, ...) |
+| `heuristic` | a guess: a UPI payment to or from a person, or one half of a transfer between your own accounts (`is_self_transfer: true`) |
+| `none` | nothing matched — this is what "needs your attention" means |
+
+On the real ICICI statements, 51% (August `.xls`) and 75% (October PDF)
+of the rows were categorized this way, with no LLM
+([acceptance run](docs/phase-2-acceptance.md)).
 
 ### 5. Categorize one by hand
 
@@ -216,7 +252,13 @@ your own. Copy the `id` of one, then:
 
 Send only the fields you want to change. An explicit `null` clears either
 one. The category is recorded as `category_source: "user_manual"`, which is
-what stops the Phase 2 categorizer overwriting your correction.
+what stops the categorizer overwriting your correction.
+
+Add `"apply_to_similar": true` to also **teach a rule**: the same
+counterparty (by UPI id or merchant) gets that category from now on, and
+your existing rows are re-run at once. `GET/POST/PATCH/DELETE
+/api/v1/rules` manage the rules directly
+([ADR 017](docs/decisions/017-user-rules.md)).
 
 **One behaviour worth understanding:** choosing a category whose `kind` is
 `transfer` (e.g. *Self Transfer*) also sets `is_self_transfer: true`, and
@@ -250,19 +292,21 @@ Transactions you have not categorized arrive as one row with
 
 Both endpoints exclude self transfers, and the breakdown is debits only —
 so a salary credit never appears there
-([ADR 010](docs/decisions/010-insights-aggregation.md)).
+([ADR 010](docs/decisions/010-insights-aggregation.md)). A transfer
+between two of your accounts (money out of one, the same amount into the
+other within two days) is detected on import and marked as a self
+transfer automatically ([ADR 018](docs/decisions/018-self-transfer-matching.md)).
 
-### What Phase 1 deliberately does not do
+### What is not built yet
 
 | Missing | Arrives in |
 |---|---|
-| PDF statements, password-protected files | Phase 2 |
-| Automatic categorization, merchants, UPI/VPA and channel detection | Phase 2 |
-| `apply_to_similar` on a PATCH (answers `422` today) | Phase 2 |
-| `/insights/trend`, `/insights/top-merchants` | Phase 2 |
-| Creating your own categories, `/me`, `DELETE /me`, CSV export | Phase 2 |
-| Web UI | Phase 3 |
+| Web UI, and search that uses its index (`q=`) | Phase 3 |
+| Creating your own categories, `/me`, `DELETE /me`, CSV export | Phase 3 |
+| `/insights/trend`, `/insights/top-merchants` | later phase (see [SPEC](docs/SPEC.md)) |
+| LLM categorization for what the rules cannot place | Phase 4 |
 | Recurring payments, budgets, alerts | Phases 4–5 |
+| Parsers for banks other than ICICI | when real samples exist ([SPEC §6.2](docs/SPEC.md)) |
 
 ## Tests and lint
 
@@ -289,11 +333,17 @@ backend/
     core/          config, logging (with redaction), errors, middleware,
                    security (argon2id + JWT), rate limiting
     api/v1/        HTTP routes (thin: validate -> call a service -> respond)
-    services/      business logic: auth, accounts, imports, transactions,
-                   categories, insights
+    services/      business logic: auth, accounts, imports, uploads,
+                   transactions, categories, categorization, rules,
+                   insights, cleanup
     parsers/       PURE statement parsing: no DB, no FastAPI, no Redis.
-                   readers (file type, CSV, xls) -> a bank parser
-                   (icici / generic_csv) -> normalize -> fingerprint
+                   readers (file type, CSV, xls, PDF) -> a bank parser
+                   (icici / icici_pdf / generic_csv) -> normalize (+ the
+                   narration's channel, VPA, merchant) -> fingerprint;
+                   reconcile (balance check), pdf_unlock (passwords)
+    categorizer/   PURE categorization chain, rule learning, self-transfer
+                   matching
+    workers/       RQ queue, jobs, worker and scheduler entry points
     models/        SQLAlchemy tables
     schemas/       Pydantic request/response models
     db/            engine + sessions, seed data
@@ -310,10 +360,10 @@ docs/
   request-lifecycle.md   how a request flows through FastAPI
 ```
 
-`app/parsers/` is deliberately a **pure** package: a test asserts it
-imports no FastAPI, SQLAlchemy or Redis. That is what lets the whole
-parsing pipeline be unit tested without a database, and what will let the
-Phase 2 RQ worker reuse it unchanged.
+`app/parsers/` and `app/categorizer/` are deliberately **pure** packages: a
+test asserts they import no FastAPI, SQLAlchemy or Redis. That is what lets
+the whole parsing and categorizing pipeline be unit tested without a
+database, and what let the RQ worker reuse it unchanged.
 
 ## Design principles
 
