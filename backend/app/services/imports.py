@@ -32,6 +32,16 @@ different account - is found by the worker and recorded on the upload as
 **Failures** (ADR 011, ADR 013). A failed upload keeps its row, with the
 reason, and the file-hash index skips `failed` rows, so the user can
 upload the same file again at once.
+
+**Password-protected PDFs** (Phase 2 Step 10, ADR 020). The password can
+only be used in a request, never in the worker (CLAUDE.md §7.2), so the
+lock comes off in the API, and the worker always gets an ordinary PDF:
+
+    POST /uploads with the password    -> unlocked now, stored, queued (202)
+    POST /uploads without it           -> stored LOCKED as `needs_password`,
+                                          409 PASSWORD_REQUIRED + upload id
+    POST /uploads/{id}/password        -> unlocked, stored, queued (202)
+    a wrong password, either way       -> 400 INCORRECT_PASSWORD
 """
 
 import dataclasses
@@ -45,6 +55,7 @@ from pathlib import PurePosixPath
 from typing import NoReturn
 
 import structlog
+from pydantic import SecretStr
 from redis.exceptions import RedisError
 from rq import Queue
 from sqlalchemy import ColumnElement, and_, delete, select, text, update
@@ -56,7 +67,10 @@ from app.core.config import get_settings
 from app.core.crypto import EncryptedFile, FileDecryptionError, decrypt_file, encrypt_file
 from app.core.errors import (
     ConflictError,
+    IncorrectPasswordError,
     InvalidStatementError,
+    NotFoundError,
+    PasswordRequiredError,
     PayloadTooLargeError,
     ServiceUnavailableError,
 )
@@ -67,11 +81,13 @@ from app.parsers.base import FileType, ParsedStatement, ParseError, RawRow, Stat
 from app.parsers.fingerprint import fingerprints_for
 from app.parsers.generic_csv import ColumnMapping, GenericCsvParser
 from app.parsers.normalize import normalize_row
+from app.parsers.pdf_unlock import PdfLockedError, WrongPdfPasswordError, unlock_pdf
 from app.parsers.readers import detect_file_type, read_statement_as
 from app.parsers.reconcile import Issue, reconcile, to_chronological
 from app.parsers.registry import ParserRegistry, build_default_registry
 from app.services import accounts as accounts_service
 from app.services import categorization as categorization_service
+from app.services.uploads import UPLOAD_NOT_FOUND_MESSAGE
 from app.workers.queue import enqueue_statement_processing, statement_job_waiting_check
 
 log = structlog.get_logger()
@@ -103,6 +119,8 @@ UNEXPECTED_FAILURE_MESSAGE = (
     "Something went wrong while importing this statement. Please upload it again."
 )
 STALE_UPLOAD_MESSAGE = "This import did not finish. Please upload the file again."
+# POST /uploads/{id}/password on an upload that is not locked (any more).
+NOT_LOCKED_MESSAGE = "This upload is not waiting for a password."
 
 # How long an upload may stay `pending`/`processing` before it is presumed
 # lost: the API died between commit and enqueue, or its job is gone. A real
@@ -120,6 +138,11 @@ JobIsWaiting = Callable[[uuid.UUID], bool]
 # and RQ's retry must be able to pick it up again. Public: the upload routes
 # (Retry-After) and the cleanup job use the same definition.
 UNFINISHED_STATUSES = (UploadStatus.PENDING, UploadStatus.PROCESSING)
+# Every status that is not final: the unfinished ones, plus `needs_password`,
+# which waits for the USER rather than for a job. These uploads still hold
+# their stored file, and only these can still be failed (`fail_upload`, the
+# cleanup's 24-hour file rule).
+NOT_FINAL_STATUSES = (*UNFINISHED_STATUSES, UploadStatus.NEEDS_PASSWORD)
 
 # At most this many reconciliation issues are STORED on an upload (the
 # count in `reconciliation_errors` is always the full number). A statement
@@ -174,6 +197,7 @@ def create_upload(
     content: bytes,
     queue: Queue,
     column_mapping: ColumnMapping | None = None,
+    password: SecretStr | None = None,
 ) -> StatementUpload:
     """Store an uploaded file and queue it for import; return the `pending` row.
 
@@ -183,8 +207,17 @@ def create_upload(
     - `NotFoundError` (404)          - unknown account, or someone else's
     - `ConflictError` (409)          - this exact file was already uploaded,
                                        or is still being imported
+    - `PasswordRequiredError` (409)  - a locked PDF and no password: it IS
+                                       stored, as `needs_password`
     - `InvalidStatementError` (400)  - not a file type we can read
+    - `IncorrectPasswordError` (400) - the password does not open the PDF;
+                                       nothing is stored
     - `ServiceUnavailableError` (503) - the queue (Redis) is unreachable
+
+    `password` is a pydantic `SecretStr`, not a `str`, all the way from the
+    route to the moment it is used: printed, logged or shown in a traceback
+    by mistake, it reads `**********`. It is only used to unlock a PDF in
+    memory, and is ignored for any other file type.
 
     Order of the checks, cheapest first, and nothing parsed:
 
@@ -200,10 +233,17 @@ def create_upload(
        file.
     4. **file type, from the file's signature** ("magic bytes"), so a
        Word document renamed to `.xls` is refused here, not in the worker.
+    5. **a PDF's password protection** comes off (`_unlock_if_pdf`). This
+       is the one step that does real work on the file, and it has to
+       happen here: the password exists only in this request.
 
     Then the row and the encrypted file are committed together, and only
     then is the job enqueued: the worker must be able to find both the
     moment it starts, which can be before this function returns.
+
+    The hash in step 3 is of the file AS UPLOADED - the locked one, for a
+    locked PDF - so sending the same locked file again is recognised as
+    the same file, whatever is stored for it.
     """
     settings = get_settings()
     if len(content) > settings.max_upload_bytes:
@@ -240,6 +280,7 @@ def create_upload(
         _raise_duplicate(existing)
 
     file_type = _supported_file_type(filename, content)
+    stored_content, status = _unlock_if_pdf(file_type, content, password)
 
     upload = StatementUpload(
         user_id=user_id,
@@ -247,7 +288,7 @@ def create_upload(
         original_filename=_safe_filename(filename),
         file_type=file_type,
         file_sha256=file_sha256,
-        status=UploadStatus.PENDING,
+        status=status,
         column_mapping=_mapping_to_json(column_mapping),
     )
     db.add(upload)
@@ -256,7 +297,7 @@ def create_upload(
         # needed first: it is bound into the encryption (associated data),
         # so the blob can only ever be decrypted for this upload.
         db.flush()
-        encrypted = encrypt_file(content, upload.id)
+        encrypted = encrypt_file(stored_content, upload.id)
         db.add(
             UploadBlob(
                 upload_id=upload.id,
@@ -276,6 +317,128 @@ def create_upload(
             raise ConflictError(DUPLICATE_FILE_MESSAGE) from None
         raise
 
+    if upload.status is UploadStatus.NEEDS_PASSWORD:
+        # Stored, still locked, and NOT queued: there is nothing a worker
+        # could do with it. The 409 carries the id the password goes to.
+        log.info(
+            "statement_upload_needs_password",
+            user_id=str(user_id),
+            account_id=str(account.id),
+            upload_id=str(upload.id),
+        )
+        raise PasswordRequiredError(details={"upload_id": str(upload.id)})
+
+    _enqueue(db, queue, upload)
+    # IDs and the file type only: no filename (it can identify a person),
+    # nothing from the file (CLAUDE.md rule 3).
+    log.info(
+        "statement_upload_queued",
+        user_id=str(user_id),
+        account_id=str(account.id),
+        upload_id=str(upload.id),
+        file_type=file_type.value,
+    )
+    return upload
+
+
+def unlock_upload(
+    db: Session,
+    user_id: uuid.UUID,
+    upload_id: uuid.UUID,
+    *,
+    password: SecretStr,
+    queue: Queue,
+) -> StatementUpload:
+    """Unlock a `needs_password` upload with its password, then queue it.
+
+    POST /uploads/{id}/password, the second half of SPEC §6.1's password
+    flow. Returns the upload, now `pending`. Raises:
+
+    - `NotFoundError` (404)          - no such upload, or someone else's
+    - `ConflictError` (409)          - the upload is not waiting for a
+                                       password (already unlocked, failed...)
+    - `IncorrectPasswordError` (400) - the password does not open it; the
+                                       upload stays `needs_password`, so the
+                                       user can simply try again
+    - `ServiceUnavailableError` (503) - the queue (Redis) is unreachable
+
+    The row is locked (`FOR UPDATE`) for the whole check-unlock-store
+    sequence, so two password requests for one upload cannot both unlock
+    it and enqueue it twice: the second waits, then finds it `pending`
+    and gets the 409.
+
+    The stored file is REPLACED: the locked PDF (encrypted with our key)
+    becomes the unlocked PDF (encrypted with our key, under a new nonce).
+    The file's 24-hour clock is not reset - it still counts from the
+    upload - so a file can never be kept longer by sending passwords.
+    """
+    upload = db.scalar(
+        select(StatementUpload)
+        .where(StatementUpload.id == upload_id, StatementUpload.user_id == user_id)
+        .with_for_update()
+    )
+    if upload is None:
+        # Someone else's upload is a 404 too, like one that does not exist
+        # (IDOR protection, CLAUDE.md rule 2).
+        raise NotFoundError(UPLOAD_NOT_FOUND_MESSAGE)
+    if upload.status is not UploadStatus.NEEDS_PASSWORD:
+        db.rollback()
+        raise ConflictError(NOT_LOCKED_MESSAGE)
+
+    blob = db.get(UploadBlob, upload_id)
+    # A missing blob is normally impossible: the cleanup deletes the file of
+    # a `needs_password` upload only together with failing it.
+    locked = _decrypted(blob, upload_id) if blob is not None else None
+    if blob is None or locked is None:
+        # Our stored copy is gone or damaged: no password can help, so the
+        # upload is failed (which frees the file for a fresh upload).
+        db.rollback()
+        fail_upload(db, upload_id, FILE_UNREADABLE_MESSAGE, reason="file_unreadable")
+        raise ConflictError(FILE_UNREADABLE_MESSAGE)
+
+    try:
+        unlocked = unlock_pdf(locked, password.get_secret_value())
+    except PdfLockedError:
+        # Still locked: the password was wrong (`WrongPdfPasswordError`),
+        # or blank. Nothing changes, and the user may try again - at
+        # UNLOCK_LIMIT, which is what stops this being a guessing oracle.
+        db.rollback()
+        raise IncorrectPasswordError from None
+    except ParseError as exc:
+        # The password matched but pypdf could not write the copy out.
+        # Trying again would fail the same way.
+        db.rollback()
+        fail_upload(db, upload_id, str(exc), reason="invalid_statement")
+        raise InvalidStatementError(str(exc)) from None
+
+    encrypted = encrypt_file(unlocked, upload_id)
+    blob.encrypted_content = encrypted.ciphertext
+    blob.nonce = encrypted.nonce
+    upload.status = UploadStatus.PENDING
+    db.commit()
+
+    _enqueue(db, queue, upload)
+    log.info(
+        "statement_upload_unlocked",
+        user_id=str(user_id),
+        account_id=str(upload.account_id),
+        upload_id=str(upload_id),
+    )
+    return upload
+
+
+def _decrypted(blob: UploadBlob, upload_id: uuid.UUID) -> bytes | None:
+    """A stored file's bytes, or None if our encryption says it was tampered with."""
+    try:
+        return decrypt_file(
+            EncryptedFile(nonce=blob.nonce, ciphertext=blob.encrypted_content), upload_id
+        )
+    except FileDecryptionError:
+        return None
+
+
+def _enqueue(db: Session, queue: Queue, upload: StatementUpload) -> None:
+    """Hand a committed `pending` upload to the worker, or fail it and answer 503."""
     try:
         enqueue_statement_processing(queue, upload.id)
     except RedisError:
@@ -287,22 +450,11 @@ def create_upload(
         # But an error can also arrive AFTER Redis accepted the job: a
         # reply that times out. A fast worker may then already have claimed
         # or even finished the upload. `fail_upload` only fails an upload
-        # that is still `pending`, and says whether it did. If it did not,
+        # that is still unfinished, and says whether it did. If it did not,
         # the job got through, and the upload is answered as accepted.
         if fail_upload(db, upload.id, QUEUE_UNAVAILABLE_MESSAGE, reason="queue_unavailable"):
             raise ServiceUnavailableError(QUEUE_UNAVAILABLE_MESSAGE) from None
         log.warning("statement_upload_enqueue_error_after_job_ran", upload_id=str(upload.id))
-
-    # IDs and the file type only: no filename (it can identify a person),
-    # nothing from the file (CLAUDE.md rule 3).
-    log.info(
-        "statement_upload_queued",
-        user_id=str(user_id),
-        account_id=str(account.id),
-        upload_id=str(upload.id),
-        file_type=file_type.value,
-    )
-    return upload
 
 
 # --- Worker side: parse the stored file and import it ---------------------
@@ -442,7 +594,7 @@ def process_upload(db: Session, upload_id: uuid.UUID) -> None:
 
 
 def fail_upload(db: Session, upload_id: uuid.UUID, message: str, *, reason: str) -> bool:
-    """Mark an unfinished upload `failed`, delete its stored file, and commit.
+    """Mark a not-yet-final upload `failed`, delete its stored file, and commit.
 
     Returns True if it did, False if the upload was already final or gone.
 
@@ -450,16 +602,17 @@ def fail_upload(db: Session, upload_id: uuid.UUID, message: str, *, reason: str)
     show: no narrations, amounts or balances. `reason` is a short fixed
     code for the log, which never gets the message itself.
 
-    Only an unfinished (`pending`/`processing`) upload is changed. One that
-    is already final, or gone, is left alone - the job's failure callback
-    can arrive after the upload was finished some other way, and must not
-    turn a `completed` import into a `failed` one.
+    Only an upload that is not final (`NOT_FINAL_STATUSES`: `pending`,
+    `processing`, `needs_password`) is changed. One that is already final,
+    or gone, is left alone - the job's failure callback can arrive after
+    the upload was finished some other way, and must not turn a
+    `completed` import into a `failed` one.
 
     Setting `failed` also frees the file: the file-hash index skips failed
     rows, so the user can upload the same file again (ADR 011).
     """
     upload = db.get(StatementUpload, upload_id, with_for_update=True, populate_existing=True)
-    if upload is None or upload.status not in UNFINISHED_STATUSES:
+    if upload is None or upload.status not in NOT_FINAL_STATUSES:
         db.rollback()
         return False
 
@@ -588,8 +741,8 @@ def parse_statement(
         # The request already refused empty files and unsupported types
         # (`_supported_file_type`), so in the worker this is a file whose
         # signature is right but whose contents cannot be read: a damaged
-        # .xls or PDF, a password-protected PDF (until Step 10), or a "CSV"
-        # that is not text.
+        # .xls or PDF, a PDF still locked because pypdf could not open it
+        # in the request (ADR 020), or a "CSV" that is not text.
         raise InvalidStatementError(str(exc)) from None
 
     parser: StatementParser | None = _registry().detect(data)
@@ -743,11 +896,41 @@ def _supported_file_type(filename: str, content: bytes) -> FileType:
     for the response.
 
     Every type it can detect is readable since PDFs arrived (Phase 2 Step
-    9). A PDF the worker then cannot open - a password-protected one, until
-    Step 10 - fails there with a message, like any unreadable file.
+    9). A PDF the worker then cannot open fails there with a message, like
+    any unreadable file.
     """
     try:
         return detect_file_type(filename, content)
+    except ParseError as exc:
+        raise InvalidStatementError(str(exc)) from None
+
+
+def _unlock_if_pdf(
+    file_type: FileType, content: bytes, password: SecretStr | None
+) -> tuple[bytes, UploadStatus]:
+    """The bytes to store for a new upload, and the status it starts in.
+
+    Only a PDF can be password-protected; every other file is stored as it
+    came, `pending`. For a PDF (`unlock_pdf`, ADR 020):
+
+    - not locked, or opened by the password (or by an empty one): the
+      unlocked bytes, `pending`;
+    - locked and no password: the LOCKED bytes, `needs_password`. Kept as
+      the bank made them, so the password can still be checked against
+      the real file when it arrives;
+    - locked and the password is wrong: 400, and nothing is stored. The
+      user simply sends the upload again, with the right password;
+    - pypdf opened it but could not write it out again: 400.
+    """
+    if file_type is not FileType.PDF:
+        return content, UploadStatus.PENDING
+    try:
+        given = password.get_secret_value() if password is not None else None
+        return unlock_pdf(content, given), UploadStatus.PENDING
+    except WrongPdfPasswordError:
+        raise IncorrectPasswordError from None
+    except PdfLockedError:
+        return content, UploadStatus.NEEDS_PASSWORD
     except ParseError as exc:
         raise InvalidStatementError(str(exc)) from None
 
@@ -823,8 +1006,16 @@ def _raise_duplicate(existing: StatementUpload) -> NoReturn:
 
     The message depends on whether that upload has finished, and the id is
     in `details` either way, so the client can go and look at it.
+
+    A locked PDF waiting for its password gets the SAME answer as when it
+    was first uploaded (PASSWORD_REQUIRED), even if this request carried a
+    password: that password belongs at POST /uploads/{id}/password. Taking
+    it here too would give the one upload two ways to be unlocked, and a
+    second route for guessing passwords around UNLOCK_LIMIT.
     """
     details = {"upload_id": str(existing.id)}
+    if existing.status is UploadStatus.NEEDS_PASSWORD:
+        raise PasswordRequiredError(details=details)
     if existing.status in UNFINISHED_STATUSES:
         raise ConflictError(FILE_BEING_IMPORTED_MESSAGE, details=details)
     raise ConflictError(DUPLICATE_FILE_MESSAGE, details=details)

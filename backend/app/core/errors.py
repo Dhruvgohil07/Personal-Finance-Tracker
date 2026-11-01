@@ -99,6 +99,27 @@ class ConflictError(AppError):
     message = "The request conflicts with the current state."
 
 
+class PasswordRequiredError(ConflictError):
+    # A password-protected PDF was uploaded without its password (SPEC
+    # §6.1). The upload IS stored, as `needs_password`, and its id is in
+    # `details`: the client asks the user for the password and sends it to
+    # POST /uploads/{id}/password. 409, as SPEC §6.1 says, with its own
+    # code so the frontend can tell "show a password prompt" apart from
+    # "you already uploaded this file" (also a 409).
+    code = "PASSWORD_REQUIRED"
+    message = "This PDF is password-protected. Send its password to finish the upload."
+
+
+class IncorrectPasswordError(AppError):
+    # The password sent for a protected PDF does not open it. 400, not 401:
+    # 401 means "who are you?" (the access token), and a client that sees
+    # 401 would try to refresh its token or log the user out. The message
+    # never repeats what was sent.
+    status_code = HTTPStatus.BAD_REQUEST
+    code = "INCORRECT_PASSWORD"
+    message = "That password does not open this PDF."
+
+
 class UnauthorizedError(AppError):
     # e.g. missing/expired token, or wrong email/password on login.
     status_code = HTTPStatus.UNAUTHORIZED

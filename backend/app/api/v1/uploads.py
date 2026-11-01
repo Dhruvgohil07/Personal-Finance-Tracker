@@ -1,16 +1,22 @@
 """/api/v1/uploads - upload a bank statement, then follow its import.
 
-    POST   /uploads        store a statement and queue it for import (202)
-    GET    /uploads        your uploads, newest first
-    GET    /uploads/{id}   one upload: its status, counts and error message
-    DELETE /uploads/{id}   undo an import: the upload and its transactions
+    POST   /uploads                store a statement and queue it for import (202)
+    POST   /uploads/{id}/password  unlock a password-protected PDF (202)
+    GET    /uploads                your uploads, newest first
+    GET    /uploads/{id}           one upload: its status, counts and error message
+    DELETE /uploads/{id}           undo an import: the upload and its transactions
 
-POST is the only endpoint in the app that takes a FILE, so it is the only
-one using a multipart form instead of a JSON body:
+POST /uploads is the only endpoint in the app that takes a FILE, so it is
+the only one using a multipart form instead of a JSON body:
 
     file           the statement (PDF, .xls or .csv)
     account_id     which of your accounts it belongs to
     column_mapping optional JSON, only for a CSV no bank parser recognises
+    password       optional, only for a password-protected PDF
+
+A locked PDF sent without `password` is stored as `needs_password` and
+answered 409 PASSWORD_REQUIRED with its `upload_id`; the password then
+goes to POST /uploads/{id}/password (SPEC §6.1, ADR 020).
 
 Since Phase 2 the import runs in an RQ worker, not in the request (ADR
 013). POST answers **202 Accepted** with the upload still `pending`, and
@@ -27,15 +33,21 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from app.api.deps import CurrentUser, DbSession, JobQueue
 from app.core.config import get_settings
 from app.core.errors import ErrorResponse, PayloadTooLargeError
-from app.core.rate_limit import UPLOAD_LIMIT, UPLOAD_POLL_LIMIT, limiter
+from app.core.rate_limit import UNLOCK_LIMIT, UPLOAD_LIMIT, UPLOAD_POLL_LIMIT, limiter
 from app.models import UploadStatus
 from app.parsers.generic_csv import ColumnMapping
-from app.schemas.upload import ColumnMappingRequest, UploadResponse, column_mapping_json_example
+from app.schemas.upload import (
+    MAX_PDF_PASSWORD_LENGTH,
+    ColumnMappingRequest,
+    UploadPasswordRequest,
+    UploadResponse,
+    column_mapping_json_example,
+)
 from app.services import imports as imports_service
 from app.services import uploads as uploads_service
 
@@ -49,6 +61,13 @@ _CREATE_RESPONSES = {
     **_NOT_FOUND,
     **_CONFLICT,
     HTTPStatus.REQUEST_ENTITY_TOO_LARGE: {"model": ErrorResponse},
+    HTTPStatus.TOO_MANY_REQUESTS: {"model": ErrorResponse},
+    HTTPStatus.SERVICE_UNAVAILABLE: {"model": ErrorResponse},
+}
+_UNLOCK_RESPONSES = {
+    HTTPStatus.BAD_REQUEST: {"model": ErrorResponse},
+    **_NOT_FOUND,
+    **_CONFLICT,
     HTTPStatus.TOO_MANY_REQUESTS: {"model": ErrorResponse},
     HTTPStatus.SERVICE_UNAVAILABLE: {"model": ErrorResponse},
 }
@@ -92,16 +111,30 @@ def create_upload(
             )
         ),
     ] = None,
+    # SecretStr: see UploadPasswordRequest. An empty field arrives as None.
+    password: Annotated[
+        SecretStr | None,
+        Form(
+            max_length=MAX_PDF_PASSWORD_LENGTH,
+            description="Only for a password-protected PDF: the password that opens it",
+        ),
+    ] = None,
 ) -> UploadResponse:
     """Store a statement and queue it for import into one of your accounts.
 
     Answers **202** with the upload `pending`; poll `GET /uploads/{id}` for
     the result, waiting the seconds given in the `Retry-After` header.
-    Answers 400 if the file is not a type we can read, 404 if
-    the account is not yours, 409 if you have uploaded this exact file
-    before, 413 if it is over the size limit, and 503 if the import queue
-    is unavailable. A file that turns out to be unreadable once parsed is
-    reported on the upload itself, as `failed` with an `error_message`.
+    Answers 400 if the file is not a type we can read or the password does
+    not open the PDF, 404 if the account is not yours, 409 if you have
+    uploaded this exact file before, 413 if it is over the size limit, and
+    503 if the import queue is unavailable. A file that turns out to be
+    unreadable once parsed is reported on the upload itself, as `failed`
+    with an `error_message`.
+
+    A password-protected PDF sent without `password` is kept, and answered
+    **409 `PASSWORD_REQUIRED`** with `details.upload_id`: send the password
+    to `POST /uploads/{upload_id}/password`. The password is used once, in
+    memory, and never stored.
     """
     content = _read_within_limit(file)
     upload = imports_service.create_upload(
@@ -114,6 +147,44 @@ def create_upload(
         content=content,
         queue=queue,
         column_mapping=_column_mapping_from_json(column_mapping),
+        password=password,
+    )
+    _ask_to_poll_later(response, upload.status)
+    return UploadResponse.model_validate(upload)
+
+
+@router.post(
+    "/{upload_id}/password",
+    status_code=HTTPStatus.ACCEPTED,
+    response_model=UploadResponse,
+    responses=_UNLOCK_RESPONSES,
+    summary="Unlock a password-protected PDF",
+)
+# 5 per minute per user: every request is one guess at the password, so
+# this is limited like login (see UNLOCK_LIMIT).
+@limiter.limit(UNLOCK_LIMIT)
+def unlock_upload(
+    request: Request,
+    response: Response,
+    user: CurrentUser,
+    db: DbSession,
+    queue: JobQueue,
+    upload_id: uuid.UUID,
+    body: UploadPasswordRequest,
+) -> UploadResponse:
+    """Send the password of a PDF that was uploaded without it.
+
+    For an upload in `needs_password`. The PDF is unlocked in memory and
+    queued: answers **202** with the upload `pending`, to be polled like
+    after `POST /uploads`. The password is never stored.
+
+    Answers 400 `INCORRECT_PASSWORD` if it does not open the PDF (the
+    upload keeps waiting, so you can try again), 404 if the upload is not
+    yours, 409 if it is not waiting for a password, and 503 if the import
+    queue is unavailable.
+    """
+    upload = imports_service.unlock_upload(
+        db, user.id, upload_id, password=body.password, queue=queue
     )
     _ask_to_poll_later(response, upload.status)
     return UploadResponse.model_validate(upload)

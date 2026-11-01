@@ -113,15 +113,3 @@ def test_a_pdf_for_another_account_fails_with_a_message(
 
     assert body["status"] == "failed"
     assert body["error_message"] == imports_service.WRONG_ACCOUNT_NUMBER_MESSAGE
-
-
-def test_a_password_protected_pdf_fails_with_a_message_for_now(
-    client: TestClient, alice: dict[str, str], tmp_path: Path
-) -> None:
-    """Step 10 adds passwords; until then the user is told what is wrong."""
-    account_id = make_account(client, alice)
-
-    body = import_pdf(client, alice, account_id, pdf_bytes(tmp_path, UPI_ROWS, password="1234"))
-
-    assert body["status"] == "failed"
-    assert "password-protected" in body["error_message"]
