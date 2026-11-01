@@ -280,15 +280,20 @@ def _income_slug(facts: TxnFacts) -> str | None:
 
 # --- 5. Person-to-person heuristic (SPEC §8.3) ----------------------------------
 
-# Merchant QR codes, recognised by the VPA's SHAPE. All five seen in the real
-# statement (75 of its UPI rows): a payment to one of these is a shop, never
-# a person, even when the shop is not in the dictionary.
+# Merchant QR codes, recognised by the VPA's SHAPE. The first five were seen
+# in the August .xls (75 of its UPI rows), the business handle in the October
+# PDF (45 rows, Phase 2 acceptance): a payment to one of these is a shop,
+# never a person, even when the shop is not in the dictionary.
 _MERCHANT_VPA = re.compile(
     r"q\d{8,}@"  # PhonePe merchant QR: "Q123456789@ybl"
     r"|gpay-\d"  # Google Pay for Business: "gpay-123456789..."
     r"|paytmqr"  # Paytm QR: "paytmqr1234567..."
     r"|paytm-\d"  # Paytm merchant: "paytm-12345678..."
     r"|vyapar\.\d"  # HDFC Vyapar merchant app: "vyapar.1234567..."
+    # Google Pay for Business's HANDLE, whatever the id before it:
+    # "ab1234@okbizaxis". Matched as a prefix because ICICI cuts the VPA at
+    # 14 characters (ADR 015), so the real file prints "ab1234@okbizax".
+    r"|[^@]*@okbiz"
 )
 
 # Words that say a counterparty is a business even though its VPA looks

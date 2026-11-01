@@ -325,16 +325,28 @@ def test_money_received_from_a_person_is_other_income() -> None:
 @pytest.mark.parametrize(
     "vpa",
     [
-        # Merchant QR codes: the five shapes seen in the real statement
+        # Merchant QR codes: the five shapes seen in the real .xls
         "q123456789@ybl",
         "gpay-123456789",
         "paytmqr1234567",
         "paytm-12345678",
         "vyapar.1234567",
+        # Google Pay for Business's handle (the real October PDF), in full
+        # and as ICICI prints it, cut at 14 characters
+        "ab1234@okbizaxis",
+        "ab1234@okbizax",
     ],
 )
 def test_a_merchant_qr_code_is_not_a_person(vpa: str) -> None:
     assert P2PHandler().decide(upi("MOONCAFE", vpa)) is None
+
+
+@pytest.mark.parametrize("vpa", ["ab1234@okaxis", "okbiz@ybl", "okbizaxis@ybl"])
+def test_a_personal_handle_or_okbiz_before_the_at_is_still_a_person(vpa: str) -> None:
+    """Only the HANDLE marks a business: Google Pay's personal handle
+    (@okaxis) stays a person, and so does an id that merely starts with
+    "okbiz" on a personal handle."""
+    assert P2PHandler().decide(upi("ASHAVERMA", vpa)) is not None
 
 
 @pytest.mark.parametrize(
