@@ -21,12 +21,20 @@ data:
 pure Python, and it places text at exact coordinates, which is all a
 statement layout needs. With `password` set, the file is encrypted the way
 a bank's password-protected statement is.
+
+`encrypt_pdf` re-encrypts finished PDF bytes with pypdf instead, for the
+tests that need a particular encryption method (RC4, AES-128, AES-256) or
+an owner password only. Two different writers on purpose: the app unlocks
+with pypdf, so a test file encrypted by fpdf2 shows that the unlocking is
+not just pypdf agreeing with itself.
 """
 
+import io
 from pathlib import Path
 from typing import Final
 
 from fpdf import FPDF
+from pypdf import PdfReader, PdfWriter
 
 from tests.fixtures.icici_xls import DEFAULT_ROWS
 
@@ -101,6 +109,26 @@ def build_icici_pdf(
 
     path.write_bytes(bytes(pdf.output()))
     return path
+
+
+def encrypt_pdf(
+    content: bytes,
+    *,
+    user_password: str,
+    owner_password: str = "owner-secret",
+    algorithm: str = "AES-128",
+) -> bytes:
+    """`content` (an unlocked PDF) encrypted with pypdf.
+
+    `user_password` opens the file; an EMPTY one makes a PDF anyone can
+    open, restricted only by its owner password. `algorithm` is one of
+    pypdf's names: "RC4-40", "RC4-128", "AES-128", "AES-256-R5", "AES-256".
+    """
+    writer = PdfWriter(clone_from=PdfReader(io.BytesIO(content)))
+    writer.encrypt(user_password=user_password, owner_password=owner_password, algorithm=algorithm)
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
 
 
 def _header(pdf: FPDF) -> None:

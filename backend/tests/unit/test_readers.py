@@ -435,8 +435,12 @@ def test_any_failure_inside_pdfplumber_is_one_plain_parse_error(
 
 
 def test_a_password_protected_pdf_has_its_own_message(tmp_path: Path) -> None:
-    """Until Step 10, the user must learn the PASSWORD is the problem."""
+    """A PDF still locked when it reaches the reader says so.
+
+    The API unlocks PDFs in the request (ADR 020), so this is the rare file
+    pypdf could not open there but pdfminer sees as locked.
+    """
     content = build_icici_pdf(tmp_path / "locked.pdf", password="1234").read_bytes()
 
-    with pytest.raises(ParseError, match="password-protected"):
+    with pytest.raises(ParseError, match=f"^{readers.LOCKED_PDF_MESSAGE}$"):
         read_statement_as(FileType.PDF, content)
