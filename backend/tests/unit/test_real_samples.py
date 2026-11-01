@@ -15,6 +15,12 @@ It runs only on a machine whose `samples/` holds such a pair, and is
 skipped everywhere else, CI included (decided with Dhruv). Every assertion
 compares COUNTS, so a failure prints how many rows differ, never what they
 contain (CLAUDE.md rule 3).
+
+Step 10 adds a second real-file check: every real PDF, locked in memory
+with a test password and unlocked again by `unlock_pdf`, must read exactly
+like the original (ADR 020). No real password-protected statement is in
+`samples/`, so the bank's own layout is what this proves survives the
+rewrite; the locking is ours.
 """
 
 from collections import Counter
@@ -24,8 +30,10 @@ import pytest
 
 from app.parsers.base import ParsedStatement
 from app.parsers.normalize import normalize_description
-from app.parsers.readers import read_statement
+from app.parsers.pdf_unlock import unlock_pdf
+from app.parsers.readers import read_pdf, read_statement
 from app.parsers.registry import build_default_registry
+from tests.fixtures.icici_pdf import encrypt_pdf
 
 SAMPLES = Path(__file__).resolve().parents[3] / "samples"
 
@@ -84,3 +92,28 @@ def test_a_real_xls_and_pdf_of_the_same_days_give_the_same_rows() -> None:
             f"rows and {only_in_pdf} of {sum(from_pdf.values())} PDF rows have no match"
         )
         assert xls.account_last4 == pdf.account_last4, "the two files name different accounts"
+
+
+@pytest.mark.parametrize("algorithm", ["RC4-128", "AES-128", "AES-256"])
+def test_a_real_pdf_locked_and_unlocked_reads_exactly_the_same(algorithm: str) -> None:
+    pdfs = sorted(SAMPLES.glob("*.pdf")) if SAMPLES.is_dir() else []
+    if not pdfs:
+        pytest.skip("samples/ holds no PDF statement")
+
+    for path in pdfs:
+        original = read_pdf(path.read_bytes())
+        locked = encrypt_pdf(path.read_bytes(), user_password="Test-0101", algorithm=algorithm)
+
+        unlocked = read_pdf(unlock_pdf(locked, "Test-0101"))
+
+        # Counts only - see the module docstring. `==` on the dataclass
+        # compares every word's text, page and position. strict=False: on a
+        # failure the two lists may differ in length, and the message
+        # reports both lengths.
+        same_words = sum(
+            a == b for a, b in zip(original.pdf_words, unlocked.pdf_words, strict=False)
+        )
+        assert unlocked == original, (
+            f"{same_words} of {len(original.pdf_words)} words unchanged "
+            f"({len(unlocked.pdf_words)} after unlocking)"
+        )

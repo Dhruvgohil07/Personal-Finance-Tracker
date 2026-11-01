@@ -39,6 +39,7 @@ import xlrd
 from pdfminer.pdfdocument import PDFPasswordIncorrect
 
 from app.parsers.base import FileType, ParseError, ParserInput, PdfWord
+from app.parsers.pdf_unlock import PDF_UNREADABLE_MESSAGE
 
 # The first bytes of a file ("magic number"). These are fixed by the file
 # formats themselves, so they identify a file far better than its name.
@@ -50,6 +51,10 @@ _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 # We detect it only so the error message can say something useful.
 _ZIP_SIGNATURE = b"PK\x03\x04"
 _PDF_SIGNATURE = b"%PDF-"
+# A locked PDF that reached the reader anyway (see `read_pdf`). Re-uploading
+# it with its password cannot help - the request already failed to unlock
+# it - so the message does not suggest that.
+LOCKED_PDF_MESSAGE = "this PDF is password-protected and could not be unlocked"
 
 # A CSV is plain text and has no signature, so for CSV the file name is all
 # we have to go on.
@@ -157,10 +162,13 @@ def read_pdf(content: bytes) -> ParserInput:
       positions. (The ICICI parser reads even its title from the words,
       so it can tell the title block from the rows.)
 
-    A password-protected PDF is refused with a clear message until Step 10
-    adds passwords. Any other unreadable PDF is refused too: pdfplumber's
-    own errors are internal (and may mention the file), so they become one
-    plain `ParseError`.
+    A PDF that is still password-protected is refused with its own
+    message. Normally none gets here: the API removes the password during
+    the upload request (`app/parsers/pdf_unlock.py`, ADR 020), so this is
+    the rare file pypdf could not open but pdfminer recognises as locked.
+    Any other unreadable PDF is refused too: pdfplumber's own errors are
+    internal (and may mention the file), so they become one plain
+    `ParseError`.
     """
     try:
         with pdfplumber.open(io.BytesIO(content)) as pdf:
@@ -191,11 +199,8 @@ def read_pdf(content: bytes) -> ParserInput:
         # PDFPasswordIncorrect, which pdfplumber wraps in its own exception.
         cause = exc.args[0] if exc.args else None
         if isinstance(exc, PDFPasswordIncorrect) or isinstance(cause, PDFPasswordIncorrect):
-            raise ParseError(
-                "this PDF is password-protected; password-protected statements are not "
-                "supported yet"
-            ) from None
-        raise ParseError("this PDF could not be read") from None
+            raise ParseError(LOCKED_PDF_MESSAGE) from None
+        raise ParseError(PDF_UNREADABLE_MESSAGE) from None
     return ParserInput(FileType.PDF, rows=rows, pdf_words=words)
 
 

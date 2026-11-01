@@ -16,6 +16,7 @@ dependencies = [
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
     "pyjwt>=2.15.0",
+    "pypdf>=6.21.4",
     "python-multipart>=0.0.32",
     "redis>=8.1.0",
     "resend>=2.47.0",
@@ -61,8 +62,9 @@ select = [
 known-third-party = ["alembic"]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests use plain `assert` (S101) and fake passwords/secrets (S105, S106).
-"tests/**" = ["S101", "S105", "S106"]
+# Tests use plain `assert` (S101) and fake passwords/secrets (S105, S106,
+# and S107 for a fake password as a function default).
+"tests/**" = ["S101", "S105", "S106", "S107"]
 
 # ---------------------------------------------------------------
 # Pytest
