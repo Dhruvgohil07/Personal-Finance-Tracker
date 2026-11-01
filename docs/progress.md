@@ -381,6 +381,21 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
 
   The real PDF parses identically after each fix. 1409 tests (+1 skipped: the
   real-samples check), 100% coverage
+- [x] Step 10: Password-protected PDFs. New dependency `pypdf`. `unlock_pdf`
+  (`app/parsers/pdf_unlock.py`) takes the lock off in the API request; the unlocked
+  copy is stored app-encrypted, so the worker never sees a password. The flows:
+  - with the password: 202;
+  - without it: `needs_password`, 409 `PASSWORD_REQUIRED` + `upload_id`;
+  - then `POST /uploads/{id}/password` (5/min/user): 202;
+  - a wrong password: 400 `INCORRECT_PASSWORD`.
+
+  The password is a `SecretStr` from the route to the unlock. One test searches
+  responses, raw logs, every table, the stored file and all of Redis for the
+  password; each check was shown to catch a planted leak. The unlocked copy reads
+  identically (all 5 encryption methods, fpdf2-encrypted, and locally the real PDF).
+  ADR 020. No migration. Live check against the Docker worker: 409 → 400 → 202 →
+  `completed`, no password in any log.
+  1464 tests (+1 skipped), 100% coverage
 
 ## In progress
 - (nothing)
@@ -389,7 +404,6 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
 - **Real cross-check of Step 9:** put an ICICI `.xls` of the PDF's exact period in
   `samples/`, then run `uv run pytest tests/unit/test_real_samples.py` (counts only;
   skipped until such a pair exists). The two current samples share no day
-- Phase 2 Step 10: password-protected PDFs (new dependency `pypdf`, added with `uv add`)
 - Step 11 (acceptance): its self-transfer check needs a second real account's statement
 
 ## Open decisions / questions
