@@ -16,11 +16,9 @@ Locked files are synthetic ICICI statements encrypted by fpdf2
 app unlocks with. All names, numbers and passwords are invented (rule 8).
 """
 
-import io
 import logging
 import uuid
 import zlib
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -29,30 +27,32 @@ import pytest
 import structlog
 from fastapi.testclient import TestClient
 from httpx import Response
-from pypdf import PdfReader, PdfWriter
+from pypdf import PdfWriter
 from redis import Redis
 from rq import Queue
-from sqlalchemy import func, select
+from sqlalchemy import Engine, delete, select, update
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.crypto import EncryptedFile, decrypt_file
 from app.core.redis import get_redis
 from app.db.base import Base
 from app.models import StatementUpload, UploadBlob, UploadStatus
-from app.parsers.pdf_unlock import PDF_UNREADABLE_MESSAGE
-from app.parsers.readers import LOCKED_PDF_MESSAGE
+from app.parsers.readers import LOCKED_PDF_MESSAGE, PDF_UNREADABLE_MESSAGE
 from app.schemas.upload import MAX_PDF_PASSWORD_LENGTH
 from app.services import cleanup as cleanup_service
 from app.services import imports as imports_service
 from app.workers import jobs
 from app.workers.queue import get_queue
-from tests.fixtures.icici_pdf import build_icici_pdf, encrypt_pdf
+from tests.fixtures.icici_pdf import build_icici_pdf, encrypt_pdf, is_encrypted
 from tests.integration.test_categorization import ROWS as UPI_ROWS
+from tests.integration.test_upload_worker import count, upload_row
 from tests.integration.test_uploads import (
     UPLOADS,
     AuthHeadersFactory,
     get_upload,
     make_account,
+    post_upload,
     statement_bytes,
     transactions_of,
 )
@@ -90,20 +90,6 @@ def locked_pdf(tmp_path: Path) -> bytes:
     return build_icici_pdf(tmp_path / "locked.pdf", UPI_ROWS, password=PASSWORD).read_bytes()
 
 
-@pytest.fixture
-def held_queue(client: TestClient, sync_queue: Queue) -> Iterator[Queue]:
-    """A real queue nobody works on, so a test can look at the stored job.
-
-    The same idea as in test_upload_worker.py: the test queue's name, and
-    emptied before and after.
-    """
-    queue = Queue(sync_queue.name, connection=get_redis())
-    queue.empty()
-    client.app.dependency_overrides[get_queue] = lambda: queue
-    yield queue
-    queue.empty()
-
-
 def post_pdf(
     client: TestClient,
     headers: dict[str, str],
@@ -111,16 +97,15 @@ def post_pdf(
     content: bytes,
     account_id: str,
     password: str | None = None,
-    filename: str = "statement.pdf",
 ) -> Response:
-    data = {"account_id": account_id}
-    if password is not None:
-        data["password"] = password
-    return client.post(
-        UPLOADS,
-        headers=headers,
-        files={"file": (filename, content, "application/octet-stream")},
-        data=data,
+    """`post_upload` (test_uploads.py) with a `.pdf` name."""
+    return post_upload(
+        client,
+        headers,
+        content=content,
+        account_id=account_id,
+        filename="statement.pdf",
+        password=password,
     )
 
 
@@ -144,11 +129,6 @@ def upload_waiting_for_password(
     return upload_id
 
 
-def upload_row(db: Session, upload_id: str) -> StatementUpload:
-    db.expire_all()
-    return db.get_one(StatementUpload, uuid.UUID(upload_id))
-
-
 def stored_file(db: Session, upload_id: str) -> bytes:
     """The upload's stored file, decrypted with our key."""
     db.expire_all()
@@ -157,14 +137,6 @@ def stored_file(db: Session, upload_id: str) -> bytes:
         EncryptedFile(nonce=blob.nonce, ciphertext=blob.encrypted_content),
         uuid.UUID(upload_id),
     )
-
-
-def count(db: Session, model: type[Any]) -> int:
-    return db.scalar(select(func.count()).select_from(model)) or 0
-
-
-def is_encrypted(content: bytes) -> bool:
-    return PdfReader(io.BytesIO(content)).is_encrypted
 
 
 # --- The password sent with the upload --------------------------------------------
@@ -235,13 +207,8 @@ def test_a_pdf_with_only_an_owner_password_needs_no_password(
 def test_a_password_sent_with_an_xls_is_ignored(
     client: TestClient, alice: dict[str, str], account_id: str, tmp_path: Path
 ) -> None:
-    response = post_pdf(
-        client,
-        alice,
-        content=statement_bytes(tmp_path),
-        account_id=account_id,
-        password=PASSWORD,
-        filename="statement.xls",
+    response = post_upload(
+        client, alice, content=statement_bytes(tmp_path), account_id=account_id, password=PASSWORD
     )
 
     assert response.status_code == 202
@@ -550,7 +517,13 @@ def test_redis_down_on_unlock_is_a_503_and_the_upload_is_failed(
     assert count(db, UploadBlob) == 0
 
 
-@pytest.mark.parametrize("damage", ["missing", "tampered"])
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        ("missing", imports_service.FILE_MISSING_MESSAGE),
+        ("tampered", imports_service.FILE_UNREADABLE_MESSAGE),
+    ],
+)
 def test_a_lost_or_damaged_stored_file_fails_the_upload(
     client: TestClient,
     alice: dict[str, str],
@@ -558,8 +531,11 @@ def test_a_lost_or_damaged_stored_file_fails_the_upload(
     locked_pdf: bytes,
     db: Session,
     damage: str,
+    message: str,
 ) -> None:
-    """No password can help when our own copy is gone or fails its check."""
+    """No password can help when our own copy is gone or fails its check.
+    Each case says what happened, with the worker's message for the same
+    problem (review of Step 10)."""
     upload_id = upload_waiting_for_password(
         client, alice, content=locked_pdf, account_id=account_id
     )
@@ -575,10 +551,10 @@ def test_a_lost_or_damaged_stored_file_fails_the_upload(
     response = send_password(client, alice, upload_id, PASSWORD)
 
     assert response.status_code == 409
-    assert response.json()["error"]["message"] == imports_service.FILE_UNREADABLE_MESSAGE
+    assert response.json()["error"]["message"] == message
     upload = upload_row(db, upload_id)
     assert upload.status is UploadStatus.FAILED
-    assert upload.error_message == imports_service.FILE_UNREADABLE_MESSAGE
+    assert upload.error_message == message
     assert count(db, UploadBlob) == 0
 
 
@@ -607,6 +583,170 @@ def test_a_pdf_that_cannot_be_rewritten_fails_the_waiting_upload(
     upload = upload_row(db, upload_id)
     assert upload.status is UploadStatus.FAILED
     assert upload.error_message == PDF_UNREADABLE_MESSAGE
+
+
+# --- Review of Step 10 -------------------------------------------------------------
+
+
+def oversized_copy(content: bytes, password: str | None = None) -> bytes:
+    """Stands in for `unlock_pdf` writing a copy bigger than any upload may be."""
+    return b"%PDF-" + b" " * get_settings().max_upload_bytes
+
+
+def test_an_unlocked_copy_over_the_limit_is_refused_in_the_upload(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    locked_pdf: bytes,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What is stored must stay within the upload limit, even when pypdf's
+    copy grows (review of Step 10)."""
+    monkeypatch.setattr(imports_service, "unlock_pdf", oversized_copy)
+
+    response = post_pdf(client, alice, content=locked_pdf, account_id=account_id, password=PASSWORD)
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
+    assert count(db, StatementUpload) == 0
+
+
+def test_an_unlocked_copy_over_the_limit_fails_the_waiting_upload(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    locked_pdf: bytes,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upload_id = upload_waiting_for_password(
+        client, alice, content=locked_pdf, account_id=account_id
+    )
+    monkeypatch.setattr(imports_service, "unlock_pdf", oversized_copy)
+
+    response = send_password(client, alice, upload_id, PASSWORD)
+
+    assert response.status_code == 413
+    upload = upload_row(db, upload_id)
+    assert upload.status is UploadStatus.FAILED
+    assert upload.error_message == response.json()["error"]["message"]
+    assert count(db, UploadBlob) == 0
+
+
+def test_no_row_lock_is_held_while_the_pdf_is_unlocked(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    locked_pdf: bytes,
+    migrated_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pypdf runs between two transactions, not under the row lock (review
+    of Step 10). A second session asks for the row with SKIP LOCKED while
+    the unlock runs - exactly what DELETE /uploads/{id} does - and gets it,
+    so a delete at that moment is not told "being imported right now"."""
+    upload_id = upload_waiting_for_password(
+        client, alice, content=locked_pdf, account_id=account_id
+    )
+    real_unlock = imports_service.unlock_pdf
+    row_was_free: list[bool] = []
+
+    def unlock_and_probe(content: bytes, password: str | None = None) -> bytes:
+        with Session(migrated_engine) as other:
+            found = other.scalar(
+                select(StatementUpload.id)
+                .where(StatementUpload.id == uuid.UUID(upload_id))
+                .with_for_update(skip_locked=True)
+            )
+            row_was_free.append(found is not None)
+        return real_unlock(content, password)
+
+    monkeypatch.setattr(imports_service, "unlock_pdf", unlock_and_probe)
+
+    assert send_password(client, alice, upload_id, PASSWORD).status_code == 202
+    assert row_was_free == [True]
+
+
+@pytest.mark.parametrize(
+    ("change", "status_code"),
+    [("deleted", 404), ("unlocked_by_another_request", 409)],
+)
+def test_a_change_during_the_unlock_is_noticed(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    locked_pdf: bytes,
+    db: Session,
+    migrated_engine: Engine,
+    held_queue: Queue,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    status_code: int,
+) -> None:
+    """With no lock held while pypdf works, the store step checks again
+    under the lock: the upload must still exist and still be waiting.
+    Whatever changed meanwhile wins, and nothing is stored or queued."""
+    upload_id = upload_waiting_for_password(
+        client, alice, content=locked_pdf, account_id=account_id
+    )
+    real_unlock = imports_service.unlock_pdf
+    row = StatementUpload.id == uuid.UUID(upload_id)
+
+    def unlock_while_it_changes(content: bytes, password: str | None = None) -> bytes:
+        with Session(migrated_engine) as other:
+            if change == "deleted":
+                other.execute(delete(StatementUpload).where(row))
+            else:
+                other.execute(update(StatementUpload).where(row).values(status="pending"))
+            other.commit()
+        return real_unlock(content, password)
+
+    monkeypatch.setattr(imports_service, "unlock_pdf", unlock_while_it_changes)
+
+    response = send_password(client, alice, upload_id, PASSWORD)
+
+    assert response.status_code == status_code
+    assert held_queue.get_jobs() == []
+    if change == "unlocked_by_another_request":
+        assert response.json()["error"]["message"] == imports_service.NOT_LOCKED_MESSAGE
+        # The other request's file stands; this one did not overwrite it.
+        assert stored_file(db, upload_id) == locked_pdf
+
+
+def test_a_simultaneous_upload_of_a_locked_pdf_still_asks_for_the_password(
+    client: TestClient,
+    alice: dict[str, str],
+    account_id: str,
+    locked_pdf: bytes,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The race the unique index catches (a double-clicked upload): the
+    request that loses must still answer PASSWORD_REQUIRED with the id the
+    password goes to, not a bare "already uploaded" (review of Step 10).
+
+    Simulated like test_uploads.py does: the "already uploaded?" query
+    misses once, so the second upload reaches the INSERT."""
+    upload_id = upload_waiting_for_password(
+        client, alice, content=locked_pdf, account_id=account_id
+    )
+    real_lookup = imports_service._live_upload
+    lookups: list[object] = []
+
+    def misses_the_first_time(*args: Any) -> StatementUpload | None:
+        lookups.append(args)
+        return None if len(lookups) == 1 else real_lookup(*args)
+
+    monkeypatch.setattr(imports_service, "_live_upload", misses_the_first_time)
+
+    second = post_pdf(client, alice, content=locked_pdf, account_id=account_id)
+
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "PASSWORD_REQUIRED"
+    assert second.json()["error"]["details"] == {"upload_id": upload_id}
+    assert len(lookups) == 2
+    assert count(db, StatementUpload) == 1
 
 
 # --- CLAUDE.md §7.2: never persisted -------------------------------------------------

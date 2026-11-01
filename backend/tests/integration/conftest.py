@@ -139,6 +139,23 @@ def sync_queue(job_sessions: sessionmaker[Session]) -> Queue:
 
 
 @pytest.fixture
+def held_queue(client: TestClient, sync_queue: Queue) -> Iterator[Queue]:
+    """A real queue that nobody works on: jobs wait in Redis until run by hand.
+
+    Swapped into the app for this test only, in place of `sync_queue`, for
+    tests that look at the job RQ stored (its arguments, its options) before
+    it runs. It has the test queue's name, so the development worker never
+    sees it, and it is emptied before and after so no job leaks between
+    tests.
+    """
+    queue = Queue(sync_queue.name, connection=get_redis())
+    queue.empty()
+    client.app.dependency_overrides[get_queue] = lambda: queue
+    yield queue
+    queue.empty()
+
+
+@pytest.fixture
 def client(migrated_engine: Engine, db: Session, sync_queue: Queue) -> Iterator[TestClient]:
     """The real app, with every request getting its own test-DB session.
 

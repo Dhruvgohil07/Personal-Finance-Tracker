@@ -188,11 +188,14 @@ def post_upload(
     account_id: str,
     filename: str = "statement.xls",
     column_mapping: str | None = None,
+    password: str | None = None,
 ) -> Response:
     """POST /uploads as a multipart form, like the browser does."""
     data: dict[str, str] = {"account_id": account_id}
     if column_mapping is not None:
         data["column_mapping"] = column_mapping
+    if password is not None:
+        data["password"] = password
     return client.post(
         UPLOADS,
         headers=headers,

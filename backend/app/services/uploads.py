@@ -63,7 +63,7 @@ def get_upload(db: Session, user_id: uuid.UUID, upload_id: uuid.UUID) -> Stateme
     exist, so ids cannot be probed (IDOR protection, see NotFoundError).
     This is the endpoint a client polls while the worker runs.
     """
-    upload = db.scalar(_owned(user_id, upload_id))
+    upload = db.scalar(select_owned_upload(user_id, upload_id))
     if upload is None:
         raise NotFoundError(UPLOAD_NOT_FOUND_MESSAGE)
     return upload
@@ -100,11 +100,11 @@ def delete_upload(db: Session, queue: Queue, user_id: uuid.UUID, upload_id: uuid
     are re-run once the delete is committed, so the other half is
     re-decided rather than left out of the totals (review of Step 8).
     """
-    upload = db.scalar(_owned(user_id, upload_id).with_for_update(skip_locked=True))
+    upload = db.scalar(select_owned_upload(user_id, upload_id).with_for_update(skip_locked=True))
     if upload is None:
         # Not returned: either it is not the user's (404), or it is locked
         # by a running import (409). The plain read does not wait for locks.
-        if db.scalar(_owned(user_id, upload_id)) is not None:
+        if db.scalar(select_owned_upload(user_id, upload_id)) is not None:
             db.rollback()
             raise ConflictError(UPLOAD_PROCESSING_MESSAGE)
         raise NotFoundError(UPLOAD_NOT_FOUND_MESSAGE)
@@ -161,8 +161,13 @@ def _overlapped_by_later(db: Session, upload: StatementUpload) -> bool:
     return db.scalar(stmt.limit(1)) is not None
 
 
-def _owned(user_id: uuid.UUID, upload_id: uuid.UUID) -> Select[tuple[StatementUpload]]:
-    """SELECT one upload by id, only if it belongs to `user_id`."""
+def select_owned_upload(user_id: uuid.UUID, upload_id: uuid.UUID) -> Select[tuple[StatementUpload]]:
+    """SELECT one upload by id, only if it belongs to `user_id`.
+
+    The one definition of "this user's upload" (CLAUDE.md rule 2): GET and
+    DELETE here, and POST /uploads/{id}/password in the import service, all
+    build on it, adding a lock where they need one.
+    """
     return select(StatementUpload).where(
         StatementUpload.id == upload_id, StatementUpload.user_id == user_id
     )
