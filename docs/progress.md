@@ -1,8 +1,9 @@
 # Progress
 
 ## Current phase
-Phase 2 — Real-world imports is COMPLETE once the Step 11 PR merges (plan:
-docs/plans/phase-2.md, acceptance: docs/phase-2-acceptance.md). Next: plan Phase 3.
+Phase 3 — Frontend MVP (plan: docs/plans/phase-3.md, approved 2026-11-02).
+Phase 2 — Real-world imports is COMPLETE (plan: docs/plans/phase-2.md, acceptance:
+docs/phase-2-acceptance.md).
 Phase 1 — Backend MVP is COMPLETE (plan: docs/plans/phase-1.md, acceptance:
 docs/phase-1-acceptance.md).
 
@@ -440,13 +441,19 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   Part A 21/21 and Part B 13/13 re-run live after the fixes. 1486 tests (+1 skipped),
   100% coverage
 
+## Completed — Phase 3
+- [x] Step 0: Phase 3 plan approved and saved — docs/plans/phase-3.md (12 steps).
+  Decided with Dhruv: backend adds only `GET /me` + `DELETE /me` (CSV export and
+  custom categories stay in Phase 4, as SPEC §16 says; `q=` search stays as it is);
+  the browser reaches the API through a Next.js proxy; frontend tests are ESLint +
+  Vitest + React Testing Library in a new `frontend` CI job; deployment is one free
+  Render container (API + worker + scheduler) with Vercel, Neon and Upstash
+
 ## In progress
 - (nothing)
 
 ## Next up
-- **Phase 3 plan**: list the tasks and files for approval, then save
-  `docs/plans/phase-3.md` (frontend; `q=` search; user categories, `/me`,
-  `DELETE /me`, CSV export)
+- Phase 3 Step 1: `GET /me` + `DELETE /me` (migration 0013 `audit_log`, ADR 021)
 - Carried over from the Phase 2 acceptance (each needs a real file, no code):
   - **Real `.xls`/PDF cross-check:** put an ICICI `.xls` of the PDF's exact period
     in `samples/`, then run `uv run pytest tests/unit/test_real_samples.py`
