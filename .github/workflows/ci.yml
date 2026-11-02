@@ -1,6 +1,7 @@
 # Continuous Integration: on every push to main and every pull request,
-# lint the backend and run the WHOLE test suite (unit + integration)
-# against real Postgres and Redis, the same versions as docker-compose.yml.
+# lint and test the backend (the WHOLE suite, unit + integration,
+# against real Postgres and Redis, the same versions as docker-compose.yml)
+# and the frontend (ESLint, Vitest, a production build).
 #
 # A red CI run means "do not merge" (docs/SPEC.md §13).
 
@@ -119,3 +120,41 @@ jobs:
 
       - name: Tests (pytest, with coverage)
         run: uv run pytest --cov --cov-report=term-missing
+
+  # The Next.js app (Phase 3): lint, unit tests and a production build.
+  # Runs in parallel with `backend`; needs no database, Redis or secrets.
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned to a commit SHA for the same reason as setup-uv above.
+      # Node 24: jsdom (the test browser) needs at least 24.15.
+      # The npm cache is keyed on the lockfile.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `npm ci` (not `npm install`): installs EXACTLY what package-lock.json
+      # says and fails if it disagrees with package.json, like `uv sync --locked`.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (ESLint)
+        run: npm run lint
+
+      - name: Tests (Vitest)
+        run: npm test
+
+      # Catches what lint and tests can't: a page that fails to render on
+      # the server, a broken import, an invalid next.config.mjs.
+      - name: Build (next build)
+        run: npm run build
