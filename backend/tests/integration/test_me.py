@@ -22,12 +22,15 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from rq import Queue
 from sqlalchemy import Engine, Table, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 from structlog.testing import capture_logs
 
+from app.core.config import get_settings
 from app.core.errors import UnauthorizedError
+from app.core.rate_limit import CLIENT_IP_HEADER, CLIENT_IP_SIGNATURE_HEADER, sign_client_ip
 from app.db.base import Base
 from app.db.seed import run_seed
 from app.models import AuditAction, AuditLog, Category, CategoryKind, StatementUpload, User
@@ -202,6 +205,26 @@ def test_every_session_ends(client: TestClient, alice: dict[str, str]) -> None:
     refresh = client.post(REFRESH, headers={"Cookie": f"refresh_token={old_refresh_token}"})
     assert refresh.status_code == 401
     assert client.get(ME, headers=alice).status_code == 401
+
+
+def test_behind_the_proxy_the_audit_row_has_the_browsers_ip(
+    client: TestClient, alice: dict[str, str], db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The audit log and the rate limits read the same client_host() (Step 2)."""
+    secret = "kharcha-test-proxy-secret-0123456789abcdef"
+    monkeypatch.setattr(get_settings(), "proxy_shared_secret", SecretStr(secret))
+    browser_ip = "198.51.100.23"
+    proxy_headers = {
+        CLIENT_IP_HEADER: browser_ip,
+        CLIENT_IP_SIGNATURE_HEADER: sign_client_ip(browser_ip, secret),
+    }
+
+    response = client.request(
+        "DELETE", ME, json={"password": PASSWORD}, headers={**alice, **proxy_headers}
+    )
+
+    assert response.status_code == 204
+    assert db.scalars(select(AuditLog)).one().ip == browser_ip
 
 
 def test_the_delete_is_audited_without_the_email(

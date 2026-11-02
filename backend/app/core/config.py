@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     jwt_refresh_secret: SecretStr
     file_encryption_key: SecretStr
 
+    # Shared with the Next.js proxy (Phase 3). The proxy signs the browser's
+    # IP with it, so the backend can trust that IP for rate limits and the
+    # audit log (ADR 007, Phase 3 Step 2 amendment). Optional: when unset,
+    # the signed header is ignored and the connection's address is used,
+    # which is right for local development without the proxy.
+    proxy_shared_secret: SecretStr | None = None
+
     # --- Optional integrations -------------------------------------------
     # The app must work fully without these (LLM and email are optional).
     groq_api_key: SecretStr | None = None
@@ -95,11 +102,12 @@ class Settings(BaseSettings):
         # without a trailing slash, so we strip it here.
         return value.rstrip("/")
 
-    @field_validator("jwt_access_secret", "jwt_refresh_secret")
+    @field_validator("jwt_access_secret", "jwt_refresh_secret", "proxy_shared_secret")
     @classmethod
-    def _must_be_strong(cls, value: SecretStr) -> SecretStr:
+    def _must_be_strong(cls, value: SecretStr | None) -> SecretStr | None:
         # Also rejects the "change-me" placeholder from .env.example.
-        if len(value.get_secret_value()) < MIN_SECRET_LENGTH:
+        # None = an optional secret that isn't set (only proxy_shared_secret).
+        if value is not None and len(value.get_secret_value()) < MIN_SECRET_LENGTH:
             raise ValueError(
                 f"must be at least {MIN_SECRET_LENGTH} characters; generate one with: "
                 'python -c "import secrets; print(secrets.token_urlsafe(64))"'

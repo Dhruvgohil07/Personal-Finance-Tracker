@@ -88,3 +88,49 @@ a guess at it. It has its own decorator limit, `REAUTH_LIMIT = "5/minute"` per
 user, like login. Under the general limit alone, a stolen access token could try
 about 1,500 passwords in its 15 minutes. `client_ip()` now builds its key from a
 new `client_host()`, which the audit log also uses for its `ip` column.
+
+## Amendment — Phase 3 Step 2 (2026-11-02): the client IP behind the proxy
+**Context.** From Phase 3 on, the browser reaches the API only through the Next.js
+proxy (Phase 3 plan, hard constraint 2). Every request then arrives from the proxy's
+servers, so `request.client` is the same few addresses for every visitor. Five failed
+logins by anyone would lock out everyone, and `audit_log.ip` (ADR 021) would always
+record the proxy. `X-Forwarded-For` can't be trusted: any client can send it, and
+uvicorn's `--forwarded-allow-ips` only helps for a proxy with known IPs, which
+Vercel's are not.
+
+**Decision (chosen with Dhruv: HMAC of the IP).** The proxy adds two headers to every
+request it forwards, overwriting any the browser sent:
+
+| Header | Value |
+|---|---|
+| `X-Kharcha-Client-IP` | the browser's IP |
+| `X-Kharcha-Client-IP-Signature` | HMAC-SHA256 of that IP with `PROXY_SHARED_SECRET`, lowercase hex |
+
+`client_host()` uses the IP only when the signature matches (compared in constant
+time, as bytes) and the value is a valid IP address (normalized, so one IPv6 address
+has one spelling). In every other case it falls back to the connection's address:
+no secret configured (local development), a header missing (someone calling the API's
+own URL directly), a wrong signature, or a value that is not an IP. A forged header
+therefore gets an attacker nothing: they are counted as themselves.
+`PROXY_SHARED_SECRET` is optional and, when set, at least 32 characters. Both the rate
+limits and the audit log read `client_host()`, so both follow.
+
+`tests/unit/test_rate_limit_keys.py` pins one test vector (also checked with OpenSSL);
+the proxy's JavaScript (Step 3/4) must produce the same value.
+
+**Alternatives rejected.**
+- *Sending the secret itself in a header.* Simplest, but the secret would travel in
+  every request, and any future header logging would leak it.
+- *HMAC of the IP plus a timestamp, valid for 60 s.* Stops replaying a captured
+  header pair, but needs more code on both sides and depends on the Vercel and Render
+  clocks agreeing. A replayed pair only lets someone use that one IP's counter, and
+  the traffic between proxy and API is HTTPS.
+- *Rejecting requests without a valid signature (403).* Would lock out local
+  development and the `/docs` page, which have no proxy in front of them.
+
+**Consequences.**
+- Production must set the SAME `PROXY_SHARED_SECRET` on Render and Vercel (Step 11).
+  If they differ, nothing breaks loudly: every visitor falls back to the proxy's
+  address, so all share one counter again. Step 11's checklist must check this.
+- Closes the "rate limits key on the socket IP behind a proxy" known issue, once the
+  proxy sends the headers (Step 3/4).

@@ -27,6 +27,9 @@ Three kinds of limits (see ADR 007):
 Every limit has a *key*: who is being counted. See `user_or_ip_key`.
 """
 
+import hashlib
+import hmac
+import ipaddress
 import logging
 import math
 import time
@@ -73,19 +76,79 @@ GENERAL_LIMIT = "100/minute"  # everything else: per user, or per IP if logged o
 # --- Keys: who is being counted -------------------------------------------
 
 
-def client_host(request: Request) -> str | None:
-    """The address of the client that opened the connection, or None if unknown.
+# The two headers the Next.js proxy adds to every request it forwards
+# (ADR 007, Phase 3 Step 2 amendment): the browser's IP, and an HMAC of that
+# IP made with PROXY_SHARED_SECRET. The proxy overwrites any copy the browser
+# sent, so a browser can't choose them.
+CLIENT_IP_HEADER = "X-Kharcha-Client-IP"
+CLIENT_IP_SIGNATURE_HEADER = "X-Kharcha-Client-IP-Signature"
 
-    We deliberately do NOT read the `X-Forwarded-For` header here: any
-    client can send it with a made-up IP and get a fresh counter on every
-    request. Behind a real proxy in production, uvicorn's `--proxy-headers`
-    option (with `--forwarded-allow-ips` set to the proxy) replaces
-    `request.client` with the real client IP, and only trusts the header
-    from that proxy.
+
+def sign_client_ip(ip: str, secret: str) -> str:
+    """HMAC-SHA256 of the IP, as lowercase hex: what the proxy must send.
+
+    HMAC = a hash that only someone holding the secret can compute. The
+    backend recomputes it and compares, so a matching signature proves the
+    IP was written by our proxy, while the secret itself never travels.
+    The proxy computes the same thing with the Web Crypto API.
+    """
+    return hmac.new(secret.encode(), ip.encode(), hashlib.sha256).hexdigest()
+
+
+def _signed_client_ip(request: Request) -> str | None:
+    """The browser IP the proxy vouched for, or None if there is no valid one.
+
+    None (so the caller falls back to the connection's address) when:
+    - no PROXY_SHARED_SECRET is configured (local development);
+    - either header is missing (a request that did not come through the
+      proxy, e.g. someone calling the API's own URL directly);
+    - the signature does not match (forged, or the two sides were given
+      different secrets);
+    - the signed value is not an IP address (a bug in the proxy).
+    """
+    secret = get_settings().proxy_shared_secret
+    ip = request.headers.get(CLIENT_IP_HEADER)
+    signature = request.headers.get(CLIENT_IP_SIGNATURE_HEADER)
+    if secret is None or ip is None or signature is None:
+        return None
+
+    expected = sign_client_ip(ip, secret.get_secret_value())
+    # compare_digest takes the same time whether the first or the last
+    # character differs, so the response time can't be used to guess a
+    # valid signature one character at a time. Compared as bytes: with str
+    # it raises TypeError on non-ASCII input, which a header can contain.
+    if not hmac.compare_digest(expected.encode(), signature.encode()):
+        return None
+
+    try:
+        # Also normalizes the spelling, e.g. "2001:DB8::1" -> "2001:db8::1",
+        # so one IPv6 address can't be counted under several keys.
+        return str(ipaddress.ip_address(ip))
+    except ValueError:
+        return None
+
+
+def client_host(request: Request) -> str | None:
+    """The browser's IP address, or None if unknown.
+
+    1. **Behind our Next.js proxy**: the IP from the proxy's signed header.
+       Every request reaches the API from the proxy's servers, so the
+       connection's address would put all visitors on one counter (5 failed
+       logins by anyone would lock out everyone).
+    2. **Otherwise**: the address of the connection itself.
+
+    We deliberately do NOT read `X-Forwarded-For`: any client can send it
+    with a made-up IP and get a fresh counter on every request. uvicorn's
+    `--forwarded-allow-ips` can make that header safe, but only for a proxy
+    with known IP addresses, and Vercel's are not a fixed list. Hence the
+    signature.
 
     Also what the audit log records as `ip` (ADR 021), so both always agree
     on who the client is.
     """
+    signed_ip = _signed_client_ip(request)
+    if signed_ip is not None:
+        return signed_ip
     return request.client.host if request.client else None
 
 
