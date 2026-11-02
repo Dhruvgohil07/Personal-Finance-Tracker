@@ -109,3 +109,30 @@ Three fixes, each checked so that its test fails without it:
    every login, logout and refresh. A refresh whose answer arrives after the
    generation changed is ignored, so a late answer can't sign a logged-out user back
    in (its cookie is dead anyway: logout revoked the whole family).
+
+## Phase 3 Step 4: the auth pages (2026-11-03)
+- **The guard runs in the browser only** (`src/components/require-auth.jsx`). The
+  server can't know whether someone is signed in: the token is in memory, and the
+  refresh cookie is only sent to `/api/v1/auth`. So a signed-in page first shows
+  "Checking your session…", and a visitor without a session is sent to
+  `/login?next=<page>`. The guard only decides what is SHOWN; every API call is still
+  checked by the backend.
+- **One place navigates after a login**: `RedirectIfSignedIn` in the `(auth)` layout
+  moves a signed-in visitor on, so the forms only start the session. Logout doesn't
+  navigate either: the guard sees the session end.
+- **`?next=` is checked against open redirects** (`src/lib/safe-redirect.js`): only a
+  path on this site is followed; `//host`, `/\host`, full URLs and the login pages
+  themselves fall back to `/`.
+- **Registering logs in automatically** (a second request, with the same details).
+  Register and login have separate rate-limit counters. If only the login fails, the
+  form says the account exists and asks to log in.
+- **Instant-navigation validation is limited to pages that ask for it**
+  (`experimental.instantInsights.validationLevel: "manual-warning"`). Next.js checks
+  in development that every page prerenders into a static shell; signed-in pages never
+  can, because the server only ever renders the guard. Found during the live check,
+  where it showed as a development error on every signed-in page.
+- Checked live, in a real browser with the API and worker: register → logged in;
+  reload → session restored; `/login` while signed in → home; logout → `/login`;
+  wrong password → the generic message; nothing in `localStorage`, `sessionStorage`
+  or readable cookies; the user deleted afterwards with `DELETE /me`; no email, name,
+  password or token in the API's or worker's logs.
