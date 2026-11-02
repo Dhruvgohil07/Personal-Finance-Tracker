@@ -495,14 +495,26 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
     session generation counter makes a refresh that lands after logout harmless.
     Left: x-forwarded-for trusted off Vercel, API_ORIGIN checked only on Vercel, the
     HMAC key imported per request, the duplicated .gitignore. 63 Vitest tests
+- [x] Step 4: Auth pages — `/login`, `/register` (route group `(auth)`, sends a
+  signed-in visitor on via `RedirectIfSignedIn`), signed-in area `(app)` with the
+  browser-only guard `RequireAuth` (to `/login?next=`), header with the name from
+  `GET /me` (`useMe`) and logout. `?next=` checked against open redirects
+  (`safe-redirect.js`); API errors mapped to fields / form message incl. the 429 wait
+  (`form-errors.js`); register logs in automatically. No new dependencies. Dev-only
+  instant-navigation validation limited to opt-in pages (signed-in pages can't be
+  prerendered). 107 Vitest tests; checked live in a browser with the API and worker,
+  throwaway user deleted afterwards, logs clean. The live check also found the dev
+  database still at migration 0012: upgraded to 0014 (`alembic upgrade head`)
+  Decided with Dhruv: `agentRules: false` in next.config, so `next dev` no longer
+  writes `frontend/AGENTS.md` (a note for AI coding tools)
 
 ## In progress
 - (nothing)
 
 ## Next up
 - **Dhruv, after merging Step 3:** add `frontend` to the `protect-main` required checks
-- Phase 3 Step 4: auth pages (register, login, logout, the guard to `/login`, the
-  header with the user's name from `GET /me`, error states incl. 429 wait time)
+- Phase 3 Step 5: accounts + onboarding (list/add/edit/delete bank accounts; a first-run
+  flow that asks for the first account)
 - Step 6 (uploads) must refuse a file over the backend's limit in the browser before
   sending: above `proxyClientMaxBodySize` (12 MB) Next.js answers a bare 500 (ADR 022)
 - Step 11: verify an upload near 10 MB on the deployed app; the host may limit a
