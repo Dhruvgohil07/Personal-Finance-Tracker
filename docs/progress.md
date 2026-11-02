@@ -448,12 +448,20 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   the browser reaches the API through a Next.js proxy; frontend tests are ESLint +
   Vitest + React Testing Library in a new `frontend` CI job; deployment is one free
   Render container (API + worker + scheduler) with Vercel, Neon and Upstash
+- [x] Step 1: `GET /me` + `DELETE /me` — `audit_log` model + migration 0013 (`user_id`
+  without FK), `app/schemas/me.py`, `app/services/me.py`, `app/api/v1/me.py`; ADR 021,
+  ADR 007 amendment. Delete = re-enter password, one `DELETE FROM users` cascading
+  through every table, audit row in the same transaction, refresh cookie cleared.
+  Decided with Dhruv: a wrong password is 400 `INCORRECT_PASSWORD`, not 401 (plan
+  change log). Added: `REAUTH_LIMIT` 5/min/user; `client_host()` shared by rate limits
+  and the audit log. 1505 tests (+1 skipped), 100% coverage
 
 ## In progress
 - (nothing)
 
 ## Next up
-- Phase 3 Step 1: `GET /me` + `DELETE /me` (migration 0013 `audit_log`, ADR 021)
+- Phase 3 Step 2: client IP behind the proxy (`PROXY_SHARED_SECRET`, ADR 007 amendment);
+  change `client_host()` so the audit log follows
 - Carried over from the Phase 2 acceptance (each needs a real file, no code):
   - **Real `.xls`/PDF cross-check:** put an ICICI `.xls` of the PDF's exact period
     in `samples/`, then run `uv run pytest tests/unit/test_real_samples.py`
