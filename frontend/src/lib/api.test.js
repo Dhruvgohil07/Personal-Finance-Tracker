@@ -248,6 +248,118 @@ describe("an expired access token", () => {
   });
 });
 
+// --- Several tabs: one browser, one cookie ---------------------------------
+
+/**
+ * A pretend backend plus the browser's cookie jar, shared by "tabs".
+ *
+ * Like the real API, a refresh succeeds only with the CURRENT refresh token
+ * and rotates it; the token it just replaced is refused (ADR 005's grace
+ * branch). The cookie is read when the request is SENT and replaced when
+ * the answer arrives, as in a browser.
+ */
+function sharedBrowser() {
+  const server = { current: "cookie-1", issued: 1 };
+  const jar = { cookie: "cookie-1" };
+
+  function fetchFor() {
+    return vi.fn(async (url) => {
+      const sent = jar.cookie;
+      await new Promise((resolve) => setTimeout(resolve, 5)); // network time
+      if (url !== "/api/v1/auth/refresh") {
+        return unauthorized();
+      }
+      if (sent !== server.current) {
+        return unauthorized(); // a used refresh token
+      }
+      server.issued += 1;
+      server.current = `cookie-${server.issued}`;
+      jar.cookie = server.current;
+      return json(200, { access_token: `token-${server.issued}` });
+    });
+  }
+  return { fetchFor, server };
+}
+
+/** A minimal Web Locks API: callbacks for one name run one after another. */
+function fakeLocks() {
+  let tail = Promise.resolve();
+  const lockManager = {
+    request: vi.fn((name, callback) => {
+      const run = tail.then(() => callback());
+      tail = run.catch(() => {}); // a failed callback still releases the lock
+      return run;
+    }),
+  };
+  return lockManager;
+}
+
+describe("refreshing in several tabs at once", () => {
+  it("both tabs stay signed in when they share the browser lock", async () => {
+    const browser = sharedBrowser();
+    const locks = fakeLocks();
+    const tabA = createApiClient({ fetchImpl: browser.fetchFor(), locks });
+    const tabB = createApiClient({ fetchImpl: browser.fetchFor(), locks });
+
+    const results = await Promise.all([tabA.refreshSession(), tabB.refreshSession()]);
+
+    expect(results).toEqual([true, true]);
+    // B waited for A, then rotated A's NEW cookie: two ordinary rotations.
+    expect(tabA.getAccessToken()).toBe("token-2");
+    expect(tabB.getAccessToken()).toBe("token-3");
+    expect(locks.request).toHaveBeenCalledWith("kharcha-refresh", expect.any(Function));
+  });
+
+  it("without the lock, the second tab is logged out (why the lock exists)", async () => {
+    const browser = sharedBrowser();
+    const tabA = createApiClient({ fetchImpl: browser.fetchFor(), locks: null });
+    const tabB = createApiClient({ fetchImpl: browser.fetchFor(), locks: null });
+
+    const results = await Promise.all([tabA.refreshSession(), tabB.refreshSession()]);
+
+    // Both sent cookie-1; the backend accepted one and refused the other.
+    expect(results.sort()).toEqual([false, true]);
+  });
+});
+
+// --- A refresh that lands after the session changed ------------------------
+
+/** A client whose refresh answers only when the test calls `release()`. */
+function clientWithHeldRefresh() {
+  let release;
+  const answer = new Promise((resolve) => {
+    release = () => resolve(json(200, { access_token: "refreshed-token" }));
+  });
+  const client = createApiClient({ fetchImpl: vi.fn(() => answer), locks: null });
+  return { client, release: () => release() };
+}
+
+describe("a refresh still on its way", () => {
+  it("cannot sign the user back in after a logout", async () => {
+    const { client, release } = clientWithHeldRefresh();
+    client.setAccessToken("token-1");
+    const refreshed = client.refreshSession();
+
+    client.setAccessToken(null); // the user logs out meanwhile
+    release();
+
+    expect(await refreshed).toBe(false);
+    expect(client.getAccessToken()).toBeNull();
+  });
+
+  it("does not replace the token of a login that happened meanwhile", async () => {
+    const { client, release } = clientWithHeldRefresh();
+    const refreshed = client.refreshSession();
+
+    client.setAccessToken("login-token"); // the user logs in meanwhile
+    release();
+
+    // true: there IS a session, so a request waiting for this refresh retries.
+    expect(await refreshed).toBe(true);
+    expect(client.getAccessToken()).toBe("login-token");
+  });
+});
+
 describe("subscribe", () => {
   it("stops calling a listener after it unsubscribes", () => {
     const client = createApiClient({ fetchImpl: vi.fn() });

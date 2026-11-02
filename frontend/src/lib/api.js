@@ -49,19 +49,36 @@ async function toApiError(response) {
   });
 }
 
+// The name of the browser-wide lock that refreshes run under (see below).
+export const REFRESH_LOCK_NAME = "kharcha-refresh";
+
+// The browser's Web Locks API, shared by every tab of this site, or null
+// where it doesn't exist (very old browsers, and the jsdom test browser).
+function browserLocks() {
+  return typeof navigator !== "undefined" ? (navigator.locks ?? null) : null;
+}
+
 /**
  * Build an API client. The app uses the one `api` below; tests build their
- * own with a fake `fetchImpl`, so no real network is involved.
+ * own with a fake `fetchImpl` (and `locks`), so no real network is involved.
  */
-export function createApiClient({ fetchImpl = (...args) => fetch(...args) } = {}) {
+export function createApiClient({
+  fetchImpl = (...args) => fetch(...args),
+  locks = browserLocks(),
+} = {}) {
   let accessToken = null;
   // The refresh in progress, if any (a Promise), shared by every caller.
   let refreshInFlight = null;
+  // Counts every change of session (login, logout, refresh). A refresh
+  // compares it before and after its round trip, to notice that the user
+  // logged in or out while it was on its way (see sendRefresh).
+  let sessionGeneration = 0;
   // Functions to call whenever the token changes (the auth context's
   // re-render hook, see src/lib/auth.jsx).
   const listeners = new Set();
 
   function setAccessToken(token) {
+    sessionGeneration += 1;
     accessToken = token;
     for (const listener of listeners) {
       listener();
@@ -77,10 +94,21 @@ export function createApiClient({ fetchImpl = (...args) => fetch(...args) } = {}
    * cookie would look like a stolen token being replayed, and the backend
    * would end the whole session (ADR 005). So when three requests get a
    * 401 together, they all wait for the SAME refresh, and only one is sent.
+   *
+   * **Also across tabs.** The variable above is per tab, but the cookie is
+   * shared by every tab. Two tabs refreshing at the same moment (a browser
+   * restoring its tabs, two tabs reloaded together) would send the same
+   * cookie twice, and the backend refuses the second, which used to log
+   * that tab out (review of PR 30). So the refresh runs inside a Web Lock:
+   * a browser-wide "only one at a time" that other tabs wait for. A tab
+   * that waited then refreshes with the cookie the other tab just received,
+   * which is an ordinary rotation, not a reuse.
    */
   function refreshSession() {
     if (refreshInFlight === null) {
-      refreshInFlight = sendRefresh().finally(() => {
+      const started =
+        locks === null ? sendRefresh() : locks.request(REFRESH_LOCK_NAME, () => sendRefresh());
+      refreshInFlight = started.finally(() => {
         refreshInFlight = null;
       });
     }
@@ -88,12 +116,20 @@ export function createApiClient({ fetchImpl = (...args) => fetch(...args) } = {}
   }
 
   async function sendRefresh() {
+    const generationAtStart = sessionGeneration;
     // No Authorization header: the refresh cookie is the credential. The
     // browser sends it by itself (same origin, path /api/v1/auth).
     const response = await fetchImpl(`${API_BASE}${REFRESH_PATH}`, {
       method: "POST",
       credentials: "same-origin",
     });
+    if (sessionGeneration !== generationAtStart) {
+      // The user logged out (or in) while this refresh was on its way. Its
+      // answer belongs to the old session and must not undo that: a late
+      // new token would put a logged-out user back "in" (review of PR 30).
+      // Its cookie is dead anyway: logout revoked the whole token family.
+      return accessToken !== null;
+    }
     if (response.status === 401) {
       // No valid refresh cookie: logged out, expired, or revoked.
       setAccessToken(null);
