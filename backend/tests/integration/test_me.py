@@ -11,8 +11,11 @@ The rules defended here:
   someone decides how it is covered)
 - the delete is recorded in `audit_log`, with no email in it
 - every session ends: the old refresh token and access token are refused
+- two deletes at once write one audit row; a delete that Postgres aborts
+  to break a deadlock is tried again (review of PR 28)
 """
 
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -20,15 +23,21 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from rq import Queue
-from sqlalchemy import Table, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import Engine, Table, func, select, text
+from sqlalchemy.orm import Session, sessionmaker
+from structlog.testing import capture_logs
 
+from app.core.errors import UnauthorizedError
 from app.db.base import Base
 from app.db.seed import run_seed
 from app.models import AuditAction, AuditLog, Category, CategoryKind, StatementUpload, User
 from app.models.audit_log import MAX_USER_AGENT_LENGTH
+from app.services import me as me_service
+from app.services.me import RequestOrigin
 from app.workers import jobs
 from tests.fixtures.icici_xls import build_icici_xls
+from tests.integration.test_upload_worker import wait_until_a_query_waits_for_a_lock
+from tests.integration.test_uploads import make_account
 
 pytestmark = pytest.mark.integration
 
@@ -45,6 +54,9 @@ ALICE = "alice@example.com"
 BOB = "bob@example.com"
 
 AuthHeadersFactory = Callable[[str], dict[str, str]]
+
+# For calling the service directly, as a request would.
+ORIGIN = RequestOrigin(ip="testclient", user_agent="testclient")
 
 # Tables that hold no user's data at all: the global merchant dictionary.
 GLOBAL_TABLES = {"merchants"}
@@ -384,3 +396,89 @@ def test_a_job_still_waiting_after_the_delete_does_nothing(
     jobs.process_statement(upload_id)
 
     assert total_rows(db, StatementUpload.__table__) == 0
+
+
+# --- DELETE /me: concurrent requests ----------------------------------------
+
+
+def audit_rows(db: Session) -> int:
+    return db.scalar(select(func.count()).select_from(AuditLog)) or 0
+
+
+def test_a_second_delete_of_the_same_user_writes_no_second_audit_row(
+    client: TestClient, alice: dict[str, str], db: Session
+) -> None:
+    """A double click: two DELETE /me requests at the same moment.
+
+    Request 2 passed `get_current_user` before request 1 committed, so it
+    goes on with the User object it loaded then. Calling the service with
+    such an object is exactly that situation, without the timing.
+    """
+    user = db.scalar(select(User).where(User.email == ALICE))
+    assert user is not None
+    assert delete_me(client, alice).status_code == 204
+
+    with pytest.raises(UnauthorizedError):
+        me_service.delete_user(db, user, password=PASSWORD, origin=ORIGIN)
+
+    assert audit_rows(db) == 1
+
+
+def test_a_delete_aborted_to_break_a_deadlock_is_retried(
+    client: TestClient, alice: dict[str, str], db: Session, migrated_engine: Engine
+) -> None:
+    """Another request of the same user takes the same rows in the opposite order.
+
+    1. The other request ("other") updates Alice's bank account row and
+       keeps its transaction open.
+    2. The delete locks Alice's user row, then, by cascade, waits for the
+       account row.
+    3. The other request inserts a refresh token for Alice. Its foreign key
+       check needs her user row, which the delete holds.
+
+    Each now waits for the other. After `deadlock_timeout` (1 s) Postgres
+    checks the longest waiter, the delete, finds the cycle and aborts it.
+    The other request finishes; the delete is tried again and succeeds,
+    removing the new refresh token too. Without the retry, the delete ends
+    in a DeadlockDetected error (a 500).
+    """
+    account_id = make_account(client, alice)
+    alice_id = user_id_of(db, ALICE)
+    session_factory = sessionmaker(bind=migrated_engine, expire_on_commit=False)
+    outcome: dict[str, Any] = {}
+
+    def delete_alice() -> None:
+        try:
+            with session_factory() as session:
+                user = session.get(User, alice_id)
+                assert user is not None
+                me_service.delete_user(session, user, password=PASSWORD, origin=ORIGIN)
+            outcome["deleted"] = True
+        except Exception as exc:  # reported by the assertion below
+            outcome["error"] = exc
+
+    deleter = threading.Thread(target=delete_alice)
+    with capture_logs() as logs, migrated_engine.connect() as other:
+        other.execute(
+            text("UPDATE accounts SET nickname = 'Renamed' WHERE id = :id"), {"id": account_id}
+        )
+        deleter.start()
+        wait_until_a_query_waits_for_a_lock(migrated_engine)
+        # Blocks until Postgres has aborted the delete's first attempt.
+        other.execute(
+            text(
+                "INSERT INTO refresh_tokens (user_id, token_hash, family_id, expires_at) "
+                "VALUES (:user_id, 'other-request', gen_random_uuid(), now() + interval '1 day')"
+            ),
+            {"user_id": alice_id},
+        )
+        other.commit()
+        deleter.join(timeout=10)
+
+    assert outcome == {"deleted": True}
+    # Proof that a deadlock really happened, so the retry was exercised.
+    assert [log["attempt"] for log in logs if log["event"] == "user_delete_deadlock_retry"] == [1]
+    for table in Base.metadata.sorted_tables:
+        if table.name not in GLOBAL_TABLES and table.name != "audit_log":
+            assert rows_of(db, table, alice_id) == 0, table.name
+    assert audit_rows(db) == 1
