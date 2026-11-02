@@ -136,3 +136,17 @@ Three fixes, each checked so that its test fails without it:
   wrong password → the generic message; nothing in `localStorage`, `sessionStorage`
   or readable cookies; the user deleted afterwards with `DELETE /me`; no email, name,
   password or token in the API's or worker's logs.
+
+### Review of PR 31 (2026-11-03)
+- **One submit at a time.** A double click or a double Enter submitted the login and
+  register forms twice, because React state only changes on the next render. A
+  `useRef` flag, set synchronously, now blocks the second submit; a second
+  `POST /auth/register` used to answer 409 for the account the first had just made.
+- **`?next=` keeps the query string.** The guard reads the full address
+  (`window.location.pathname + search`) inside its effect, so filters such as
+  `?month=2026-10` survive a login. `useSearchParams()` would have needed a
+  `<Suspense>` boundary around every signed-in page.
+- **An explicit logout goes to plain `/login`.** The auth context records
+  `loggedOut` when the session ends through `logout()`, so the next person at a
+  shared computer finds nothing of the previous user's page in the URL. An expired
+  session still gets `?next=`.
