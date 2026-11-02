@@ -63,14 +63,18 @@ UPLOAD_POLL_LIMIT = "120/minute"
 # same tight limit as login. Named UNLOCK rather than PASSWORD so the
 # security linter does not take the constant for a hardcoded password.
 UNLOCK_LIMIT = "5/minute"
+# DELETE /me: per user. It asks for the account password again (ADR 021),
+# so every request is a guess at it; limited like login, so that a stolen
+# access token can't be used to try passwords at the general rate.
+REAUTH_LIMIT = "5/minute"
 GENERAL_LIMIT = "100/minute"  # everything else: per user, or per IP if logged out
 
 
 # --- Keys: who is being counted -------------------------------------------
 
 
-def client_ip(request: Request) -> str:
-    """The IP address of the client that opened the connection.
+def client_host(request: Request) -> str | None:
+    """The address of the client that opened the connection, or None if unknown.
 
     We deliberately do NOT read the `X-Forwarded-For` header here: any
     client can send it with a made-up IP and get a fresh counter on every
@@ -78,9 +82,16 @@ def client_ip(request: Request) -> str:
     option (with `--forwarded-allow-ips` set to the proxy) replaces
     `request.client` with the real client IP, and only trusts the header
     from that proxy.
+
+    Also what the audit log records as `ip` (ADR 021), so both always agree
+    on who the client is.
     """
-    host = request.client.host if request.client else "unknown"
-    return f"ip:{host}"
+    return request.client.host if request.client else None
+
+
+def client_ip(request: Request) -> str:
+    """The rate-limit key for "this client address"."""
+    return f"ip:{client_host(request) or 'unknown'}"
 
 
 def user_or_ip_key(request: Request) -> str:

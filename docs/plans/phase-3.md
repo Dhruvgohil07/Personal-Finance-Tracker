@@ -194,4 +194,8 @@ Then I stop for review.
 - Step 12 runs the full acceptance checklist against the deployed app
 
 ## Change log
-- (none yet)
+- 2026-11-02, Step 1: a wrong password on `DELETE /me` is **400
+  `INCORRECT_PASSWORD`**, not the 401 written above (decided with Dhruv). The
+  frontend treats a 401 as an expired access token and would refresh or log
+  out, the same reason ADR 020 gives for statement passwords. Also added:
+  `DELETE /me` is limited to 5/minute per user (`REAUTH_LIMIT`). See ADR 021.

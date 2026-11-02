@@ -26,6 +26,8 @@ from app.db.base import Base
 from app.models import (
     Account,
     AccountType,
+    AuditAction,
+    AuditLog,
     BankCode,
     Category,
     CategoryKind,
@@ -47,6 +49,7 @@ TOKEN_ID = uuid.UUID("77777777-7777-4777-8777-777777777777")
 FAMILY_ID = uuid.UUID("88888888-8888-4888-8888-888888888888")
 UPLOAD_ID = uuid.UUID("99999999-9999-4999-8999-999999999999")
 RULE_ID = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+AUDIT_ID = uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 
 # The values that must never show up in a repr.
 EMAIL = "dhruv@example.com"
@@ -59,8 +62,14 @@ TOKEN_HASH = "9e107d9d372bb6826bd81d3542a419d6" * 2
 # any form, so the test uses readable ones that would be easy to spot.
 BLOB_CONTENT = b"UPI/RAMESHKUMAR/PAY 250.00"
 VPA = "ramesh.kumar@okaxis"
+# Where a request came from, as the audit log stores it (documentation
+# address range, RFC 5737).
+CLIENT_IP = "203.0.113.7"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 SENSITIVE = (
     VPA,
+    CLIENT_IP,
+    USER_AGENT,
     EMAIL,
     PASSWORD_HASH,
     HOLDER_NAME,
@@ -136,6 +145,18 @@ def make_category_rule() -> CategoryRule:
     )
 
 
+def make_audit_log() -> AuditLog:
+    return AuditLog(
+        id=AUDIT_ID,
+        user_id=USER_ID,
+        action=AuditAction.USER_DELETED,
+        entity="user",
+        entity_id=USER_ID,
+        ip=CLIENT_IP,
+        user_agent=USER_AGENT,
+    )
+
+
 # --- The exact text of each repr ------------------------------------------
 
 
@@ -176,6 +197,11 @@ def test_category_rule_repr_is_the_id_and_match_type() -> None:
     assert repr(make_category_rule()) == f"CategoryRule(id={RULE_ID}, match_type='vpa')"
 
 
+def test_audit_log_repr_is_the_id_and_action() -> None:
+    # Not the ip or user agent: they describe a person's device.
+    assert repr(make_audit_log()) == f"AuditLog(id={AUDIT_ID}, action='user_deleted')"
+
+
 # --- The rule itself ------------------------------------------------------
 
 
@@ -190,6 +216,7 @@ def test_category_rule_repr_is_the_id_and_match_type() -> None:
         make_refresh_token(),
         make_upload_blob(),
         make_category_rule(),
+        make_audit_log(),
     ],
     ids=[
         "user",
@@ -200,6 +227,7 @@ def test_category_rule_repr_is_the_id_and_match_type() -> None:
         "refresh_token",
         "upload_blob",
         "category_rule",
+        "audit_log",
     ],
 )
 def test_no_repr_leaks_a_sensitive_value(model: Base) -> None:

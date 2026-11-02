@@ -111,10 +111,11 @@ class PasswordRequiredError(ConflictError):
 
 
 class IncorrectPasswordError(AppError):
-    # The password sent for a protected PDF does not open it. 400, not 401:
-    # 401 means "who are you?" (the access token), and a client that sees
-    # 401 would try to refresh its token or log the user out. The message
-    # never repeats what was sent.
+    # The password sent for a protected PDF does not open it, or (with its
+    # own message) the account password sent to DELETE /me is wrong.
+    # 400, not 401: 401 means "who are you?" (the access token), and a
+    # client that sees 401 would try to refresh its token or log the user
+    # out. The message never repeats what was sent.
     status_code = HTTPStatus.BAD_REQUEST
     code = "INCORRECT_PASSWORD"
     message = "That password does not open this PDF."

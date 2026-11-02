@@ -6,6 +6,7 @@ isn't imported here is invisible to migrations.
 """
 
 from app.models.account import Account, AccountType, BankCode
+from app.models.audit_log import AuditAction, AuditLog
 from app.models.category import Category, CategoryKind
 from app.models.category_rule import CategoryRule
 from app.models.merchant import Merchant
@@ -18,6 +19,8 @@ from app.models.user import DEFAULT_USER_SETTINGS, User
 __all__ = [
     "Account",
     "AccountType",
+    "AuditAction",
+    "AuditLog",
     "BankCode",
     "DEFAULT_USER_SETTINGS",
     "Category",

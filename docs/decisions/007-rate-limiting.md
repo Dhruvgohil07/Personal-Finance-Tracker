@@ -81,3 +81,10 @@ limit, `UPLOAD_POLL_LIMIT = "120/minute"` per user. As decision 3 says, a
 decorated route uses only its own limit, and its counter is shared by all
 upload ids of that user. Unfinished uploads also send `Retry-After: 2`, so a
 well-behaved client polls about 30 times a minute.
+
+## Amendment — Phase 3 Step 1 (2026-11-02)
+`DELETE /me` asks for the account password again (ADR 021), so every request is
+a guess at it. It has its own decorator limit, `REAUTH_LIMIT = "5/minute"` per
+user, like login. Under the general limit alone, a stolen access token could try
+about 1,500 passwords in its 15 minutes. `client_ip()` now builds its key from a
+new `client_host()`, which the audit log also uses for its `ip` column.

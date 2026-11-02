@@ -46,6 +46,22 @@ def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
     )
 
 
+def clear_refresh_cookie(response: Response) -> None:
+    """Tell the browser to forget the refresh cookie (logout, DELETE /me).
+
+    The attributes must match the ones it was set with, or the browser
+    treats it as a different cookie. The path does NOT have to match the
+    URL of the request: DELETE /me (outside /api/v1/auth) can clear it too.
+    """
+    response.delete_cookie(
+        key=REFRESH_COOKIE_NAME,
+        path=REFRESH_COOKIE_PATH,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+    )
+
+
 def _token_response(response: Response, tokens: AuthTokens) -> TokenResponse:
     _set_refresh_cookie(response, tokens.refresh_token)
     return TokenResponse(
@@ -98,12 +114,4 @@ def refresh(
 @router.post("/logout", status_code=HTTPStatus.NO_CONTENT)
 def logout(db: DbSession, response: Response, refresh_token: RefreshCookie = None) -> None:
     auth_service.logout(db, refresh_token=refresh_token)
-    # Tell the browser to forget the cookie. The attributes must match the
-    # ones it was set with, or the browser treats it as a different cookie.
-    response.delete_cookie(
-        key=REFRESH_COOKIE_NAME,
-        path=REFRESH_COOKIE_PATH,
-        httponly=True,
-        secure=True,
-        samesite="strict",
-    )
+    clear_refresh_cookie(response)
