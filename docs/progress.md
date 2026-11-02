@@ -463,13 +463,19 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
     remaining 4 findings (settings defaults, shared test helpers, `client_host()`'s
     module, a one-use helper). 1509 tests (+1 skipped), 100% coverage measured with
     `--cov` (the first Step 1 run had not passed `--cov`)
+- [x] Step 2: Client IP behind the proxy — `client_host()` trusts `X-Kharcha-Client-IP`
+  only with a valid `X-Kharcha-Client-IP-Signature` (HMAC-SHA256 with the new optional
+  `PROXY_SHARED_SECRET`, ≥ 32 chars, chosen with Dhruv), else the socket IP; rate limits
+  and the audit log both follow. ADR 007 amendment, `.env.example`. Test vector pinned
+  for the proxy's JavaScript. 1526 tests (+1 skipped), 100% coverage (`--cov`)
 
 ## In progress
 - (nothing)
 
 ## Next up
-- Phase 3 Step 2: client IP behind the proxy (`PROXY_SHARED_SECRET`, ADR 007 amendment);
-  change `client_host()` so the audit log follows
+- Phase 3 Step 3: frontend scaffold (Next.js in plain JavaScript, Tailwind, ESLint,
+  Vitest, the `/api/v1` proxy, a new `frontend` CI job). The proxy's `middleware.js` must
+  send the signed IP headers and match the test vector in test_rate_limit_keys.py
 - Carried over from the Phase 2 acceptance (each needs a real file, no code):
   - **Real `.xls`/PDF cross-check:** put an ICICI `.xls` of the PDF's exact period
     in `samples/`, then run `uv run pytest tests/unit/test_real_samples.py`
@@ -898,8 +904,10 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
   the 500 handler. Revisit in the Phase 5 security review
 - slowapi 0.1.10 crashes with Redis down; worked around in `RateLimitMiddleware`
   (regression test in tests/integration/test_rate_limit.py). Recheck on upgrade
-- Production behind a proxy needs uvicorn `--proxy-headers --forwarded-allow-ips`,
-  or every client shares the proxy's IP for rate limits (deployment phase)
+- Client IP behind the proxy: the backend side is done (Phase 3 Step 2, signed
+  `X-Kharcha-Client-IP`). Fully closed once the Next.js proxy sends the headers (Step 3/4)
+  and Render and Vercel share the same `PROXY_SHARED_SECRET` (Step 11). If the two
+  secrets differ, nothing errors: every visitor silently shares the proxy's counter again
 - Windows: use `127.0.0.1`, not `localhost`, in DB/Redis URLs (IPv6 `::1` hangs with Docker);
   engine has a 10 s connect timeout so this fails loudly instead of hanging
 - Run tests from `backend/` with the venv Python, not Anaconda's `python`

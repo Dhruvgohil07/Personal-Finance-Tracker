@@ -9,12 +9,18 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import Response
+from pydantic import SecretStr
 from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
 
 from app.api.deps import CurrentUser
 from app.core.config import get_settings
-from app.core.rate_limit import limiter
+from app.core.rate_limit import (
+    CLIENT_IP_HEADER,
+    CLIENT_IP_SIGNATURE_HEADER,
+    limiter,
+    sign_client_ip,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -138,6 +144,68 @@ def test_register_and_login_have_separate_counters(client: TestClient) -> None:
             json={"email": "newuser@example.com", "password": PASSWORD, "name": "New User"},
         ).status_code
         == 201
+    )
+
+
+# --- Behind the Next.js proxy: the signed browser IP (Phase 3 Step 2) ------
+
+PROXY_SECRET = "kharcha-test-proxy-secret-0123456789abcdef"
+
+
+@pytest.fixture
+def proxy_secret(monkeypatch: pytest.MonkeyPatch) -> str:
+    # get_settings() is cached: the app reads this same object.
+    monkeypatch.setattr(get_settings(), "proxy_shared_secret", SecretStr(PROXY_SECRET))
+    return PROXY_SECRET
+
+
+def _from_browser(ip: str, secret: str = PROXY_SECRET) -> dict[str, str]:
+    """The headers our proxy adds to a request from the browser at `ip`."""
+    return {CLIENT_IP_HEADER: ip, CLIENT_IP_SIGNATURE_HEADER: sign_client_ip(ip, secret)}
+
+
+def test_two_browsers_behind_the_proxy_have_separate_login_limits(
+    client: TestClient, proxy_secret: str
+) -> None:
+    """Every TestClient request comes from one address, like the proxy's.
+
+    Without the signed IP, browser A's 5 failed logins would lock browser B
+    out too, since both reach the API from the proxy.
+    """
+    browser_a, browser_b = _from_browser("198.51.100.1"), _from_browser("198.51.100.2")
+
+    for _ in range(AUTH_LIMIT_COUNT):
+        response = client.post(
+            LOGIN, json={"email": "a@example.com", "password": "wrong"}, headers=browser_a
+        )
+        assert response.status_code == 401
+    _assert_rate_limited(
+        client.post(LOGIN, json={"email": "a@example.com", "password": "x"}, headers=browser_a)
+    )
+
+    response = client.post(
+        LOGIN, json={"email": "b@example.com", "password": "wrong"}, headers=browser_b
+    )
+    assert response.status_code == 401  # B is unaffected
+
+
+def test_a_forged_ip_header_does_not_escape_the_limit(
+    client: TestClient, proxy_secret: str
+) -> None:
+    """A client calling the API directly can't buy a fresh counter per request.
+
+    Each request claims a NEW IP, signed with the wrong secret. All of them
+    are counted against the connection's own address, so the 6th is a 429.
+    """
+    for n in range(AUTH_LIMIT_COUNT):
+        forged = _from_browser(f"192.0.2.{n}", secret="guessed-secret-of-at-least-32-chars")
+        response = client.post(
+            LOGIN, json={"email": "a@example.com", "password": "wrong"}, headers=forged
+        )
+        assert response.status_code == 401
+    forged = _from_browser("192.0.2.200", secret="guessed-secret-of-at-least-32-chars")
+    _assert_rate_limited(
+        client.post(LOGIN, json={"email": "a@example.com", "password": "x"}, headers=forged)
     )
 
 

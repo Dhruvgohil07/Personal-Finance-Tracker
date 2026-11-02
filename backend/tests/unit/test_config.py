@@ -49,6 +49,8 @@ def test_valid_settings_load_with_defaults(valid_env: None) -> None:
     assert settings.max_upload_bytes == 10 * 1024 * 1024
     assert settings.file_encryption_key_bytes == bytes(range(32))
     assert settings.groq_api_key is None
+    # Optional: local development runs without the Next.js proxy.
+    assert settings.proxy_shared_secret is None
 
 
 def test_empty_optional_value_is_treated_as_unset(
@@ -86,6 +88,7 @@ def test_missing_required_setting_fails_fast(
         ("ENV", "staging"),
         ("MAX_UPLOAD_MB", "0"),
         ("JWT_ACCESS_SECRET", "change-me"),  # the .env.example placeholder
+        ("PROXY_SHARED_SECRET", "too-short-to-be-a-secret"),
         ("FILE_ENCRYPTION_KEY", "not base64!!"),
         ("FILE_ENCRYPTION_KEY", base64.b64encode(b"too short").decode()),
     ],
