@@ -507,6 +507,12 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   database still at migration 0012: upgraded to 0014 (`alembic upgrade head`)
   Decided with Dhruv: `agentRules: false` in next.config, so `next dev` no longer
   writes `frontend/AGENTS.md` (a note for AI coding tools)
+  - Review of PR 31 (top 3 of 7 findings fixed): a `useRef` flag blocks a second
+    submit (a double click registered twice, the second answering 409); `?next=`
+    keeps the page's query string; an explicit logout goes to plain `/login` (the
+    context's new `loggedOut`). Left: GET /me refetched on focus, `?next=` accepting
+    /api paths, duplicated button styles and form state, a needless "use client".
+    112 Vitest tests
 
 ## In progress
 - (nothing)
