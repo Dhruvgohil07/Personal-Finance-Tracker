@@ -209,6 +209,26 @@ def test_a_forged_ip_header_does_not_escape_the_limit(
     )
 
 
+def test_rotating_ipv6_addresses_does_not_escape_the_limit(
+    client: TestClient, proxy_secret: str
+) -> None:
+    """Every attempt from a NEW address in the same /64: still one counter."""
+    for n in range(AUTH_LIMIT_COUNT):
+        response = client.post(
+            LOGIN,
+            json={"email": "a@example.com", "password": "wrong"},
+            headers=_from_browser(f"2001:db8:1:2::{n + 1:x}"),
+        )
+        assert response.status_code == 401
+    _assert_rate_limited(
+        client.post(
+            LOGIN,
+            json={"email": "a@example.com", "password": "x"},
+            headers=_from_browser("2001:db8:1:2::ffff"),
+        )
+    )
+
+
 # --- General API limit: 100 per minute per user ------------------------------
 
 
