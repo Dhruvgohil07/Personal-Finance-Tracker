@@ -27,6 +27,16 @@ const nextConfig = {
   // flags become always-on in the next major version.
   cacheComponents: true,
   partialPrefetching: true,
+  experimental: {
+    // Because src/proxy.js exists, Next.js copies every request body into
+    // memory and CUTS IT OFF at this size (default 10 MB); a larger body
+    // fails with a 500 before reaching the backend. A statement upload may
+    // be 10 MB (the backend's MAX_UPLOAD_MB) plus the multipart framing, so
+    // the limit sits a little above it: the backend's own "file too large"
+    // (413) then answers anything bigger. Raise both together (review of
+    // PR 30, checked live with an 11 MB body).
+    proxyClientMaxBodySize: "12mb",
+  },
   // Tailwind CSS 4 runs as a Turbopack loader on every .css file.
   turbopack: {
     rules: {
