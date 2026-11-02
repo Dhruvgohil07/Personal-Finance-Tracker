@@ -111,6 +111,14 @@ class Transaction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         # one (ADR 010). It is kept because the query above is real and
         # uses it in full.
         Index("ix_transactions_user_category_date", "user_id", "category_id", "txn_date"),
+        # "every row pointing at this category", for the ON DELETE SET NULL
+        # above (migration 0014). Deleting a category makes Postgres run
+        # `UPDATE transactions SET category_id = NULL WHERE category_id = $1`;
+        # the index above starts with user_id, so it can't serve that, and
+        # each deleted category would scan the whole table (every user's
+        # rows). DELETE /me deletes all of a user's own categories at once
+        # (review of Phase 3 Step 1).
+        Index("ix_transactions_category_id", "category_id"),
         # "everything from this merchant" (top merchants, recurring detection).
         Index("ix_transactions_user_merchant", "user_id", "merchant_id"),
         # "every row with this merchant KEY" (Phase 2 Step 5, migration
