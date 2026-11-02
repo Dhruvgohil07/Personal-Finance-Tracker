@@ -18,5 +18,10 @@ export async function proxy(request) {
 
 export const config = {
   // Only API calls: pages and static files don't need it.
+  //
+  // Note: this does NOT decide which request bodies Next.js buffers. Once a
+  // proxy file exists, Next.js copies EVERY request body into memory, up to
+  // `proxyClientMaxBodySize` (set in next.config.mjs for statement uploads).
+  // Checked live: excluding /api/v1/uploads here still truncated it.
   matcher: "/api/v1/:path*",
 };
