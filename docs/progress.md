@@ -488,6 +488,13 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   Changed from the proposal: ESLint 9.39.5 (Next's lint plugins don't support 10),
   `@tailwindcss/turbopack` (Next 16.4's template) instead of `@tailwindcss/postcss`,
   the file is `src/proxy.js` (Next 16 renamed Middleware); recharts waits for Step 9
+  - Review of PR 30 (top 3 of 7 findings fixed): request bodies were cut off at 10 MB
+    while a proxy exists, so `proxyClientMaxBodySize` is 12 MB (a narrower matcher
+    did NOT help, checked live; 11 MB now arrives whole); refreshes run under a
+    browser-wide Web Lock so tabs refreshing together don't log each other out; a
+    session generation counter makes a refresh that lands after logout harmless.
+    Left: x-forwarded-for trusted off Vercel, API_ORIGIN checked only on Vercel, the
+    HMAC key imported per request, the duplicated .gitignore. 63 Vitest tests
 
 ## In progress
 - (nothing)
@@ -496,6 +503,10 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
 - **Dhruv, after merging Step 3:** add `frontend` to the `protect-main` required checks
 - Phase 3 Step 4: auth pages (register, login, logout, the guard to `/login`, the
   header with the user's name from `GET /me`, error states incl. 429 wait time)
+- Step 6 (uploads) must refuse a file over the backend's limit in the browser before
+  sending: above `proxyClientMaxBodySize` (12 MB) Next.js answers a bare 500 (ADR 022)
+- Step 11: verify an upload near 10 MB on the deployed app; the host may limit a
+  proxy's request size too
 - Carried over from the Phase 2 acceptance (each needs a real file, no code):
   - **Real `.xls`/PDF cross-check:** put an ICICI `.xls` of the PDF's exact period
     in `samples/`, then run `uv run pytest tests/unit/test_real_samples.py`
