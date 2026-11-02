@@ -7,24 +7,35 @@
 // refresh cookie is only sent to /api/v1/auth (ADR 022). It decides what
 // to SHOW; the API itself still refuses every request without a valid token.
 
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
 import { useAuth } from "@/lib/auth";
 import { loginPathFor } from "@/lib/safe-redirect";
 
 export function RequireAuth({ children }) {
-  const { status } = useAuth();
+  const { status, loggedOut } = useAuth();
   const router = useRouter();
-  const pathname = usePathname();
 
   useEffect(() => {
-    if (status === "anonymous") {
-      // replace, not push: "back" shouldn't return to a page that only
-      // redirects again. ?next= brings the user back here after logging in.
-      router.replace(loginPathFor(pathname));
+    if (status !== "anonymous") {
+      return;
     }
-  }, [status, router, pathname]);
+    // replace, not push: "back" shouldn't return to a page that only
+    // redirects again.
+    if (loggedOut) {
+      // The user chose to leave: plain /login, nothing about their page.
+      router.replace("/login");
+      return;
+    }
+    // No session (it expired, or this is a new visit): ?next= brings the
+    // user back to this exact page after logging in, query string included
+    // (e.g. /transactions?month=2026-10). Read from window.location because
+    // an effect only runs in the browser; the useSearchParams() hook would
+    // need a <Suspense> boundary around every signed-in page.
+    const here = `${window.location.pathname}${window.location.search}`;
+    router.replace(loginPathFor(here));
+  }, [status, loggedOut, router]);
 
   if (status === "authenticated") {
     return children;

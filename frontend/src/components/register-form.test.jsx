@@ -88,6 +88,34 @@ describe("RegisterForm", () => {
     );
   });
 
+  it("registers once however fast the form is submitted twice", async () => {
+    // A second POST /auth/register would answer 409 "already exists" for
+    // the account the first one just created.
+    let finishRegister;
+    const { fetchImpl } = await renderForm({
+      "/auth/register": () =>
+        new Promise((resolve) => {
+          finishRegister = () => resolve(created());
+        }),
+      "/auth/login": loggedIn,
+    });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: NEW_USER.name } });
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: NEW_USER.email } });
+    fireEvent.change(screen.getByLabelText(/^Password/), {
+      target: { value: NEW_USER.password },
+    });
+
+    const form = screen.getByRole("button", { name: "Create account" }).closest("form");
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+    finishRegister();
+
+    await waitFor(() => expect(sentBody(fetchImpl, "/auth/login")).toBeDefined());
+    const registers = fetchImpl.mock.calls.filter(([url]) => url === "/api/v1/auth/register");
+    expect(registers).toHaveLength(1);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("checks the password length in the browser before sending", () => {
     renderWithSession(<RegisterForm />);
 
