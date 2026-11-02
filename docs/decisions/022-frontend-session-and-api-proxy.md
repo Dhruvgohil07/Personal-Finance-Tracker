@@ -81,3 +81,31 @@ the backend's `format_inr` (shared test cases, including 2^53 − 1).
   `npm audit` reports a moderate `minimatch` denial-of-service in that toolchain.
   It runs only on developer machines and in CI, never on user input; revisit when
   `eslint-config-next` supports ESLint 10.
+
+## Review of PR 30 (2026-11-03)
+Three fixes, each checked so that its test fails without it:
+
+1. **Request bodies over 10 MB.** Because `src/proxy.js` exists, Next.js copies
+   every request body into memory and cuts it off at `proxyClientMaxBodySize`
+   (10 MB by default). A statement upload (up to the backend's 10 MB
+   `MAX_UPLOAD_MB`, plus the multipart framing) failed with a 500 before reaching
+   the backend. Narrowing the proxy's `matcher` does NOT help: checked live, an
+   excluded path was still buffered and cut off. The fix is
+   `experimental.proxyClientMaxBodySize: "12mb"` in `next.config.mjs`. Checked live
+   against a stand-in backend that counts bytes: an 11 MB body now arrives whole;
+   13 MB still fails with Next's 500.
+   - Consequence for Step 6: the upload page must refuse files over the backend's
+     limit **in the browser**, before sending, so the user never meets that 500.
+     Raise both limits together.
+   - Consequence for Step 11: the hosting platform may have its own request size
+     limit for a proxy; verify an upload near 10 MB on the deployed app.
+2. **Refreshing in several tabs at once.** The one-refresh-at-a-time guard was per
+   tab, so tabs refreshing together sent the same cookie twice and the backend
+   refused the second, logging that tab out. The refresh now runs inside a Web Lock
+   (`navigator.locks`, name `kharcha-refresh`): every tab of the site waits for the
+   others, then refreshes with the cookie the previous tab received. Where the API
+   is missing (old browsers, insecure contexts), it falls back to the per-tab guard.
+3. **A refresh that lands after logout.** A session generation counter changes on
+   every login, logout and refresh. A refresh whose answer arrives after the
+   generation changed is ignored, so a late answer can't sign a logged-out user back
+   in (its cookie is dead anyway: logout revoked the whole family).
