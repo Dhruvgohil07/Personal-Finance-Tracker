@@ -59,6 +59,24 @@ because in this codebase an "account" is a bank account.
 and then removes its rows too. A job still waiting in the queue later finds its
 upload gone and does nothing (tested).
 
+**6. Concurrent requests of the same user** (added after the review of PR 28).
+- **Two deletes at once** (a double click): both pass the password check, the
+  second DELETE waits for the first one's row lock and then finds no row. It
+  checks the DELETE's `rowcount`, writes **no second audit row**, and answers
+  **401**, as every request of a deleted user does.
+- **Deadlocks are retried.** Other requests still running for the same user can
+  lock the same rows in the opposite order. Example: a request that has locked a
+  bank account row and then needs the user row (any insert checks that foreign
+  key), while the delete holds the user row and waits for that account row through
+  the cascade. Postgres aborts one of the two (SQLSTATE `40P01`). When the victim
+  is the delete, it runs again, up to `MAX_DELETE_ATTEMPTS` (3) times; by then the
+  other request has finished. `tests/integration/test_me.py` creates exactly this
+  deadlock with two real connections.
+- **Migration 0014** indexes `transactions.category_id`. Deleting the user deletes
+  their own categories, and each one fires `ON DELETE SET NULL` on that column.
+  The existing index starts with `user_id`, so each category was a sequential scan
+  of every user's transactions.
+
 ## Alternatives rejected
 - **Deleting table by table in the service.** A list of tables in Python would
   silently miss the next table added; the cascade cannot.
@@ -70,6 +88,10 @@ upload gone and does nothing (tested).
   `DELETE /me`; `fetch()` and the Next.js proxy both pass a DELETE body on.
 - **No password, only the access token.** Simpler, but turns any stolen session
   into a way to destroy the account.
+- **Avoiding the deadlock by locking rows in a fixed order** (user, then accounts,
+  then uploads) before deleting. Every other write path would have to follow the
+  same order too, and the cascade's own order is decided by Postgres. A retry
+  covers every cycle, including ones not thought of yet.
 
 ## Consequences
 - The audit row keeps an IP address and a User-Agent after the user is gone. They

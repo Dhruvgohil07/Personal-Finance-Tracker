@@ -454,7 +454,15 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   through every table, audit row in the same transaction, refresh cookie cleared.
   Decided with Dhruv: a wrong password is 400 `INCORRECT_PASSWORD`, not 401 (plan
   change log). Added: `REAUTH_LIMIT` 5/min/user; `client_host()` shared by rate limits
-  and the audit log. 1505 tests (+1 skipped), 100% coverage
+  and the audit log
+  - Review of PR 28 (top 3 of 7 findings fixed): a second concurrent delete finds no
+    row (`rowcount`), writes no second audit row and answers 401; a delete aborted to
+    break a deadlock (SQLSTATE 40P01, new `is_deadlock()` in app/db/errors.py) is
+    retried up to 3 times, tested with a real deadlock; migration 0014 indexes
+    `transactions.category_id` for the cascade's `SET NULL`. Left as they are: the
+    remaining 4 findings (settings defaults, shared test helpers, `client_host()`'s
+    module, a one-use helper). 1509 tests (+1 skipped), 100% coverage measured with
+    `--cov` (the first Step 1 run had not passed `--cov`)
 
 ## In progress
 - (nothing)
@@ -827,7 +835,12 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
   failed once in four full runs. It passes alone (3/3) and in the next full run, and
   this branch does not touch `statement_uploads`. It asserts an EXPLAIN plan, so it
   likely depends on table statistics left by earlier tests. Not investigated yet: worth
-  pinning the statistics (or `ANALYZE` in the test) if it shows up again, CI included
+  pinning the statistics (or `ANALYZE` in the test) if it shows up again, CI included.
+  **Seen again 2026-11-02** (review fixes of Phase 3 Step 1): failed in 2 of 3 full
+  local runs, passed in the integration folder alone and in the third full run. Leaving
+  skewed statistics on `statement_uploads` on purpose (2000 rows of one user, ANALYZE,
+  TRUNCATE) did NOT reproduce it, so the cause is still unknown; the failing plan has
+  not been captured yet
 - `GET /insights/categories` over a WHOLE YEAR stops using the date bounds: at ~45% of a
   user's rows the planner reads everything for that user through a `user_id`-prefixed index
   and filters the dates from the heap (20 400 rows scanned, 11 220 discarded, 8.75 ms on
