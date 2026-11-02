@@ -130,7 +130,28 @@ the proxy's JavaScript (Step 3/4) must produce the same value.
 
 **Consequences.**
 - Production must set the SAME `PROXY_SHARED_SECRET` on Render and Vercel (Step 11).
-  If they differ, nothing breaks loudly: every visitor falls back to the proxy's
-  address, so all share one counter again. Step 11's checklist must check this.
+  If they differ, every visitor falls back to the proxy's address and all share one
+  counter again; the review fixes below make that visible in the logs.
 - Closes the "rate limits key on the socket IP behind a proxy" known issue, once the
   proxy sends the headers (Step 3/4).
+
+**Review of PR 29 (2026-11-02).** Five changes:
+1. **IPv6 is counted per /64.** An ISP gives a household or phone a whole /64 and
+   devices pick new addresses inside it freely, so counting single addresses gave a
+   fresh login counter per request. `client_ip()` (the rate-limit key) now uses the
+   address's /64 network; IPv4 stays the single address. An IPv4 address written in
+   IPv6 form (`::ffff:a.b.c.d`) counts as the IPv4 one. The audit log still records
+   the exact address (`client_host()`).
+2. **`ENV=production` refuses to start without `PROXY_SHARED_SECRET`**, instead of
+   silently putting every visitor on one counter.
+3. **`PROXY_SHARED_SECRET` must differ from both JWT secrets.** It is also stored on
+   Vercel; reusing a JWT secret there would let a leak of the frontend's settings sign
+   access tokens.
+4. **A bad signature is logged** (`proxy_signature_invalid`, and
+   `proxy_signed_value_not_an_ip`) with the path only, never the IP or the header
+   values. `client_host()` keeps its answer on `request.state`, so the signature is
+   checked, and a failure logged, once per request although several key functions
+   ask for it. A request with no proxy headers logs nothing (calling the API
+   directly, e.g. `/docs`, is normal).
+5. The unit test for "no secret configured" now removes the secret itself instead of
+   assuming the developer's `.env` has none.

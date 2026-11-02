@@ -467,7 +467,14 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   only with a valid `X-Kharcha-Client-IP-Signature` (HMAC-SHA256 with the new optional
   `PROXY_SHARED_SECRET`, ≥ 32 chars, chosen with Dhruv), else the socket IP; rate limits
   and the audit log both follow. ADR 007 amendment, `.env.example`. Test vector pinned
-  for the proxy's JavaScript. 1526 tests (+1 skipped), 100% coverage (`--cov`)
+  for the proxy's JavaScript
+  - Review of PR 29 (top 5 of 9 findings fixed, plus 2 more along the way): IPv6
+    counted per /64 and `::ffff:` IPv4 as IPv4; `ENV=production` requires
+    `PROXY_SHARED_SECRET`; it must differ from both JWT secrets; a bad signature is
+    logged once per request (`client_host()` caches on `request.state`, which also
+    removes the repeated HMAC checks); the no-secret unit test sets its own state.
+    Left as they are: the HMAC helper duplicated from security.py, and the proxy
+    logic living in rate_limit.py. 1542 tests (+1 skipped), 100% coverage (`--cov`)
 
 ## In progress
 - (nothing)
@@ -907,7 +914,8 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
 - Client IP behind the proxy: the backend side is done (Phase 3 Step 2, signed
   `X-Kharcha-Client-IP`). Fully closed once the Next.js proxy sends the headers (Step 3/4)
   and Render and Vercel share the same `PROXY_SHARED_SECRET` (Step 11). If the two
-  secrets differ, nothing errors: every visitor silently shares the proxy's counter again
+  secrets differ, every visitor shares the proxy's counter again; the API then logs
+  `proxy_signature_invalid` on every proxied request, so check the logs after deploying
 - Windows: use `127.0.0.1`, not `localhost`, in DB/Redis URLs (IPv6 `::1` hangs with Docker);
   engine has a 10 s connect timeout so this fails loudly instead of hanging
 - Run tests from `backend/` with the venv Python, not Anaconda's `python`
