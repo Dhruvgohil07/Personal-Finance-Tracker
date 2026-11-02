@@ -109,6 +109,40 @@ def test_jwt_secrets_must_differ(valid_env: None, monkeypatch: pytest.MonkeyPatc
         load()
 
 
+PROXY_SECRET = "c" * 40
+
+
+def test_production_refuses_to_start_without_the_proxy_secret(
+    valid_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without it every visitor would share the proxy's rate-limit counter."""
+    monkeypatch.setenv("ENV", "production")
+
+    with pytest.raises(ConfigError, match="PROXY_SHARED_SECRET"):
+        load()
+
+
+def test_production_starts_with_the_proxy_secret(
+    valid_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.setenv("PROXY_SHARED_SECRET", PROXY_SECRET)
+
+    assert load().proxy_shared_secret is not None
+
+
+@pytest.mark.parametrize("jwt_secret", [ACCESS_SECRET, REFRESH_SECRET])
+def test_the_proxy_secret_must_differ_from_the_jwt_secrets(
+    valid_env: None, monkeypatch: pytest.MonkeyPatch, jwt_secret: str
+) -> None:
+    """The proxy secret also lives on Vercel; a JWT secret must not."""
+    monkeypatch.setenv("PROXY_SHARED_SECRET", jwt_secret)
+
+    with pytest.raises(ConfigError, match="must differ from both JWT secrets") as exc_info:
+        load()
+    assert jwt_secret not in str(exc_info.value)
+
+
 def test_error_message_never_contains_secret_values(
     valid_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

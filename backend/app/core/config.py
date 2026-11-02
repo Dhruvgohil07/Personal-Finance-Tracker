@@ -61,9 +61,10 @@ class Settings(BaseSettings):
 
     # Shared with the Next.js proxy (Phase 3). The proxy signs the browser's
     # IP with it, so the backend can trust that IP for rate limits and the
-    # audit log (ADR 007, Phase 3 Step 2 amendment). Optional: when unset,
-    # the signed header is ignored and the connection's address is used,
-    # which is right for local development without the proxy.
+    # audit log (ADR 007, Phase 3 Step 2 amendment). Optional outside
+    # production: when unset, the signed header is ignored and the
+    # connection's address is used, which is right for local development
+    # without the proxy. Required when ENV=production (validator below).
     proxy_shared_secret: SecretStr | None = None
 
     # --- Optional integrations -------------------------------------------
@@ -137,6 +138,25 @@ class Settings(BaseSettings):
         # accepted as an access token (and vice versa).
         if self.jwt_access_secret.get_secret_value() == self.jwt_refresh_secret.get_secret_value():
             raise ValueError("JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be different")
+        # The proxy secret is also stored on the frontend's host (Vercel). If
+        # it equalled a JWT secret, a leak of the frontend's settings would
+        # let anyone sign access tokens (review of PR 29).
+        if self.proxy_shared_secret is not None and self.proxy_shared_secret.get_secret_value() in (
+            self.jwt_access_secret.get_secret_value(),
+            self.jwt_refresh_secret.get_secret_value(),
+        ):
+            raise ValueError("PROXY_SHARED_SECRET must differ from both JWT secrets")
+        return self
+
+    @model_validator(mode="after")
+    def _production_needs_the_proxy_secret(self) -> "Settings":
+        # In production the browser reaches the API only through the Next.js
+        # proxy. Without the secret, the proxy's signed IP is ignored and every
+        # visitor shares one rate-limit counter: no error, just a silent
+        # lockout of everyone after 5 failed logins. So refuse to start
+        # instead (review of PR 29).
+        if self.env == "production" and self.proxy_shared_secret is None:
+            raise ValueError("PROXY_SHARED_SECRET is required when ENV=production")
         return self
 
     # --- Convenience -----------------------------------------------------
