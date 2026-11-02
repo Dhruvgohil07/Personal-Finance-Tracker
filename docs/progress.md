@@ -475,14 +475,27 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
     removes the repeated HMAC checks); the no-secret unit test sets its own state.
     Left as they are: the HMAC helper duplicated from security.py, and the proxy
     logic living in rate_limit.py. 1542 tests (+1 skipped), 100% coverage (`--cov`)
+- [x] Step 3: Frontend scaffold — `frontend/` (Next.js 16.4.3, React 19.3.1, Tailwind
+  4.3.3, TanStack Query 5.105.0; exact versions, each at least a week old; `.npmrc`
+  save-exact). `next.config.mjs` forwards `/api/v1/*` to `API_ORIGIN`; `src/proxy.js`
+  signs the browser IP (first `x-forwarded-for` entry, chosen with Dhruv) and strips
+  forged headers; `src/lib/api.js` (in-memory token, one refresh at a time, retry
+  once, ApiError), `auth.jsx` (session restore, login, logout, cache cleared on
+  session end), `money.js`; dark mode from the system. 49 Vitest tests (backend's
+  HMAC test vector, format_inr cases). New `frontend` CI job (setup-node v7.1.0 by
+  SHA, Node 24). ADR 022. Live check with both servers: separate login limits per
+  browser, forged headers removed, `Set-Cookie` intact through the proxy.
+  Changed from the proposal: ESLint 9.39.5 (Next's lint plugins don't support 10),
+  `@tailwindcss/turbopack` (Next 16.4's template) instead of `@tailwindcss/postcss`,
+  the file is `src/proxy.js` (Next 16 renamed Middleware); recharts waits for Step 9
 
 ## In progress
 - (nothing)
 
 ## Next up
-- Phase 3 Step 3: frontend scaffold (Next.js in plain JavaScript, Tailwind, ESLint,
-  Vitest, the `/api/v1` proxy, a new `frontend` CI job). The proxy's `middleware.js` must
-  send the signed IP headers and match the test vector in test_rate_limit_keys.py
+- **Dhruv, after merging Step 3:** add `frontend` to the `protect-main` required checks
+- Phase 3 Step 4: auth pages (register, login, logout, the guard to `/login`, the
+  header with the user's name from `GET /me`, error states incl. 429 wait time)
 - Carried over from the Phase 2 acceptance (each needs a real file, no code):
   - **Real `.xls`/PDF cross-check:** put an ICICI `.xls` of the PDF's exact period
     in `samples/`, then run `uv run pytest tests/unit/test_real_samples.py`
@@ -911,11 +924,16 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
   the 500 handler. Revisit in the Phase 5 security review
 - slowapi 0.1.10 crashes with Redis down; worked around in `RateLimitMiddleware`
   (regression test in tests/integration/test_rate_limit.py). Recheck on upgrade
-- Client IP behind the proxy: the backend side is done (Phase 3 Step 2, signed
-  `X-Kharcha-Client-IP`). Fully closed once the Next.js proxy sends the headers (Step 3/4)
-  and Render and Vercel share the same `PROXY_SHARED_SECRET` (Step 11). If the two
+- Client IP behind the proxy: both sides done (Phase 3 Steps 2-3, signed
+  `X-Kharcha-Client-IP`, checked live). Fully closed once Render and Vercel share the
+  same `PROXY_SHARED_SECRET` (Step 11). If the two
   secrets differ, every visitor shares the proxy's counter again; the API then logs
   `proxy_signature_invalid` on every proxied request, so check the logs after deploying
+- Frontend: `x-forwarded-for` is trusted because Vercel overwrites it; another host
+  means revisiting ADR 022 decision 2
+- Frontend tooling: ESLint 9.39.5 (npm calls it unsupported) because three of
+  `eslint-config-next`'s plugins don't support ESLint 10; `npm audit` reports a moderate
+  `minimatch` DoS in that dev-only toolchain. Revisit when they support ESLint 10
 - Windows: use `127.0.0.1`, not `localhost`, in DB/Redis URLs (IPv6 `::1` hangs with Docker);
   engine has a 10 s connect timeout so this fails loudly instead of hanging
 - Run tests from `backend/` with the venv Python, not Anaconda's `python`

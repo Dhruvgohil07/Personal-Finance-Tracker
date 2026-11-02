@@ -17,13 +17,15 @@ See [docs/progress.md](docs/progress.md), the
 [Phase 2 acceptance run](docs/phase-2-acceptance.md).
 
 **Stack:** Python 3.12 · FastAPI · PostgreSQL 16 · SQLAlchemy 2 + Alembic ·
-Redis + RQ · structlog · pytest · ruff · uv. Frontend (Next.js) from Phase 3.
+Redis + RQ · structlog · pytest · ruff · uv. Frontend: Next.js 16 (plain JavaScript),
+React 19, Tailwind CSS 4, TanStack Query · ESLint · Vitest.
 
 ## Run it locally
 
 ### Prerequisites
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (runs Postgres and Redis)
 - [uv](https://docs.astral.sh/uv/) (installs Python 3.12 and the dependencies)
+- [Node.js](https://nodejs.org/) 24.15 or newer (the web app)
 
 ### 1. Configure
 ```bash
@@ -68,6 +70,18 @@ uv run uvicorn app.main:app --reload
 - Interactive API docs: <http://127.0.0.1:8000/docs>
 - Health check: <http://127.0.0.1:8000/api/v1/health> — `200` when Postgres
   and Redis are reachable, `503` (with the failing check named) when not
+
+### 5. Run the web app (Phase 3, being built)
+In a second terminal, from `frontend/`, with the API from step 4 running:
+```bash
+cp .env.example .env.local   # API_ORIGIN points at the API above
+npm ci                       # installs the exact versions in package-lock.json
+npm run dev
+```
+- The app: <http://localhost:3000>
+- The browser only talks to the app: `/api/v1/*` is forwarded to the API
+  server side, so the API is never called across sites
+  ([ADR 022](docs/decisions/022-frontend-session-and-api-proxy.md))
 
 ## Walkthrough
 
@@ -312,7 +326,7 @@ transfer automatically ([ADR 018](docs/decisions/018-self-transfer-matching.md))
 
 | Missing | Arrives in |
 |---|---|
-| Web UI, `GET /me`, `DELETE /me` | Phase 3 ([plan](docs/plans/phase-3.md)) |
+| Web UI pages (sign-in, accounts, uploads, transactions, dashboard) | Phase 3 ([plan](docs/plans/phase-3.md)) |
 | Creating your own categories, CSV export, `/insights/trend`, `/insights/top-merchants` | Phase 4 |
 | Search that uses its trigram index (`q=` works, unindexed) | not scheduled yet |
 | LLM categorization for what the rules cannot place | Phase 4 |
@@ -331,9 +345,17 @@ uv run pytest -m "not integration"   # unit tests only, no Docker needed
 uv run pytest --cov                  # with a coverage report
 ```
 
+Run from `frontend/`:
+
+```bash
+npm run lint    # ESLint (Next.js's rules)
+npm test        # Vitest unit tests, no API needed
+npm run build   # production build
+```
+
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the same
-commands on every push to `main` and every pull request, against real
-Postgres 16 and Redis 7 containers.
+commands on every push to `main` and every pull request: the `backend` job
+against real Postgres 16 and Redis 7 containers, the `frontend` job on Node 24.
 
 ## Project layout
 
@@ -363,6 +385,13 @@ backend/
                    cursor.py opaque keyset pagination cursors
   alembic/         database migrations (append-only)
   tests/unit/  tests/integration/
+frontend/          Next.js app, plain JavaScript
+  next.config.mjs  forwards /api/v1/* to the API (API_ORIGIN)
+  src/proxy.js     adds the signed client-IP headers to API calls
+  src/app/         pages and the root layout (App Router)
+  src/lib/         api.js (fetch wrapper: token, errors, one refresh at a
+                   time), auth.jsx (the session), money.js (paise -> INR),
+                   client-ip.js (HMAC for the backend)
 docs/
   SPEC.md          full specification
   decisions/       architecture decision records (ADRs)
