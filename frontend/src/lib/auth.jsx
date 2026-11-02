@@ -110,12 +110,20 @@ export function AuthProvider({ children, client = defaultClient }) {
 
   // useMemo: a new object only when something in it changed, so components
   // reading the context don't re-render on every render of this one.
-  const value = useMemo(() => ({ status, login, logout }), [status, login, logout]);
+  // `client` is passed on so hooks such as useMe() call the API through the
+  // same client (and its token) as the session itself.
+  const value = useMemo(
+    () => ({ status, login, logout, client }),
+    [status, login, logout, client],
+  );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
-/** The session: `{ status, login, logout }`; status is loading | authenticated | anonymous. */
+/**
+ * The session: `{ status, login, logout, client }`.
+ * status is "loading" | "authenticated" | "anonymous".
+ */
 export function useAuth() {
   const value = useContext(AuthContext);
   if (value === null) {

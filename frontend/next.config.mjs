@@ -27,6 +27,11 @@ const nextConfig = {
   // flags become always-on in the next major version.
   cacheComponents: true,
   partialPrefetching: true,
+  // `next dev` would otherwise (re)create frontend/AGENTS.md on every start:
+  // a note for AI coding tools. This project doesn't keep one, and an
+  // untracked file reappearing after every `next dev` only clutters
+  // `git status`. With false, next dev also removes the block it wrote.
+  agentRules: false,
   experimental: {
     // Because src/proxy.js exists, Next.js copies every request body into
     // memory and CUTS IT OFF at this size (default 10 MB); a larger body
@@ -36,6 +41,14 @@ const nextConfig = {
     // (413) then answers anything bigger. Raise both together (review of
     // PR 30, checked live with an 11 MB body).
     proxyClientMaxBodySize: "12mb",
+    // In development, Next.js checks every page can be prerendered into an
+    // "instant" static shell, and reports pages it can't see. Signed-in
+    // pages never can: the session exists only in the browser (ADR 022), so
+    // the server always renders the guard's "Checking your session…". So
+    // only pages that ask for it (`export const instant = true`) are checked.
+    instantInsights: {
+      validationLevel: "manual-warning",
+    },
   },
   // Tailwind CSS 4 runs as a Turbopack loader on every .css file.
   turbopack: {
