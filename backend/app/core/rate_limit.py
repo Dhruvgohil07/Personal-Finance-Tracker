@@ -118,14 +118,29 @@ def _signed_client_ip(request: Request) -> str | None:
     # valid signature one character at a time. Compared as bytes: with str
     # it raises TypeError on non-ASCII input, which a header can contain.
     if not hmac.compare_digest(expected.encode(), signature.encode()):
+        # Both headers present but the signature is wrong: a forgery, or
+        # (more likely, and worth noticing) the proxy and the API were given
+        # different secrets, which silently puts every visitor on one
+        # counter. Logged without the IP or the header values (rule 3).
+        log.warning("proxy_signature_invalid", path=request.url.path)
         return None
 
     try:
-        # Also normalizes the spelling, e.g. "2001:DB8::1" -> "2001:db8::1",
-        # so one IPv6 address can't be counted under several keys.
-        return str(ipaddress.ip_address(ip))
+        address = ipaddress.ip_address(ip)
     except ValueError:
+        log.warning("proxy_signed_value_not_an_ip", path=request.url.path)
         return None
+    # str() normalizes the spelling ("2001:DB8::1" -> "2001:db8::1"), and an
+    # IPv4 address written in IPv6 form ("::ffff:198.51.100.1") becomes the
+    # plain IPv4 one, so one client always has one spelling.
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return str(address.ipv4_mapped)
+    return str(address)
+
+
+# The request.state attribute where client_host() keeps its answer.
+_CLIENT_HOST_STATE = "kharcha_client_host"
+_NOT_COMPUTED = object()
 
 
 def client_host(request: Request) -> str | None:
@@ -145,16 +160,62 @@ def client_host(request: Request) -> str | None:
 
     Also what the audit log records as `ip` (ADR 021), so both always agree
     on who the client is.
+
+    **Worked out once per request.** It is asked several times (the general
+    limit's middleware, a route's own limit, the audit log), so the answer
+    is kept on `request.state`: the signature is checked once, and a bad one
+    is logged once. `request.state` lives in the ASGI scope, which every
+    `Request` object built for this request shares.
     """
-    signed_ip = _signed_client_ip(request)
-    if signed_ip is not None:
-        return signed_ip
-    return request.client.host if request.client else None
+    cached = getattr(request.state, _CLIENT_HOST_STATE, _NOT_COMPUTED)
+    if cached is not _NOT_COMPUTED:
+        return cached  # what an earlier call stored: a str or None
+
+    host = _signed_client_ip(request)
+    if host is None and request.client is not None:
+        host = request.client.host
+    setattr(request.state, _CLIENT_HOST_STATE, host)
+    return host
+
+
+# An IPv6 address is counted by its first 64 bits (review of PR 29).
+IPV6_PREFIX_LENGTH = 64
+
+
+def _rate_limit_subject(host: str) -> str:
+    """Who a rate limit counts, given the client's address.
+
+    - IPv4: the address itself.
+    - IPv6: its /64 network. An ISP gives one household or phone a whole
+      /64 (2^64 addresses) and devices pick new addresses inside it freely,
+      so counting single addresses would let anyone get a fresh login
+      counter per request. A /64 is the usual "one customer" unit.
+    - An IPv4 address in IPv6 form ("::ffff:198.51.100.1") counts as the
+      IPv4 address; its /64 would be shared by every such client.
+    - Not an IP at all (TestClient's "testclient"): used as it is.
+    """
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            return str(address.ipv4_mapped)
+        # int(address): the bare 128-bit number, which drops a "%eth0"
+        # scope suffix that a network can't carry. IPv6Network (not
+        # ip_network) so a small number like ::1 is never read as IPv4.
+        return str(ipaddress.IPv6Network((int(address), IPV6_PREFIX_LENGTH), strict=False))
+    return str(address)
 
 
 def client_ip(request: Request) -> str:
-    """The rate-limit key for "this client address"."""
-    return f"ip:{client_host(request) or 'unknown'}"
+    """The rate-limit key for "this client address".
+
+    The audit log keeps the full address (client_host); only the counting
+    groups an IPv6 /64 together.
+    """
+    host = client_host(request)
+    return f"ip:{_rate_limit_subject(host) if host is not None else 'unknown'}"
 
 
 def user_or_ip_key(request: Request) -> str:

@@ -19,6 +19,7 @@ from limits import RateLimitItemPerMinute
 from pydantic import SecretStr
 from redis.exceptions import RedisError
 from starlette.requests import Request
+from structlog.testing import capture_logs
 
 from app.core import rate_limit
 from app.core.config import get_settings
@@ -42,6 +43,7 @@ def make_request(
     authorization: str | None = None,
     forwarded_for: str | None = None,
     extra_headers: dict[str, str] | None = None,
+    client_address: str = "203.0.113.7",
 ) -> Request:
     """A bare Starlette Request from client 203.0.113.7 (a documentation IP).
 
@@ -56,7 +58,12 @@ def make_request(
         headers.append((b"x-forwarded-for", forwarded_for.encode()))
     for name, value in (extra_headers or {}).items():
         headers.append((name.lower().encode(), value.encode("latin-1")))
-    scope = {"type": "http", "headers": headers, "client": ("203.0.113.7", 50000)}
+    scope = {
+        "type": "http",
+        "path": "/api/v1/auth/login",
+        "headers": headers,
+        "client": (client_address, 50000),
+    }
     return Request(scope)
 
 
@@ -155,9 +162,15 @@ def test_a_correctly_signed_ip_is_used(proxy_secret: str) -> None:
     assert user_or_ip_key(request) == f"ip:{BROWSER_IP}"
 
 
-def test_without_a_configured_secret_the_header_is_ignored() -> None:
-    """Local development: no proxy, so nobody's header is trusted."""
-    assert get_settings().proxy_shared_secret is None
+def test_without_a_configured_secret_the_header_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local development: no proxy, so nobody's header is trusted.
+
+    The secret is removed here rather than assumed absent: a developer's
+    .env may set it to run the Next.js proxy locally (review of PR 29).
+    """
+    monkeypatch.setattr(get_settings(), "proxy_shared_secret", None)
     request = proxied(BROWSER_IP, sign_client_ip(BROWSER_IP, PROXY_SECRET))
 
     assert client_host(request) == SOCKET_IP
@@ -210,6 +223,104 @@ def test_an_ipv6_address_is_counted_under_one_spelling(proxy_secret: str) -> Non
     for spelling in ("2001:DB8::1", "2001:0db8:0000::0001"):
         request = proxied(spelling, sign_client_ip(spelling, proxy_secret))
         assert client_host(request) == "2001:db8::1"
+
+
+def test_an_ipv4_address_in_ipv6_form_is_the_ipv4_address(proxy_secret: str) -> None:
+    """::ffff:198.51.100.23 IS 198.51.100.23: one spelling, one counter."""
+    mapped = f"::ffff:{BROWSER_IP}"
+    request = proxied(mapped, sign_client_ip(mapped, proxy_secret))
+
+    assert client_host(request) == BROWSER_IP
+
+
+# --- A bad signature is logged once, without values ------------------------
+
+
+def test_a_bad_signature_is_logged_once_per_request(proxy_secret: str) -> None:
+    """A wrong secret on one side must be noticeable, not silent.
+
+    The key functions run several times per request; the answer is kept on
+    the request, so the warning appears once. Neither the claimed IP nor the
+    signature is in it.
+    """
+    signature = sign_client_ip(BROWSER_IP, "another-secret-of-at-least-32-characters")
+    request = proxied(BROWSER_IP, signature)
+
+    with capture_logs() as logs:
+        client_host(request)
+        client_ip(request)
+        user_or_ip_key(request)
+
+    assert logs == [
+        {"event": "proxy_signature_invalid", "log_level": "warning", "path": "/api/v1/auth/login"}
+    ]
+    assert BROWSER_IP not in str(logs)
+    assert signature not in str(logs)
+
+
+def test_a_signed_value_that_is_not_an_ip_is_logged(proxy_secret: str) -> None:
+    request = proxied("not-an-ip", sign_client_ip("not-an-ip", proxy_secret))
+
+    with capture_logs() as logs:
+        client_host(request)
+
+    assert [log["event"] for log in logs] == ["proxy_signed_value_not_an_ip"]
+
+
+def test_a_request_without_proxy_headers_logs_nothing(proxy_secret: str) -> None:
+    """Calling the API directly is normal (e.g. /docs): no warning for it."""
+    with capture_logs() as logs:
+        client_host(make_request())
+
+    assert logs == []
+
+
+# --- IPv6: counted per /64 --------------------------------------------------
+#
+# An ISP gives a household or phone a whole /64 and devices choose new
+# addresses inside it freely, so counting single IPv6 addresses would hand
+# out a fresh login counter per request (review of PR 29).
+
+
+def test_ipv6_addresses_in_one_slash_64_share_a_counter(proxy_secret: str) -> None:
+    keys = set()
+    for address in ("2001:db8:1:2::5", "2001:db8:1:2:abcd:ef01:2345:6789"):
+        request = proxied(address, sign_client_ip(address, proxy_secret))
+        keys.add(client_ip(request))
+
+    assert keys == {"ip:2001:db8:1:2::/64"}
+
+
+def test_ipv6_addresses_in_different_slash_64s_are_counted_apart(proxy_secret: str) -> None:
+    first, second = "2001:db8:1:2::5", "2001:db8:1:3::5"
+    keys = {client_ip(proxied(ip, sign_client_ip(ip, proxy_secret))) for ip in (first, second)}
+
+    assert keys == {"ip:2001:db8:1:2::/64", "ip:2001:db8:1:3::/64"}
+
+
+def test_the_audit_ip_is_still_the_full_ipv6_address(proxy_secret: str) -> None:
+    """Only the COUNTING groups a /64; client_host keeps the exact address."""
+    address = "2001:db8:1:2::5"
+    request = proxied(address, sign_client_ip(address, proxy_secret))
+
+    assert client_host(request) == address
+    assert client_ip(request) == "ip:2001:db8:1:2::/64"
+
+
+@pytest.mark.parametrize(
+    ("connection", "expected_key"),
+    [
+        ("2001:db8:9:9::1", "ip:2001:db8:9:9::/64"),
+        ("::1", "ip:::/64"),  # a small number, still read as IPv6
+        ("fe80::1%eth0", "ip:fe80::/64"),  # a scope suffix is dropped
+        ("::ffff:203.0.113.9", "ip:203.0.113.9"),  # not one /64 for every such client
+    ],
+)
+def test_a_direct_ipv6_connection_is_counted_per_slash_64(
+    connection: str, expected_key: str
+) -> None:
+    """The same rule applies without the proxy (the connection's address)."""
+    assert client_ip(make_request(client_address=connection)) == expected_key
 
 
 # --- Retry-After ----------------------------------------------------------
