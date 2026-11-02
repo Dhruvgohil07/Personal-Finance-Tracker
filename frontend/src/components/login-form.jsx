@@ -4,7 +4,7 @@
 // layout's RedirectIfSignedIn then takes the user on.
 
 import Link from "next/link";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { FormError } from "@/components/form-error";
 import { FormField } from "@/components/form-field";
@@ -22,10 +22,19 @@ export function LoginForm() {
   const [password, setPassword] = useState("");
   const [errors, setErrors] = useState(NO_ERRORS);
   const [submitting, setSubmitting] = useState(false);
+  // Blocks a second submit (a double click, Enter pressed twice) while one
+  // is on its way. `submitting` can't do it: a state change only shows in
+  // the NEXT render, so a second submit in the same instant still sees
+  // false. A ref changes at once (review of PR 31).
+  const inFlight = useRef(false);
 
   async function handleSubmit(event) {
     // A form would otherwise reload the page with the values in the URL.
     event.preventDefault();
+    if (inFlight.current) {
+      return;
+    }
+    inFlight.current = true;
     setSubmitting(true);
     setErrors(NO_ERRORS);
     try {
@@ -33,6 +42,7 @@ export function LoginForm() {
     } catch (error) {
       setErrors(formErrorsFrom(error, FIELDS));
       setSubmitting(false);
+      inFlight.current = false;
     }
     // On success the button stays disabled until the redirect happens.
   }

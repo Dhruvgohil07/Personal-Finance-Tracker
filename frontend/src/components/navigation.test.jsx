@@ -4,7 +4,7 @@
 // next/navigation only works inside a running Next.js app, so it is
 // replaced with a fake router whose calls the tests can check.
 
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppHeader } from "@/components/app-header";
@@ -16,20 +16,19 @@ import { json, renderWithSession } from "@/test/session";
 // of the file, so the mock can use these values.
 const navigation = vi.hoisted(() => ({
   replace: vi.fn(),
-  pathname: "/transactions",
   search: "",
 }));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: navigation.replace, push: vi.fn() }),
-  usePathname: () => navigation.pathname,
   useSearchParams: () => new URLSearchParams(navigation.search),
 }));
 
 beforeEach(() => {
   navigation.replace.mockReset();
-  navigation.pathname = "/transactions";
   navigation.search = "";
+  // The guard reads the page's address from the (jsdom) browser itself.
+  window.history.replaceState(null, "", "/transactions");
 });
 
 describe("RequireAuth", () => {
@@ -54,6 +53,31 @@ describe("RequireAuth", () => {
       expect(navigation.replace).toHaveBeenCalledWith("/login?next=%2Ftransactions"),
     );
     expect(screen.queryByText("secret page")).not.toBeInTheDocument();
+  });
+
+  it("keeps the page's query string, e.g. its filters", async () => {
+    window.history.replaceState(null, "", "/transactions?month=2026-10&category=food");
+    renderWithSession(<RequireAuth>secret page</RequireAuth>, { signedIn: false });
+
+    await waitFor(() =>
+      expect(navigation.replace).toHaveBeenCalledWith(
+        "/login?next=%2Ftransactions%3Fmonth%3D2026-10%26category%3Dfood",
+      ),
+    );
+  });
+
+  it("remembers the page when a session expires (not a logout)", async () => {
+    const { client } = renderWithSession(<RequireAuth>secret page</RequireAuth>, {
+      signedIn: true,
+    });
+    await screen.findByText("secret page");
+
+    // What the API client does when a refresh is refused.
+    act(() => client.setAccessToken(null));
+
+    await waitFor(() =>
+      expect(navigation.replace).toHaveBeenCalledWith("/login?next=%2Ftransactions"),
+    );
   });
 });
 
@@ -95,7 +119,7 @@ describe("AppHeader", () => {
     expect(await screen.findByText("Alice")).toBeInTheDocument();
   });
 
-  it("logs out: the server is told and the session ends", async () => {
+  it("logs out to plain /login, leaving nothing of the page in the URL", async () => {
     const { client, fetchImpl } = renderWithSession(
       <RequireAuth>
         <AppHeader />
@@ -109,10 +133,10 @@ describe("AppHeader", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Log out" }));
 
-    // The guard, not the header, then sends the user to the login page.
-    await waitFor(() =>
-      expect(navigation.replace).toHaveBeenCalledWith("/login?next=%2Ftransactions"),
-    );
+    // The guard, not the header, then sends the user to the login page:
+    // without ?next=, since the user chose to leave (shared computers).
+    await waitFor(() => expect(navigation.replace).toHaveBeenCalledWith("/login"));
+    expect(navigation.replace).toHaveBeenCalledTimes(1);
     expect(client.getAccessToken()).toBeNull();
     expect(fetchImpl).toHaveBeenCalledWith(
       "/api/v1/auth/logout",

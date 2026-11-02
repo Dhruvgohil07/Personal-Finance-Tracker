@@ -4,7 +4,7 @@
 // so the new user doesn't have to type them twice.
 
 import Link from "next/link";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { FormError } from "@/components/form-error";
 import { FormField } from "@/components/form-field";
@@ -25,9 +25,17 @@ export function RegisterForm() {
   const [password, setPassword] = useState("");
   const [errors, setErrors] = useState(NO_ERRORS);
   const [submitting, setSubmitting] = useState(false);
+  // Blocks a second submit while one is on its way; see LoginForm. Here it
+  // matters more: a second POST /auth/register would answer 409 "already
+  // exists" for the account the first one just created.
+  const inFlight = useRef(false);
 
   async function handleSubmit(event) {
     event.preventDefault();
+    if (inFlight.current) {
+      return;
+    }
+    inFlight.current = true;
     setSubmitting(true);
     setErrors(NO_ERRORS);
 
@@ -39,6 +47,7 @@ export function RegisterForm() {
     } catch (error) {
       setErrors(formErrorsFrom(error, FIELDS));
       setSubmitting(false);
+      inFlight.current = false;
       return;
     }
 
@@ -53,6 +62,7 @@ export function RegisterForm() {
         formError: `Your account was created, but logging in failed: ${formError} Please log in.`,
       });
       setSubmitting(false);
+      inFlight.current = false;
     }
   }
 

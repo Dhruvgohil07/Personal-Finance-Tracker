@@ -80,12 +80,20 @@ export function AuthProvider({ children, client = defaultClient }) {
 
   // useCallback keeps the same function between renders, so components
   // that receive it don't re-render for nothing.
+  // True when the session ended because the user clicked "Log out", rather
+  // than because it expired. The guard then sends them to plain /login,
+  // without ?next=<the page they were on>: on a shared computer, the next
+  // person shouldn't find the previous user's page in the URL (review of
+  // PR 31). Cleared by the next login.
+  const [loggedOut, setLoggedOut] = useState(false);
+
   const login = useCallback(
     async (email, password) => {
       const body = await client.request("/auth/login", {
         method: "POST",
         body: { email, password },
       });
+      setLoggedOut(false);
       client.setAccessToken(body.access_token);
     },
     [client],
@@ -96,7 +104,10 @@ export function AuthProvider({ children, client = defaultClient }) {
       // Revokes the refresh token on the server and clears the cookie.
       await client.request("/auth/logout", { method: "POST" });
     } finally {
-      // Even if that call fails, this browser forgets the session.
+      // Even if that call fails, this browser forgets the session. Both
+      // updates happen in the same tick, so React renders them together:
+      // the guard never sees "anonymous" without "loggedOut".
+      setLoggedOut(true);
       client.setAccessToken(null);
     }
   }, [client]);
@@ -113,16 +124,17 @@ export function AuthProvider({ children, client = defaultClient }) {
   // `client` is passed on so hooks such as useMe() call the API through the
   // same client (and its token) as the session itself.
   const value = useMemo(
-    () => ({ status, login, logout, client }),
-    [status, login, logout, client],
+    () => ({ status, loggedOut, login, logout, client }),
+    [status, loggedOut, login, logout, client],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
 /**
- * The session: `{ status, login, logout, client }`.
- * status is "loading" | "authenticated" | "anonymous".
+ * The session: `{ status, loggedOut, login, logout, client }`.
+ * status is "loading" | "authenticated" | "anonymous"; loggedOut is true
+ * when the session ended through logout() (not by expiring).
  */
 export function useAuth() {
   const value = useContext(AuthContext);

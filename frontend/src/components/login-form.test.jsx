@@ -73,6 +73,36 @@ describe("LoginForm", () => {
     expect(screen.getByLabelText("Email")).toHaveAttribute("aria-invalid", "true");
   });
 
+  it("sends one login however fast the form is submitted twice", async () => {
+    // A double click or Enter pressed twice: both submits arrive before
+    // React has re-rendered the button as disabled.
+    const { fetchImpl } = await renderForm({ "/auth/login": () => new Promise(() => {}) });
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: "a@example.com" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "long enough" } });
+
+    const form = screen.getByRole("button", { name: "Log in" }).closest("form");
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+
+    const logins = fetchImpl.mock.calls.filter(([url]) => url === "/api/v1/auth/login");
+    expect(logins).toHaveLength(1);
+  });
+
+  it("can be sent again after an error", async () => {
+    const { fetchImpl } = await renderForm({
+      "/auth/login": () => apiError(401, "UNAUTHORIZED", "Invalid email or password."),
+    });
+
+    fillAndSubmit();
+    await screen.findByRole("alert");
+    fillAndSubmit();
+
+    await waitFor(() => {
+      const logins = fetchImpl.mock.calls.filter(([url]) => url === "/api/v1/auth/login");
+      expect(logins).toHaveLength(2);
+    });
+  });
+
   it("disables the button while logging in", async () => {
     // A login that never answers, so the "in progress" state can be seen.
     await renderForm({ "/auth/login": () => new Promise(() => {}) });
