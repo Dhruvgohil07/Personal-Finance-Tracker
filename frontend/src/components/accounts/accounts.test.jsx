@@ -208,7 +208,7 @@ describe("AccountsView: editing", () => {
     });
     const row = (await screen.findByText("Salary account")).closest("li");
 
-    fireEvent.click(within(row).getByRole("button", { name: "Edit" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Edit Salary account" }));
     fireEvent.change(within(row).getByLabelText("Nickname"), { target: { value: "Main account" } });
     fireEvent.change(within(row).getByLabelText("Account type"), { target: { value: "current" } });
     fireEvent.click(within(row).getByRole("button", { name: "Save" }));
@@ -225,7 +225,7 @@ describe("AccountsView: editing", () => {
     });
     const row = (await screen.findByText("Salary account")).closest("li");
 
-    fireEvent.click(within(row).getByRole("button", { name: "Edit" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Edit Salary account" }));
 
     expect(within(row).queryByLabelText("Bank")).not.toBeInTheDocument();
     expect(within(row).queryByLabelText(/Last 4 digits/)).not.toBeInTheDocument();
@@ -240,10 +240,14 @@ describe("AccountsView: deleting", () => {
     });
     const row = (await screen.findByText("Salary account")).closest("li");
 
-    fireEvent.click(within(row).getByRole("button", { name: "Delete" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Delete Salary account" }));
 
-    const confirm = within(row).getByRole("group", { name: "Delete Salary account" });
-    expect(confirm).toHaveTextContent("permanently deletes all its statements and transactions");
+    // An alertdialog whose DESCRIPTION is the warning: a screen reader reads
+    // it out when focus lands on Cancel.
+    const confirm = within(row).getByRole("alertdialog", {
+      name: "Delete Salary account?",
+      description: /permanently deletes all its statements and transactions/,
+    });
     // A stray Enter presses Cancel, not Delete.
     expect(within(confirm).getByRole("button", { name: "Cancel" })).toHaveFocus();
     expect(requestsTo(fetchImpl, "DELETE", `/accounts/${SALARY.id}`)).toHaveLength(0);
@@ -256,10 +260,10 @@ describe("AccountsView: deleting", () => {
     });
     const row = (await screen.findByText("Salary account")).closest("li");
 
-    fireEvent.click(within(row).getByRole("button", { name: "Delete" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Delete Salary account" }));
     fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
 
-    expect(within(row).queryByRole("group")).not.toBeInTheDocument();
+    expect(within(row).queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(requestsTo(fetchImpl, "DELETE", `/accounts/${SALARY.id}`)).toHaveLength(0);
   });
 
@@ -270,11 +274,64 @@ describe("AccountsView: deleting", () => {
     });
     const row = (await screen.findByText("Salary account")).closest("li");
 
-    fireEvent.click(within(row).getByRole("button", { name: "Delete" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Delete Salary account" }));
     fireEvent.click(within(row).getByRole("button", { name: "Delete account" }));
 
     expect(await screen.findByText(/No accounts yet/)).toBeInTheDocument();
     expect(requestsTo(fetchImpl, "DELETE", `/accounts/${SALARY.id}`)).toHaveLength(1);
+  });
+});
+
+describe("AccountsView: an account already gone (404)", () => {
+  // The account was deleted elsewhere (another tab): the API answers 404,
+  // and the list must be fetched again so the dead row disappears.
+  function goneElsewhere(method) {
+    const api = fakeAccountsApi([SALARY]);
+    const handler = (path, options) => {
+      if (path === `/accounts/${SALARY.id}` && options.method === method) {
+        api.state.accounts = []; // what the other tab did
+        return apiError(404, "NOT_FOUND", "Account not found.");
+      }
+      return api.handler(path, options);
+    };
+    return handler;
+  }
+
+  it("a failed delete refreshes the list, removing the dead row", async () => {
+    renderWithSession(<AccountsView />, { signedIn: true, handler: goneElsewhere("DELETE") });
+    const row = (await screen.findByText("Salary account")).closest("li");
+
+    fireEvent.click(within(row).getByRole("button", { name: "Delete Salary account" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Delete account" }));
+
+    expect(await screen.findByText(/No accounts yet/)).toBeInTheDocument();
+  });
+
+  it("a failed edit refreshes the list, removing the dead row", async () => {
+    renderWithSession(<AccountsView />, { signedIn: true, handler: goneElsewhere("PATCH") });
+    const row = (await screen.findByText("Salary account")).closest("li");
+
+    fireEvent.click(within(row).getByRole("button", { name: "Edit Salary account" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText(/No accounts yet/)).toBeInTheDocument();
+  });
+});
+
+describe("AccountsView: screen readers", () => {
+  it("names each row's buttons after its account", async () => {
+    const RENT = { ...SALARY, id: "22222222-2222-4222-8222-222222222222", nickname: "Rent" };
+    renderWithSession(<AccountsView />, {
+      signedIn: true,
+      handler: fakeAccountsApi([SALARY, RENT]).handler,
+    });
+    await screen.findByText("Rent");
+
+    // Every button can be told apart by its name alone, as when a screen
+    // reader lists the page's buttons.
+    for (const name of ["Edit Salary account", "Delete Salary account", "Edit Rent", "Delete Rent"]) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    }
   });
 });
 

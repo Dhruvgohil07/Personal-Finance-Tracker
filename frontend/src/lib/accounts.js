@@ -8,6 +8,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 
 export const ACCOUNTS_QUERY_KEY = ["accounts"];
@@ -37,6 +38,20 @@ export const accountTypeLabel = (type) => labelFor(ACCOUNT_TYPE_OPTIONS, type);
 // Exactly 4 digits: the same rule as the backend's MaskedNumber.
 export const LAST_FOUR_PATTERN = /^[0-9]{4}$/;
 
+/**
+ * For edit and delete: a 404 means the account is already gone (deleted in
+ * another tab, for example). The list on screen is then out of date, so it
+ * is fetched again and the dead row disappears; without this, every retry
+ * gave the same "Account not found." (review of PR 32).
+ */
+function refetchListIfGone(queryClient) {
+  return (error) => {
+    if (error instanceof ApiError && error.status === 404) {
+      queryClient.invalidateQueries({ queryKey: ACCOUNTS_QUERY_KEY });
+    }
+  };
+}
+
 /** `{ data: [account, …], isPending, error }`; only asks while signed in. */
 export function useAccounts() {
   const { status, client } = useAuth();
@@ -65,6 +80,7 @@ export function useUpdateAccount() {
     mutationFn: ({ id, changes }) =>
       client.request(`/accounts/${id}`, { method: "PATCH", body: changes }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ACCOUNTS_QUERY_KEY }),
+    onError: refetchListIfGone(queryClient),
   });
 }
 
@@ -77,5 +93,6 @@ export function useDeleteAccount() {
     // ALL cached data, not just the list: the account's uploads and
     // transactions are gone too, so any page showing them must refetch.
     onSuccess: () => queryClient.invalidateQueries(),
+    onError: refetchListIfGone(queryClient),
   });
 }

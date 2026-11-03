@@ -5,7 +5,7 @@
 // The row has three modes: showing the account, editing it, or asking
 // whether to delete it. Only one at a time, kept in `mode`.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { Button } from "@/components/button";
 import { FormError } from "@/components/form-error";
@@ -41,10 +41,23 @@ export function AccountRow({ account }) {
           </div>
           {mode === "view" ? (
             <div className="flex gap-2">
-              <Button variant="secondary" onClick={() => setMode("edit")}>
+              {/* aria-label names the account: with several rows, a screen
+                  reader would otherwise list "Edit, Delete, Edit, Delete"
+                  with nothing saying which account each one is for. The
+                  label starts with the visible word, so voice control
+                  ("click Delete") still finds it (review of PR 32). */}
+              <Button
+                variant="secondary"
+                aria-label={`Edit ${account.nickname}`}
+                onClick={() => setMode("edit")}
+              >
                 Edit
               </Button>
-              <Button variant="secondary" onClick={() => setMode("confirm-delete")}>
+              <Button
+                variant="secondary"
+                aria-label={`Delete ${account.nickname}`}
+                onClick={() => setMode("confirm-delete")}
+              >
                 Delete
               </Button>
             </div>
@@ -128,6 +141,7 @@ function ConfirmDelete({ account, onCancel }) {
   const [formError, setFormError] = useState(null);
   const cancelRef = useRef(null);
   const inFlight = useRef(false);
+  const warningId = useId();
 
   // Focus "Cancel", not "Delete": a stray Enter must not delete anything.
   useEffect(() => {
@@ -151,13 +165,18 @@ function ConfirmDelete({ account, onCancel }) {
   }
 
   return (
+    // role="alertdialog" + aria-describedby: when focus lands on "Cancel",
+    // a screen reader announces the dialog's name AND the warning text.
+    // As a plain group it said only "Cancel, button", so a blind user could
+    // confirm without ever hearing what gets deleted (review of PR 32).
     <div
-      role="group"
-      aria-label={`Delete ${account.nickname}`}
+      role="alertdialog"
+      aria-label={`Delete ${account.nickname}?`}
+      aria-describedby={warningId}
       className="mt-3 flex flex-col gap-3 rounded-md border border-red-300 bg-red-50 p-3 dark:border-red-800 dark:bg-red-950"
     >
       <FormError message={formError} />
-      <p className="text-sm">
+      <p id={warningId} className="text-sm">
         Delete <strong>{account.nickname}</strong>? This permanently deletes all its statements
         and transactions. It can&apos;t be undone.
       </p>
