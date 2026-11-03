@@ -303,3 +303,34 @@ Also:
   containing a comma, CRLF line endings): header found on row 4, every column and the
   day-first format guessed, imported by the real worker as 3 transactions with the
   balances reconciling. Test user deleted; nothing of the file in the API or worker logs.
+
+### Review of PR 34 (2026-11-03)
+Top 5 of 10 findings fixed:
+- **One delimiter rule on both sides (backend change).** Python's `csv.Sniffer` gives
+  up when any line lacks the delimiter (a bank's title line is enough) and the backend
+  then fell back to a comma, so a semicolon, tab or pipe CSV with a title line was read
+  as one cell per line: the browser showed a correct mapping and the import failed.
+  `app/parsers/readers.py` now uses `_sniff_delimiter`, the browser's rule (most
+  consistent cell count above 1 over the first 60 rows, ties to `, ; tab |` order,
+  comma when nothing splits). `_SNIFF_ROWS` / `SNIFF_ROWS` must stay equal. Shared test
+  files in both suites; checked live with the worker rebuilt from the branch.
+- **The browser decodes the whole file, exactly as the backend.** UTF-8 vs
+  Windows-1252 is decided on every byte, not the first 64 KB; broken UTF-16 is refused;
+  the five bytes Python's cp1252 refuses (0x81 0x8D 0x8F 0x90 0x9D) are refused too
+  (the browser's windows-1252 would have accepted them).
+- **Date formats are judged on every row read** (up to 200 data rows), not the first 5.
+- **Dates with a time can be mapped.** `parseDateWith` gained `%H %I %M %S %p` (Python's
+  regexes printed from `_strptime.TimeRE`; second 60/61 refused as datetime does).
+  When the dates carry a time, the list offers each date format joined with the time
+  layouts that fit. Also added: `%b %d, %Y` ("Aug 01, 2026"). All 60 formats pass the
+  backend's validator; every new case checked against `datetime.strptime`.
+- **Pydantic's "Value error, " prefix is dropped** from field messages, in
+  `formErrorsFrom` (every form).
+
+Left as they are: tests for the stale-read guard and the header-row re-guess, the
+duplicated initial-mapping expression and "first column with this name" rule, nested
+422 fields handled in the upload form, and the misleading `isCsv` comment.
+
+Found during the live check, not fixed: a decimal-comma amount ("70,00") is read as
+digit grouping, so ₹70.00 becomes ₹7,000.00. Semicolon CSVs (where decimal commas are
+usual) can now be imported, which makes this reachable. See progress, Known issues.
