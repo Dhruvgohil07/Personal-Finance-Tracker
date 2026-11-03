@@ -366,6 +366,7 @@ def test_a_month_with_no_transactions_is_zeros_not_an_error(
         "spend_paise": 0,
         "net_paise": 0,
         "transaction_count": 0,
+        "uncategorized_count": 0,
         "income_display": "₹0.00",
         "spend_display": "₹0.00",
         "net_display": "₹0.00",
@@ -532,6 +533,48 @@ def categorized_august(db: Session, august: Owner, system_categories: dict[str, 
 
 FOOD_SPEND = 132_050
 ATM_SPEND = 50_000
+
+
+# --- Summary: uncategorized_count (Phase 3 Step 9) ---------------------------
+
+
+def test_every_row_of_a_month_starts_uncategorized(client: TestClient, august: Owner) -> None:
+    """The four counted rows - and not the two self transfers beside them."""
+    current = get_summary(client, august, month="2026-08")["current"]
+
+    assert current["uncategorized_count"] == AUGUST_COUNT
+
+
+def test_uncategorized_count_includes_credits_and_drops_filed_rows(
+    client: TestClient, categorized_august: Owner
+) -> None:
+    """Two debits filed under Food; left are the ATM debit and the salary credit.
+
+    The breakdown's uncategorized bucket would say 1 here (debits only),
+    which is why the dashboard reads this count instead.
+    """
+    current = get_summary(client, categorized_august, month="2026-08")["current"]
+
+    assert current["uncategorized_count"] == 2
+
+
+def test_uncategorized_count_is_per_month(client: TestClient, august_and_july: Owner) -> None:
+    body = get_summary(client, august_and_july, month="2026-08")
+
+    assert body["current"]["uncategorized_count"] == AUGUST_COUNT
+    assert body["previous"]["uncategorized_count"] == len(JULY_ROWS)
+
+
+def test_another_users_uncategorized_rows_are_not_counted(
+    client: TestClient, db: Session, alice: Owner, bob: Owner
+) -> None:
+    add_transaction(db, alice, txn_date=AUGUST, amount_paise=10_000)
+    add_transaction(db, bob, txn_date=AUGUST, amount_paise=20_000)
+    add_transaction(db, bob, txn_date=AUGUST, amount_paise=30_000, direction=Direction.CREDIT)
+
+    current = get_summary(client, alice, month="2026-08")["current"]
+
+    assert current["uncategorized_count"] == 1
 
 
 def test_spending_is_grouped_by_category_biggest_first(
@@ -770,3 +813,5 @@ def test_categorizing_a_row_moves_it_in_the_breakdown(
     body = get_breakdown(client, alice, **august_range)
     assert [item["slug"] for item in body["items"]] == ["groceries"]
     assert body["total_spend_paise"] == 65_000
+    # ... and it no longer needs the user's attention on the dashboard.
+    assert get_summary(client, alice, month="2026-08")["current"]["uncategorized_count"] == 0

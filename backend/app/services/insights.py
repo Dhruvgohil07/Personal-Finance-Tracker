@@ -72,6 +72,9 @@ class PeriodTotals:
     income_paise: int
     spend_paise: int
     transaction_count: int
+    # How many of those `transaction_count` rows have no category yet:
+    # the dashboard's "N transactions need your attention" (Phase 3 Step 9).
+    uncategorized_count: int
 
     @property
     def net_paise(self) -> int:
@@ -86,7 +89,13 @@ class PeriodTotals:
         would otherwise have to handle `None` - including the percentage
         maths, which already has its own zero case to think about.
         """
-        return cls(month=month, income_paise=0, spend_paise=0, transaction_count=0)
+        return cls(
+            month=month,
+            income_paise=0,
+            spend_paise=0,
+            transaction_count=0,
+            uncategorized_count=0,
+        )
 
 
 @dataclass(frozen=True)
@@ -148,12 +157,21 @@ class CategoryBreakdown:
 # that month's 1st, which is what GROUP BY needs to collapse the window
 # into one row per month. The cast back to `date` is so psycopg hands us a
 # `datetime.date` rather than a midnight timestamp.
+#
+# `uncategorized_count` uses the same FILTER on COUNT, in both directions:
+# an unfiled salary credit needs the user's attention as much as an unfiled
+# debit. COUNT never returns NULL (it counts zero rows as 0), so it needs no
+# COALESCE. `NOT is_self_transfer` excludes nothing from it in practice: a
+# row whose category is cleared also has the flag cleared
+# (`transactions._set_category`, `categorization`), so this count equals
+# what `GET /transactions?uncategorized=true` lists for the month.
 _MONTHLY_TOTALS_SQL = text("""
     SELECT
         date_trunc('month', txn_date)::date AS month_start,
         COALESCE(SUM(amount_paise) FILTER (WHERE direction = :credit), 0) AS income_paise,
         COALESCE(SUM(amount_paise) FILTER (WHERE direction = :debit), 0)  AS spend_paise,
-        COUNT(*) AS transaction_count
+        COUNT(*) AS transaction_count,
+        COUNT(*) FILTER (WHERE category_id IS NULL) AS uncategorized_count
     FROM transactions
     WHERE user_id = :user_id
       AND txn_date >= :start_date
@@ -233,6 +251,7 @@ def monthly_summary(db: Session, user_id: uuid.UUID, month: Month) -> MonthlySum
             income_paise=int(row.income_paise),
             spend_paise=int(row.spend_paise),
             transaction_count=row.transaction_count,
+            uncategorized_count=row.uncategorized_count,
         )
         for row in rows
     }
