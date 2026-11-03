@@ -267,12 +267,28 @@ class TransactionResponse(BaseModel):
     # name joined for ICICI UPI/IMPS, the first word otherwise), so a user
     # writing a rule by hand needs to see it (review of Step 7).
     merchant_key: str | None
+    # What `apply_to_similar` would recognise similar rows by: a person's
+    # UPI id or a merchant key, null when there is nothing to match (then
+    # it answers 400). Computed by the service from the rule-learning code
+    # itself (rules_service.similar_keys), not stored; the client shows it
+    # when asking "file every transaction from X as Y?" (review of PR 37).
+    similar_key: str | None = None
     category_id: uuid.UUID | None
     category_source: CategorySource
     category_confidence: Confidence | None
     is_self_transfer: bool
     notes: str | None
     created_at: datetime
+
+    @classmethod
+    def from_row(cls, row: object, similar_key: str | None) -> "TransactionResponse":
+        """The response for an ORM row plus its computed `similar_key`.
+
+        `similar_key` is not a column, so `model_validate` (which reads the
+        row's attributes) can't fill it; it is passed in by the route, from
+        the service that computed it.
+        """
+        return cls.model_validate(row).model_copy(update={"similar_key": similar_key})
 
     # A computed field is part of the response (and of /docs) but never of
     # the input. Always positive: `direction` carries the sign (ADR 001).

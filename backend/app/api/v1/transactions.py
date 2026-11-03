@@ -53,7 +53,7 @@ def list_transactions(
     """
     page = transactions_service.list_transactions(db, user.id, filters)
     return TransactionPage(
-        items=[TransactionResponse.model_validate(row) for row in page.rows],
+        items=[TransactionResponse.from_row(row, page.similar_keys[row.id]) for row in page.rows],
         next_cursor=page.next_cursor,
     )
 
@@ -83,4 +83,6 @@ def update_transaction(
     no merchant name or UPI id to recognise similar ones by.
     """
     transaction = transactions_service.update_transaction(db, queue, user.id, transaction_id, body)
-    return TransactionResponse.model_validate(transaction)
+    return TransactionResponse.from_row(
+        transaction, transactions_service.similar_key(db, transaction)
+    )
