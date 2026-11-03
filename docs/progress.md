@@ -513,14 +513,23 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
     context's new `loggedOut`). Left: GET /me refetched on focus, `?next=` accepting
     /api paths, duplicated button styles and form state, a needless "use client".
     112 Vitest tests
+- [x] Step 5: Accounts + first run — `/accounts` (list, add, edit nickname/type, delete
+  with an inline warning and focus on Cancel); the home page asks a user with no
+  accounts for their first one. Only exactly 4 digits ever leave the browser (checked
+  in code, no truncating maxLength). Shared `Button`, `FormField` with selects and
+  hints, `src/lib/accounts.js` hooks. Changed: the first-run upload step moves to
+  Step 6 (plan change log); inline delete confirmation instead of `<dialog>` (jsdom
+  can't test showModal). 129 Vitest tests; checked live in a browser, test user
+  deleted, logs clean
 
 ## In progress
 - (nothing)
 
 ## Next up
 - **Dhruv, after merging Step 3:** add `frontend` to the `protect-main` required checks
-- Phase 3 Step 5: accounts + onboarding (list/add/edit/delete bank accounts; a first-run
-  flow that asks for the first account)
+- Phase 3 Step 6: uploads (form, status polling, history, delete, the password prompt)
+  plus the first-run step "Upload your first statement" on the home page; refuse files
+  over the size limit in the browser
 - Step 6 (uploads) must refuse a file over the backend's limit in the browser before
   sending: above `proxyClientMaxBodySize` (12 MB) Next.js answers a bare 500 (ADR 022)
 - Step 11: verify an upload near 10 MB on the deployed app; the host may limit a

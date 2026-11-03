@@ -199,3 +199,8 @@ Then I stop for review.
   frontend treats a 401 as an expired access token and would refresh or log
   out, the same reason ADR 020 gives for statement passwords. Also added:
   `DELETE /me` is limited to 5/minute per user (`REAUTH_LIMIT`). See ADR 021.
+- 2026-11-03, Step 5: the first-run flow is split across Steps 5 and 6 (decided with
+  Dhruv). Step 5 builds "Add your first account" on the home page; the next first-run
+  step, "Upload your first statement", moves to Step 6, where the upload form is built.
+  A link to an upload page that doesn't exist yet would break hard constraint 3 (no
+  unfinished component).
