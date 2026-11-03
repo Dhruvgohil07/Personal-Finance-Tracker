@@ -57,6 +57,8 @@ function aTransaction(overrides = {}) {
     channel: "upi",
     counterparty_vpa: null,
     merchant_key: "MOONCAFE",
+    // What apply_to_similar would match, computed by the API.
+    similar_key: "MOONCAFE",
     category_id: null,
     category_source: "none",
     category_confidence: null,
@@ -128,6 +130,7 @@ describe("TransactionsView: the list", () => {
           aTransaction({
             normalized_description: "ASHA",
             merchant_key: "ASHA",
+            similar_key: "ASHA",
             category_id: GROCERIES.id,
             category_source: "heuristic",
             category_confidence: 0.6,
@@ -201,16 +204,24 @@ describe("TransactionsView: the list", () => {
     expect(navigation.push).toHaveBeenCalledWith("/transactions", { scroll: false });
   });
 
-  it("shows the API's complaint about the filters", async () => {
+  it("shows WHY the API refused the filters, not its generic message", async () => {
+    // The shape the real backend sends (review of PR 37): the reason is in
+    // details; the top-level message is always the generic one.
     navigation.search = "from=2026-09-01&to=2026-08-01";
     const api = fakeApi();
     const handler = (path, options) =>
       path.startsWith("/transactions?")
-        ? apiError(422, "VALIDATION_ERROR", "'from' must not be later than 'to'")
+        ? apiError(422, "VALIDATION_ERROR", "The request contains invalid data.", {
+            details: [
+              { field: "query", message: "Value error, 'from' must not be later than 'to'" },
+            ],
+          })
         : api.handler(path, options);
     renderWithSession(<TransactionsView />, { signedIn: true, handler });
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("'from' must not be later than 'to'");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /^'from' must not be later than 'to'$/,
+    );
   });
 });
 
@@ -253,7 +264,7 @@ describe("TransactionsView: the filters", () => {
 
 describe("TransactionsView: changing a category", () => {
   it("asks whether to file similar transactions too, then sends ONE request with the answer", async () => {
-    const api = fakeApi({ pages: [[aTransaction({ merchant_key: "MOONCAFE" })]] });
+    const api = fakeApi({ pages: [[aTransaction()]] });
     const { fetchImpl } = await renderView(api);
     const row = (await screen.findByText("MOONCAFE", { selector: "p" })).closest("li");
 
@@ -268,9 +279,9 @@ describe("TransactionsView: changing a category", () => {
 
     fireEvent.click(within(question).getByRole("button", { name: "Yes, all similar" }));
 
-    expect(await within(row).findByRole("status")).toHaveTextContent(
-      "Similar transactions are being updated too.",
-    );
+    // Said above the list, not in the row (which may leave a filtered list).
+    expect(await screen.findByText(/Filed every transaction from MOONCAFE as Groceries/)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("The others are being updated.");
     expect(patches(fetchImpl)).toEqual([
       {
         path: expect.stringMatching(/^\/transactions\/t0/),
@@ -304,9 +315,9 @@ describe("TransactionsView: changing a category", () => {
     expect(patches(fetchImpl)).toHaveLength(0);
   });
 
-  it("doesn't ask when nothing could recognise similar ones (no merchant, no UPI id)", async () => {
+  it("doesn't ask when the API says nothing could match (similar_key null)", async () => {
     const api = fakeApi({
-      pages: [[aTransaction({ normalized_description: "ATM WDL", merchant_key: null })]],
+      pages: [[aTransaction({ normalized_description: "ATM WDL", merchant_key: null, similar_key: null })]],
     });
     const { fetchImpl } = await renderView(api);
     const row = (await screen.findByText("ATM WDL", { selector: "p" })).closest("li");
@@ -371,5 +382,53 @@ describe("TransactionsView: notes", () => {
 
     await waitFor(() => expect(patches(fetchImpl)).toHaveLength(2));
     expect(patches(fetchImpl)[1].body).toEqual({ notes: null });
+  });
+});
+
+describe("TransactionsView: review fixes (PR 37)", () => {
+  it("waits for the categories before showing rows, so none shows a wrong category", async () => {
+    const api = fakeApi({
+      pages: [[aTransaction({ category_id: GROCERIES.id, category_source: "user_manual" })]],
+    });
+    let releaseCategories;
+    const categoriesLater = new Promise((resolve) => {
+      releaseCategories = () => resolve(json(200, CATEGORIES));
+    });
+    const handler = (path, options) =>
+      path === "/categories" ? categoriesLater : api.handler(path, options);
+    const { fetchImpl } = renderWithSession(<TransactionsView />, { signedIn: true, handler });
+
+    // The transactions have arrived, the categories not yet: no rows.
+    await waitFor(() => expect(listRequests(fetchImpl)).toHaveLength(1));
+    expect(screen.getByText("Loading transactions…")).toBeInTheDocument();
+    expect(screen.queryByText("MOONCAFE", { selector: "p" })).not.toBeInTheDocument();
+
+    await act(async () => releaseCategories());
+
+    const row = (await screen.findByText("MOONCAFE", { selector: "p" })).closest("li");
+    expect(within(row).getByLabelText(/Category for/)).toHaveDisplayValue("Groceries");
+  });
+
+  it("keeps saying what was saved after the row has left a filtered list", async () => {
+    navigation.search = "category=uncategorized";
+    const target = aTransaction();
+    let filed = false;
+    const api = fakeApi({ pages: [[target]] });
+    const handler = (path, options) => {
+      if (path.startsWith("/transactions?") && filed) {
+        // Filed: it no longer matches "Not categorized yet".
+        return json(200, { items: [], next_cursor: null });
+      }
+      if ((options.method ?? "GET") === "PATCH") filed = true;
+      return api.handler(path, options);
+    };
+    renderWithSession(<TransactionsView />, { signedIn: true, handler });
+    const row = (await screen.findByText("MOONCAFE", { selector: "p" })).closest("li");
+
+    fireEvent.change(within(row).getByLabelText(/Category for/), { target: { value: SALARY.id } });
+    fireEvent.click(within(row).getByRole("button", { name: "Just this one" }));
+
+    await waitFor(() => expect(screen.queryByText("MOONCAFE", { selector: "p" })).not.toBeInTheDocument());
+    expect(screen.getByRole("status")).toHaveTextContent("Filed MOONCAFE as Salary.");
   });
 });

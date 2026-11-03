@@ -1,14 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "@/lib/api";
 import {
   UNCATEGORIZED,
   emptyFilters,
+  filtersErrorMessage,
   filtersFromSearchParams,
   hasFilters,
   isGuess,
+  refreshUntilSettled,
   searchParamsFromFilters,
   signedAmount,
-  similarKey,
+  similarRowsSettled,
   transactionsPath,
 } from "@/lib/transactions";
 
@@ -103,12 +106,82 @@ describe("what a row shows", () => {
     expect(isGuess(transaction)).toBe(expected);
   });
 
-  it("recognises similar transactions by UPI id first, then merchant", () => {
-    expect(similarKey({ counterparty_vpa: "asha@okaxis", merchant_key: "ASHA" })).toBe(
-      "asha@okaxis",
+});
+
+// Review of PR 37. The details below are copied from the real backend's
+// answers (asked with TestClient), not made up.
+describe("filtersErrorMessage", () => {
+  const validation = (details) =>
+    new ApiError({
+      status: 422,
+      code: "VALIDATION_ERROR",
+      message: "The request contains invalid data.",
+      details,
+    });
+
+  it("says the reason of a rule about the filters together, not the generic message", () => {
+    const error = validation([
+      { field: "query", message: "Value error, 'from' must not be later than 'to'" },
+    ]);
+    expect(filtersErrorMessage(error)).toBe("'from' must not be later than 'to'");
+  });
+
+  it("names the filter when one filter is wrong", () => {
+    const error = validation([
+      { field: "query.min_amount", message: "Decimal input should have no more than 2 decimal places" },
+    ]);
+    expect(filtersErrorMessage(error)).toBe(
+      "Smallest amount: Decimal input should have no more than 2 decimal places",
     );
-    expect(similarKey({ counterparty_vpa: null, merchant_key: "MOONCAFE" })).toBe("MOONCAFE");
-    // A cash withdrawal has neither: the "similar?" question isn't asked.
-    expect(similarKey({ counterparty_vpa: null, merchant_key: null })).toBeNull();
+  });
+
+  it("falls back to the usual message for any other error", () => {
+    const error = new ApiError({ status: 500, code: "INTERNAL_ERROR", message: "Something went wrong." });
+    expect(filtersErrorMessage(error)).toBe("Something went wrong.");
+  });
+});
+
+describe("after 'apply to similar'", () => {
+  const page = (...items) => ({ pages: [{ items, next_cursor: null }] });
+  const row = (overrides) => ({
+    similar_key: "MOONCAFE",
+    category_source: "none",
+    category_id: null,
+    ...overrides,
+  });
+
+  it("is settled once every similar row has the new category", () => {
+    const done = page(row({ category_id: "food", category_source: "user_rule" }));
+    expect(similarRowsSettled([done], "MOONCAFE", "food")).toBe(true);
+  });
+
+  it("is not settled while a similar row still waits for the rule", () => {
+    expect(similarRowsSettled([page(row({}))], "MOONCAFE", "food")).toBe(false);
+  });
+
+  it("ignores rows filed by hand (a rule never changes them) and other keys", () => {
+    const lists = [
+      page(row({ category_id: "rent", category_source: "user_manual" }), row({ similar_key: "OTHER" })),
+    ];
+    expect(similarRowsSettled(lists, "MOONCAFE", "food")).toBe(true);
+  });
+
+  it("refetches until settled, waiting longer each time", async () => {
+    const wait = vi.fn(async () => {});
+    const refetch = vi.fn(async () => {});
+    let calls = 0;
+    const settled = () => ++calls >= 3; // the job finishes during the 3rd wait
+
+    await expect(refreshUntilSettled({ refetch, settled, wait })).resolves.toBe(true);
+    expect(refetch).toHaveBeenCalledTimes(3);
+    expect(wait.mock.calls.map(([ms]) => ms)).toEqual([1000, 2000, 4000]);
+  });
+
+  it("gives up after the last delay when the job never shows", async () => {
+    const wait = vi.fn(async () => {});
+    const refetch = vi.fn(async () => {});
+
+    await expect(refreshUntilSettled({ refetch, settled: () => false, wait })).resolves.toBe(false);
+    expect(refetch).toHaveBeenCalledTimes(4); // 15 s in all, then the next focus refetch
   });
 });

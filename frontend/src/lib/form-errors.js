@@ -14,7 +14,9 @@ const BODY_PREFIX = "body.";
 // only once" (review of PR 34).
 const PYDANTIC_PREFIX = /^(Value error|Assertion failed), /;
 
-const readable = (message) => message.replace(PYDANTIC_PREFIX, "");
+/** A validation message without Pydantic's own wording in front. */
+export const readableMessage = (message) => (message ?? "").replace(PYDANTIC_PREFIX, "");
+const readable = readableMessage;
 
 const plural = (count, unit) => `${count} ${unit}${count === 1 ? "" : "s"}`;
 

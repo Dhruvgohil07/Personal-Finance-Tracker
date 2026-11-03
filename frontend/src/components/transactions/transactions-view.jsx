@@ -11,7 +11,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { Button } from "@/components/button";
 import { FormError } from "@/components/form-error";
@@ -21,6 +21,7 @@ import { useAccounts } from "@/lib/accounts";
 import { formErrorsFrom } from "@/lib/form-errors";
 import {
   emptyFilters,
+  filtersErrorMessage,
   filtersFromSearchParams,
   hasFilters,
   searchParamsFromFilters,
@@ -40,14 +41,24 @@ export function TransactionsView() {
   const accounts = useAccounts();
   const categories = useCategories();
   const transactions = useTransactions(filters);
+  // What the last change did ("Filed … as Groceries."), said ABOVE the list
+  // rather than in the row: in a filtered list ("Not categorized yet") the
+  // changed row leaves the list at once, and a message inside it would go
+  // with it, unseen and unannounced (review of PR 37).
+  const [announcement, setAnnouncement] = useState(null);
 
   function applyFilters(next) {
+    setAnnouncement(null);
     const query = searchParamsFromFilters(next).toString();
     router.push(query ? `${pathname}?${query}` : pathname, { scroll: false });
   }
 
   const nicknames = new Map((accounts.data ?? []).map((account) => [account.id, account.nickname]));
   const items = transactions.data?.pages.flatMap((page) => page.items) ?? [];
+  // The rows wait for the categories: each row's drop-down shows its
+  // category by id, and without the list of categories the browser would
+  // show every row as "Not categorized yet" (review of PR 37).
+  const ready = Boolean(transactions.data && categories.data);
   const setupError = accounts.error ?? categories.error;
 
   return (
@@ -68,15 +79,22 @@ export function TransactionsView() {
       ) : null}
 
       <section aria-label="Transactions list" className="flex flex-col gap-3">
-        {transactions.isPending ? <p role="status">Loading transactions…</p> : null}
-        {transactions.error ? (
-          <FormError message={formErrorsFrom(transactions.error).formError} />
+        {/* Always in the page, so screen readers announce what is put in
+            it; empty until something is saved. */}
+        <p role="status" className="text-sm">
+          {announcement}
+        </p>
+        {transactions.isPending || (transactions.data && categories.isPending) ? (
+          <p>Loading transactions…</p>
         ) : null}
-        {transactions.data && items.length === 0 ? (
+        {transactions.error ? (
+          <FormError message={filtersErrorMessage(transactions.error)} />
+        ) : null}
+        {ready && items.length === 0 ? (
           <EmptyState filtered={hasFilters(filters)} onClear={() => applyFilters(emptyFilters())} />
         ) : null}
 
-        {items.length > 0 ? (
+        {ready && items.length > 0 ? (
           <>
             {/* Column headings for the table layout; a phone shows cards,
                 so they are hidden there. aria-hidden: each row says what
@@ -96,7 +114,8 @@ export function TransactionsView() {
                   key={transaction.id}
                   transaction={transaction}
                   accountName={nicknames.get(transaction.account_id) ?? ""}
-                  categories={categories.data ?? []}
+                  categories={categories.data}
+                  onSaved={setAnnouncement}
                 />
               ))}
             </ul>

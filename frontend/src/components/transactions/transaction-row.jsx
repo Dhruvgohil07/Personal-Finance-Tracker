@@ -8,10 +8,14 @@
 // What it does:
 //   - shows the date, description, account, badges and the signed amount;
 //   - changes the category: when similar transactions can be recognised
-//     (a UPI id or a merchant), it first asks whether to file all of them
-//     the same way, then sends ONE request with the answer (decided with
-//     Dhruv);
+//     (the API's `similar_key`: a person's UPI id or a merchant), it first
+//     asks whether to file all of them the same way, then sends ONE
+//     request with the answer (decided with Dhruv);
 //   - adds, edits or removes the user's own note.
+//
+// What a save did is reported through `onSaved(message)` to the list,
+// which says it above itself: this row may leave a filtered list as soon
+// as it is saved. Errors stay here, since the row stays when a save fails.
 
 import { useId, useRef, useState } from "react";
 
@@ -25,7 +29,6 @@ import {
   NOT_CATEGORIZED_LABEL,
   isGuess,
   signedAmount,
-  similarKey,
   useUpdateTransaction,
 } from "@/lib/transactions";
 
@@ -42,7 +45,7 @@ function Badge({ children, tone = "neutral", title }) {
   );
 }
 
-export function TransactionRow({ transaction, accountName, categories }) {
+export function TransactionRow({ transaction, accountName, categories, onSaved }) {
   const update = useUpdateTransaction();
   // A category chosen but not saved yet, while the "similar?" question is
   // open. Shown in the drop-down meanwhile, so the choice doesn't jump back.
@@ -50,7 +53,6 @@ export function TransactionRow({ transaction, accountName, categories }) {
   const [editingNote, setEditingNote] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
   const [formError, setFormError] = useState(null);
-  const [notice, setNotice] = useState(null);
   // Blocks a second request while one is on its way (see LoginForm).
   const inFlight = useRef(false);
   const questionId = useId();
@@ -58,19 +60,20 @@ export function TransactionRow({ transaction, accountName, categories }) {
   const description = transaction.normalized_description || transaction.raw_description;
   const date = formatDate(transaction.txn_date);
   const categoryName = (id) => categories.find((category) => category.id === id)?.name ?? "";
-  const key = similarKey(transaction);
+  // What the learned rule would match, computed by the API from the same
+  // code that learns the rule; null: nothing to match, so don't ask.
+  const key = transaction.similar_key ?? null;
 
-  async function save(changes, afterwards = null) {
+  async function save(changes, message) {
     if (inFlight.current) {
       return;
     }
     inFlight.current = true;
     setFormError(null);
-    setNotice(null);
     try {
       await update.mutateAsync({ id: transaction.id, changes });
       setPendingCategory(null);
-      setNotice(afterwards);
+      onSaved(message);
       return true;
     } catch (error) {
       setFormError(formErrorsFrom(error).formError);
@@ -90,16 +93,24 @@ export function TransactionRow({ transaction, accountName, categories }) {
     if (chosen !== null && key !== null) {
       setPendingCategory(chosen); // ask first
     } else {
-      save({ category_id: chosen });
+      save({ category_id: chosen }, filedMessage(chosen));
     }
   }
 
   async function saveNote(event) {
     event.preventDefault();
     // An empty note removes it (null), as the API documents.
-    if (await save({ notes: noteDraft.trim() || null })) {
+    const notes = noteDraft.trim() || null;
+    if (await save({ notes }, notes ? `Note saved on ${description}.` : `Note removed from ${description}.`)) {
       setEditingNote(false);
     }
+  }
+
+  // "Filed SWIGGY as Food & Dining." / "SWIGGY is not categorized now."
+  function filedMessage(categoryId) {
+    return categoryId === null
+      ? `${description} is not categorized now.`
+      : `Filed ${description} as ${categoryName(categoryId)}.`;
   }
 
   const shownCategory = pendingCategory ?? transaction.category_id ?? "";
@@ -193,7 +204,7 @@ export function TransactionRow({ transaction, accountName, categories }) {
                 onClick={() =>
                   save(
                     { category_id: pendingCategory, apply_to_similar: true },
-                    "Done. Similar transactions are being updated too.",
+                    `Filed every transaction from ${key} as ${categoryName(pendingCategory)}. The others are being updated.`,
                   )
                 }
                 disabled={update.isPending}
@@ -202,7 +213,7 @@ export function TransactionRow({ transaction, accountName, categories }) {
               </Button>
               <Button
                 variant="secondary"
-                onClick={() => save({ category_id: pendingCategory })}
+                onClick={() => save({ category_id: pendingCategory }, filedMessage(pendingCategory))}
                 disabled={update.isPending}
               >
                 Just this one
@@ -214,11 +225,6 @@ export function TransactionRow({ transaction, accountName, categories }) {
           </div>
         ) : null}
         <FormError message={formError} />
-        {notice ? (
-          <p role="status" className="text-muted text-xs">
-            {notice}
-          </p>
-        ) : null}
       </div>
 
       <p
