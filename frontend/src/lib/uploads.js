@@ -78,6 +78,15 @@ export function isPdf(file) {
 }
 
 /**
+ * A CSV needs a column mapping (Phase 3 Step 7): no bank parser reads CSVs
+ * yet, so the user says which column is which. By name or by type, since
+ * Windows may report a CSV as "application/vnd.ms-excel".
+ */
+export function isCsv(file) {
+  return Boolean(file) && (/\.csv$/i.test(file.name) || file.type === "text/csv");
+}
+
+/**
  * Why `file` can't be uploaded, as a sentence for the user, or null if it
  * can. Size only: the type is checked by the backend, which looks at the
  * file's content rather than its name.
@@ -259,11 +268,14 @@ export function useUnfinishedUploadsPolling() {
 }
 
 /**
- * Upload a statement: `mutateAsync({ file, accountId, password })`.
+ * Upload a statement: `mutateAsync({ file, accountId, password, columnMapping })`.
  *
  * Sent as a multipart form (FormData), the one request in the app that
  * isn't JSON: it carries a file. `password` is added only when one was
  * typed; it goes to the API once and is never kept (CLAUDE.md §7.2).
+ * `columnMapping` (a CSV's, see src/lib/column-mapping.js) travels as a
+ * JSON string, because a multipart form has no nested objects; the backend
+ * validates it with its ColumnMappingRequest model.
  *
  * After a 409 that names an upload (`details.upload_id`), that upload
  * exists, so the list is refetched too: a locked PDF sent without its
@@ -273,12 +285,15 @@ export function useCreateUpload() {
   const { client } = useAuth();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ file, accountId, password }) => {
+    mutationFn: ({ file, accountId, password, columnMapping }) => {
       const form = new FormData();
       form.append("file", file);
       form.append("account_id", accountId);
       if (password) {
         form.append("password", password);
+      }
+      if (columnMapping) {
+        form.append("column_mapping", JSON.stringify(columnMapping));
       }
       return client.request("/uploads", { method: "POST", body: form });
     },

@@ -638,3 +638,149 @@ describe("HomePage: review fixes", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
+
+// Phase 3 Step 7: a CSV is uploaded with a column mapping.
+const csvFile = (text, name = "statement.csv") => new File([text], name, { type: "text/csv" });
+
+const TWO_COLUMN_CSV = [
+  "Synthetic Bank - account statement",
+  "Date,Narration,Withdrawal,Deposit,Balance",
+  "05/08/2026,UPI SHOP,70.00,,930.00",
+  "25/08/2026,SALARY,,500.00,1430.00",
+  "",
+].join("\n");
+
+describe("UploadsView: a CSV and its columns", () => {
+  it("pre-fills the mapping from the file's column names and sends it", async () => {
+    const { fetchImpl } = await renderUploads(fakeUploadsApi());
+
+    chooseFile(csvFile(TWO_COLUMN_CSV));
+
+    // Read in the browser: the title row above the table is skipped.
+    expect(await screen.findByLabelText("Date column")).toHaveDisplayValue("Date");
+    expect(screen.getByLabelText("Description column")).toHaveDisplayValue("Narration");
+    expect(screen.getByLabelText("Money out column")).toHaveDisplayValue("Withdrawal");
+    expect(screen.getByLabelText("Money in column")).toHaveDisplayValue("Deposit");
+    expect(screen.getByLabelText("Balance column (optional)")).toHaveDisplayValue("Balance");
+    // 25/08 can only be day-first, so the format is chosen too...
+    expect(screen.getByLabelText("Date format")).toHaveDisplayValue("01/08/2026");
+    // ...and the preview shows the dates as they will be read.
+    expect(screen.getByText("5 Aug 2026")).toBeInTheDocument();
+    expect(screen.getByText("25 Aug 2026")).toBeInTheDocument();
+
+    fireEvent.click(uploadButton());
+
+    await waitFor(() => expect(requestsTo(fetchImpl, "POST", "/uploads")).toHaveLength(1));
+    const [[, options]] = requestsTo(fetchImpl, "POST", "/uploads");
+    expect(JSON.parse(options.body.get("column_mapping"))).toEqual({
+      date_column: "Date",
+      description_column: "Narration",
+      date_format: "%d/%m/%Y",
+      debit_column: "Withdrawal",
+      credit_column: "Deposit",
+      balance_column: "Balance",
+    });
+  });
+
+  it("makes the user choose when a date could be day-first or month-first", async () => {
+    const { fetchImpl } = await renderUploads(fakeUploadsApi());
+    chooseFile(csvFile("Date,Description,Amount\n01/08/2026,SHOP,-70.00\n"));
+
+    const format = await screen.findByLabelText("Date format");
+    expect(format).toHaveDisplayValue("Choose a format");
+    fireEvent.click(uploadButton());
+
+    expect(await screen.findByText("Choose how the dates are written.")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Check the column choices below.");
+    expect(requestsTo(fetchImpl, "POST", "/uploads")).toHaveLength(0);
+
+    // Month first: the preview says 8 January, so the mistake is visible.
+    fireEvent.change(format, { target: { value: "%m/%d/%Y" } });
+    expect(screen.getByText("8 Jan 2026")).toBeInTheDocument();
+  });
+
+  it("sends one signed amount column when the file has one", async () => {
+    const { fetchImpl } = await renderUploads(fakeUploadsApi());
+    chooseFile(csvFile("Date,Description,Amount\n25/08/2026,SHOP,-70.00\n"));
+
+    expect(await screen.findByLabelText("How are amounts written?")).toHaveDisplayValue(
+      "One column: a minus sign means money out",
+    );
+    expect(screen.getByLabelText("Amount column")).toHaveDisplayValue("Amount");
+    fireEvent.click(uploadButton());
+
+    await waitFor(() => expect(requestsTo(fetchImpl, "POST", "/uploads")).toHaveLength(1));
+    const [[, options]] = requestsTo(fetchImpl, "POST", "/uploads");
+    expect(JSON.parse(options.body.get("column_mapping"))).toEqual({
+      date_column: "Date",
+      description_column: "Description",
+      date_format: "%d/%m/%Y",
+      amount_column: "Amount",
+    });
+  });
+
+  it("refuses a column chosen twice before sending anything", async () => {
+    const { fetchImpl } = await renderUploads(fakeUploadsApi());
+    chooseFile(csvFile(TWO_COLUMN_CSV));
+
+    fireEvent.change(await screen.findByLabelText("Money in column"), {
+      target: { value: "Withdrawal" },
+    });
+    fireEvent.click(uploadButton());
+
+    expect(
+      screen.getByText("This column is already used above. Each column can be used once."),
+    ).toBeInTheDocument();
+    expect(requestsTo(fetchImpl, "POST", "/uploads")).toHaveLength(0);
+  });
+
+  it("shows the backend's complaint about a mapping field under that field", async () => {
+    const api = fakeUploadsApi({
+      createError: () =>
+        apiError(422, "VALIDATION_ERROR", "The request contains invalid data.", {
+          details: [
+            {
+              field: "body.column_mapping.date_format",
+              message: "Value error, is not a valid date format (e.g. %d/%m/%Y)",
+            },
+          ],
+        }),
+    });
+    await renderUploads(api);
+    chooseFile(csvFile(TWO_COLUMN_CSV));
+    await screen.findByLabelText("Date column");
+
+    fireEvent.click(uploadButton());
+
+    const message = await screen.findByText(/is not a valid date format/);
+    expect(screen.getByLabelText("Date format")).toHaveAccessibleDescription(
+      expect.stringContaining("is not a valid date format"),
+    );
+    expect(message).toBeInTheDocument();
+  });
+
+  it("explains a CSV whose column names can't be found, and sends nothing", async () => {
+    const { fetchImpl } = await renderUploads(fakeUploadsApi());
+
+    chooseFile(csvFile("12345\n67890\n"));
+
+    expect(await screen.findByText(/couldn't find the column names/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Date column")).not.toBeInTheDocument();
+    fireEvent.click(uploadButton());
+    expect(requestsTo(fetchImpl, "POST", "/uploads")).toHaveLength(0);
+  });
+
+  it("drops the mapping when another kind of file is chosen", async () => {
+    const { fetchImpl } = await renderUploads(fakeUploadsApi());
+    chooseFile(csvFile(TWO_COLUMN_CSV));
+    await screen.findByLabelText("Date column");
+
+    chooseFile(fakeFile("october.xls"));
+    expect(screen.queryByLabelText("Date column")).not.toBeInTheDocument();
+    fireEvent.click(uploadButton());
+
+    await waitFor(() => expect(requestsTo(fetchImpl, "POST", "/uploads")).toHaveLength(1));
+    const [[, options]] = requestsTo(fetchImpl, "POST", "/uploads");
+    expect(options.body.has("column_mapping")).toBe(false);
+  });
+});
