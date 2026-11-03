@@ -19,6 +19,13 @@ from app.utils.money import MoneyParseError, format_inr, parse_amount_to_paise
         # Commas: Indian and Western grouping both work
         ("1,25,000.00", 12500000),
         ("125,000.00", 12500000),
+        ("1,000", 100000),  # both groupings at once
+        ("12,34,56,789.50", 123456789_50),  # crores
+        ("1,23,45,678", 12345678_00),
+        ("1,000,000.00", 1000000_00),
+        ("99,999", 99999_00),
+        # Spaces inside the number are dropped, as before
+        ("1 250.00", 125000),
         # Surrounding whitespace
         ("  1,250.00  ", 125000),
         # Currency prefixes
@@ -64,6 +71,34 @@ def test_blank_cell_is_none(text: str | None) -> None:
     ],
 )
 def test_parse_invalid_amounts_raise(text: str) -> None:
+    with pytest.raises(MoneyParseError):
+        parse_amount_to_paise(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A decimal comma, usual in semicolon CSVs. Read as a separator it
+        # was 100 times the amount: "70,00" became Rs 7,000.00 (review of
+        # PR 34). No grouping ends with two digits, so it is refused.
+        "70,00",
+        "-70,00",
+        "70,00 Dr",
+        "1.234,56",  # European: dots group, the comma is the decimal point
+        "1 250,00",  # the same with a space as the separator
+        "1000,00",
+        # Commas that group nothing an amount is written with
+        "1,2,3",
+        "1,,000",
+        ",500",
+        "1000,",
+        "12,3456",
+        "1234,567",  # the first group of either style is at most 3 digits
+        "1,234,56,789",  # starts international, continues Indian: neither
+        "1.25,0",  # a comma after the decimal point
+    ],
+)
+def test_amounts_whose_commas_are_not_a_grouping_are_refused(text: str) -> None:
     with pytest.raises(MoneyParseError):
         parse_amount_to_paise(text)
 

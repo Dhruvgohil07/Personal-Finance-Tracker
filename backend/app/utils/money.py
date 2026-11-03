@@ -18,10 +18,26 @@ Two public functions:
 import re
 from decimal import Decimal
 
-# After cleaning, a valid amount is digits with at most 2 decimal places.
-# We check this ourselves because Decimal() also accepts strings like
-# "NaN", "Infinity" and "1e5", which are never valid statement amounts.
-_NUMBER = re.compile(r"\d+(\.\d{1,2})?")
+# After cleaning, a valid amount is digits with at most 2 decimal places,
+# and any commas must group the digits the way an amount is really written:
+#
+#   1250 / 1250.50    no commas
+#   1,25,000.00       Indian: the last 3 digits, then pairs (lakh, crore)
+#   125,000.00        international: groups of 3
+#
+# Anything else is refused rather than guessed. "70,00" is ₹70.00 written
+# with a DECIMAL comma (usual in semicolon CSVs); dropping the comma as a
+# separator turned it into ₹7,000.00, silently, and a balance column
+# scaled the same way hid it from reconciliation (review of PR 34). No
+# grouping puts two digits after the last comma, so it can't be read as
+# one. We check the shape ourselves because Decimal() also accepts
+# strings like "NaN", "Infinity" and "1e5", never valid statement amounts.
+_NUMBER = re.compile(
+    r"(\d+"  # 1250
+    r"|\d{1,2}(,\d{2})*,\d{3}"  # 1,25,000 (also 1,000)
+    r"|\d{1,3}(,\d{3})+)"  # 125,000 / 1,000,000
+    r"(\.\d{1,2})?"  # .5 / .50
+)
 
 # Currency markers that may appear before the number: "₹", "Rs", "Rs.", "INR".
 _CURRENCY_PREFIX = re.compile(r"^(₹|rs\.?|inr)\s*", re.IGNORECASE)
@@ -46,7 +62,7 @@ def parse_amount_to_paise(text: str | None) -> int | None:
     Negative means debit / money out; positive means credit / money in.
 
     Handles:
-        "1,250.50"      -> 125050      (commas, any grouping)
+        "1,250.50"      -> 125050      (commas: Indian or international grouping)
         "₹ 1,250"       -> 125000      (currency prefix)
         "1,250.50 Cr"   -> 125050      (Cr = credit, positive)
         "1,250.50 Dr"   -> -125050     (Dr = debit, negative)
@@ -55,8 +71,9 @@ def parse_amount_to_paise(text: str | None) -> int | None:
         "" / "   "      -> None        (blank cell)
 
     Raises MoneyParseError for anything else, e.g. "abc", "12.345" (three
-    decimal places would silently lose money if rounded), or "(100) Cr"
-    (two signs that contradict each other).
+    decimal places would silently lose money if rounded), "70,00" (a
+    decimal comma: read as grouping it would be 100 times too much), or
+    "(100) Cr" (two signs that contradict each other).
     """
     if text is None or not text.strip():
         return None
@@ -84,13 +101,15 @@ def parse_amount_to_paise(text: str | None) -> int | None:
         negative = cleaned[0] == "-"
         cleaned = cleaned[1:].strip()
 
-    # 3. Currency prefix, then thousands separators and inner spaces.
+    # 3. Currency prefix and inner spaces.
     cleaned = _CURRENCY_PREFIX.sub("", cleaned)
-    cleaned = cleaned.replace(",", "").replace(" ", "")
+    cleaned = cleaned.replace(" ", "")
 
-    # 4. What's left must be a plain number.
+    # 4. What's left must be a number, its commas (if any) a real grouping;
+    #    only then are they dropped.
     if not _NUMBER.fullmatch(cleaned):
         raise MoneyParseError("not a valid amount")
+    cleaned = cleaned.replace(",", "")
 
     # Exact: at most 2 decimal places, so "x 100" always gives a whole number.
     paise = int(Decimal(cleaned) * 100)
