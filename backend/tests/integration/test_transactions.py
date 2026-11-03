@@ -282,6 +282,8 @@ def test_the_response_describes_one_transaction_fully(
             "channel": "other",
             "counterparty_vpa": None,
             "merchant_key": None,
+            # No UPI id and no merchant: nothing to recognise similar rows by.
+            "similar_key": None,
             # Nothing has categorized this row yet.
             "category_id": None,
             "category_source": "none",

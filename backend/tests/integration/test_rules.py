@@ -733,3 +733,56 @@ def test_an_update_that_changes_nothing_does_not_rerun(
 
     client.patch(url, json={"priority": 5}, headers=alice)
     assert len(enqueued) == 1
+
+
+# --- similar_key: what the client asks about (review of PR 37) ------------
+
+
+def similar_keys_shown(client: TestClient, headers: dict[str, str]) -> dict[str, str | None]:
+    """Each listed row's `similar_key`, by transaction id."""
+    response = client.get("/api/v1/transactions", headers=headers)
+    assert response.status_code == 200
+    return {item["id"]: item["similar_key"] for item in response.json()["items"]}
+
+
+@pytest.mark.parametrize("index", [ASHA_1, MOON, SWIGGY])
+def test_the_similar_key_shown_is_the_pattern_the_learned_rule_uses(
+    client: TestClient, db: Session, alice: dict[str, str], tmp_path: Path, index: int
+) -> None:
+    """The invariant the field exists for: the X in "file every transaction
+    from X as Y?" is exactly what the rule then matches. The browser used to
+    guess it, preferring the UPI id, which is wrong for Swiggy (a merchant
+    paid over UPI: the rule matches the merchant, not the handle)."""
+    row = rows_of(db, import_rows(client, alice, tmp_path))[index]
+    shown = similar_keys_shown(client, alice)[str(row.id)]
+
+    response = patch_similar(client, alice, row, system_id(db, "food-dining"))
+
+    assert response.status_code == 200
+    assert response.json()["similar_key"] == shown  # the PATCH answer says the same
+    rules = client.get(RULES, headers=alice).json()
+    assert [rule["pattern"] for rule in rules] == [shown]
+
+
+def test_a_merchant_paid_over_upi_is_matched_by_the_merchant_not_the_handle(
+    client: TestClient, db: Session, alice: dict[str, str], tmp_path: Path
+) -> None:
+    row = rows_of(db, import_rows(client, alice, tmp_path))[SWIGGY]
+
+    shown = similar_keys_shown(client, alice)[str(row.id)]
+
+    assert row.counterparty_vpa is not None
+    assert shown != row.counterparty_vpa
+    assert shown == row.merchant_key
+
+
+def test_a_row_with_nothing_to_match_has_no_similar_key(
+    client: TestClient, db: Session, alice: dict[str, str], tmp_path: Path
+) -> None:
+    """Cash: no UPI id, no merchant. null tells the client not to ask, since
+    apply_to_similar would answer 400 NOTHING_TO_MATCH."""
+    row = rows_of(db, import_rows(client, alice, tmp_path))[CASH]
+
+    assert similar_keys_shown(client, alice)[str(row.id)] is None
+    response = patch_similar(client, alice, row, system_id(db, "food-dining"))
+    assert response.status_code == 400

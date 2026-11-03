@@ -70,6 +70,8 @@ class TransactionList:
     rows: list[Transaction]
     # None means "this was the last page".
     next_cursor: str | None
+    # Each row's `similar_key` (see `similar_key` below), by row id.
+    similar_keys: dict[uuid.UUID, str | None]
 
 
 def list_transactions(
@@ -104,13 +106,27 @@ def list_transactions(
     rows = list(db.scalars(stmt.limit(filters.limit + 1)))
 
     if len(rows) <= filters.limit:
-        return TransactionList(rows=rows, next_cursor=None)
+        return TransactionList(
+            rows=rows, next_cursor=None, similar_keys=rules_service.similar_keys(db, rows)
+        )
 
     page = rows[: filters.limit]
     last = page[-1]
     return TransactionList(
-        rows=page, next_cursor=encode_cursor(last.txn_date, last.statement_seq, last.id)
+        rows=page,
+        next_cursor=encode_cursor(last.txn_date, last.statement_seq, last.id),
+        similar_keys=rules_service.similar_keys(db, page),
     )
+
+
+def similar_key(db: Session, transaction: Transaction) -> str | None:
+    """What `apply_to_similar` would recognise rows like this one by.
+
+    A person's UPI id or a merchant key, None when nothing could match. The
+    client shows it in its "file every transaction from X as Y?" question,
+    so the X is the one the learned rule will really use (review of PR 37).
+    """
+    return rules_service.similar_keys(db, [transaction])[transaction.id]
 
 
 def get_transaction(db: Session, user_id: uuid.UUID, transaction_id: uuid.UUID) -> Transaction:

@@ -26,6 +26,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.categorizer.handlers import RuleMatchType
 from app.categorizer.learning import learned_rule_key
 from app.core.errors import ConflictError, NotFoundError, NothingToMatchError
 from app.db.errors import violates_constraint
@@ -131,6 +132,37 @@ def delete_rule(db: Session, queue: Queue, user_id: uuid.UUID, rule_id: uuid.UUI
 # --- Learning from a correction (SPEC §8.1) -------------------------------
 
 
+def _rule_match(
+    transaction: Transaction, dictionary_keys: list[str]
+) -> tuple[RuleMatchType, str] | None:
+    """The (match type, pattern) a rule learned from this row would use.
+
+    The one place that decides it, for `learn_rule` (which writes the rule)
+    and `similar_keys` (which tells the client beforehand), so what the
+    user is asked about and what is saved can never differ.
+    """
+    key = dictionary_key(transaction.merchant_key, dictionary_keys)
+    return learned_rule_key(categorization_service.facts_of(transaction, key))
+
+
+def similar_keys(db: Session, transactions: list[Transaction]) -> dict[uuid.UUID, str | None]:
+    """For each row: what `apply_to_similar` would recognise similar rows by.
+
+    A person's UPI id, or a merchant key; None when there is nothing to
+    match, in which case `apply_to_similar` answers 400 NOTHING_TO_MATCH.
+    Shown so the client can ask "file every transaction from X as Y?"
+    with the X the rule will really match (review of PR 37: the browser
+    used to guess it, preferring the UPI id, while the rule uses it only
+    for a person). The merchant dictionary is read once for the batch.
+    """
+    dictionary = categorization_service.merchant_keys(db)
+    result: dict[uuid.UUID, str | None] = {}
+    for transaction in transactions:
+        match = _rule_match(transaction, dictionary)
+        result[transaction.id] = None if match is None else match[1]
+    return result
+
+
 def learn_rule(db: Session, user_id: uuid.UUID, transaction: Transaction) -> uuid.UUID:
     """Write (or update) the rule that files rows like this one in its category.
 
@@ -145,8 +177,7 @@ def learn_rule(db: Session, user_id: uuid.UUID, transaction: Transaction) -> uui
     it exists, updates that one instead - atomically, so two corrections at
     the same moment cannot both insert. Returns the rule's id.
     """
-    key = dictionary_key(transaction.merchant_key, categorization_service.merchant_keys(db))
-    match = learned_rule_key(categorization_service.facts_of(transaction, key))
+    match = _rule_match(transaction, categorization_service.merchant_keys(db))
     if match is None:
         raise NothingToMatchError()
     match_type, pattern = match
