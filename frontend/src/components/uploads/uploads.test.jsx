@@ -1,8 +1,9 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { UploadsView } from "@/components/uploads/uploads-view";
-import { MAX_UPLOAD_BYTES } from "@/lib/uploads";
+import { UploadsWatcher } from "@/components/uploads/uploads-watcher";
+import { MAX_UPLOAD_BYTES, UPLOADS_QUERY_KEY } from "@/lib/uploads";
 import { apiError, json, renderWithSession } from "@/test/session";
 
 import HomePage from "@/app/(app)/page";
@@ -172,8 +173,22 @@ function chooseFile(file) {
 
 const uploadButton = () => screen.getByRole("button", { name: "Upload statement" });
 
+// A page as the signed-in layout renders it: with the UploadsWatcher next
+// to it, which does the polling.
+function withWatcher(page) {
+  return (
+    <>
+      <UploadsWatcher />
+      {page}
+    </>
+  );
+}
+
 async function renderUploads(api) {
-  const rendered = renderWithSession(<UploadsView />, { signedIn: true, handler: api.handler });
+  const rendered = renderWithSession(withWatcher(<UploadsView />), {
+    signedIn: true,
+    handler: api.handler,
+  });
   await screen.findByRole("heading", { name: "Upload a statement" });
   return rendered;
 }
@@ -498,7 +513,7 @@ describe("UploadsView: deleting", () => {
 
 describe("HomePage: the first statement", () => {
   it("asks for the first statement, then shows what it imported", async () => {
-    renderWithSession(<HomePage />, {
+    renderWithSession(withWatcher(<HomePage />), {
       signedIn: true,
       handler: fakeUploadsApi().handler,
     });
@@ -517,7 +532,7 @@ describe("HomePage: the first statement", () => {
   });
 
   it("shows only the latest upload once there are several", async () => {
-    renderWithSession(<HomePage />, {
+    renderWithSession(withWatcher(<HomePage />), {
       signedIn: true,
       handler: fakeUploadsApi({
         uploads: [
@@ -529,5 +544,97 @@ describe("HomePage: the first statement", () => {
 
     expect(await screen.findByText("november.xls")).toBeInTheDocument();
     expect(screen.queryByText("october.xls")).not.toBeInTheDocument();
+  });
+});
+
+// Review of PR 33.
+const RENT = { ...SALARY, id: "22222222-2222-4222-8222-222222222222", nickname: "Rent" };
+
+describe("UploadsView: review fixes", () => {
+  it("uploads into the account the drop-down shows after the chosen one is deleted", async () => {
+    const api = fakeUploadsApi({ accounts: [SALARY, RENT] });
+    const { fetchImpl, queryClient } = await renderUploads(api);
+    expect(screen.getByLabelText("Account")).toHaveDisplayValue("Salary account (•••• 4321)");
+
+    // Salary is deleted elsewhere (another tab); this tab refetches.
+    api.state.accounts = [RENT];
+    await act(() => queryClient.invalidateQueries({ queryKey: ["accounts"] }));
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("Account")).toHaveDisplayValue("Rent (•••• 4321)"),
+    );
+    chooseFile(fakeFile("october.xls"));
+    fireEvent.click(uploadButton());
+
+    await waitFor(() => expect(requestsTo(fetchImpl, "POST", "/uploads")).toHaveLength(1));
+    const [[, options]] = requestsTo(fetchImpl, "POST", "/uploads");
+    expect(options.body.get("account_id")).toBe(RENT.id);
+  });
+
+  it("keeps browsers' password managers out of both statement password fields", async () => {
+    const api = fakeUploadsApi({
+      uploads: [anUpload({ original_filename: "locked.pdf", status: "needs_password" })],
+    });
+    await renderUploads(api);
+
+    chooseFile(fakeFile("october.pdf", { type: "application/pdf" }));
+
+    // "off" is ignored on password fields; see STATEMENT_PASSWORD_AUTOCOMPLETE.
+    expect(screen.getByLabelText("PDF password (if it has one)")).toHaveAttribute(
+      "autocomplete",
+      "one-time-code",
+    );
+    expect(await screen.findByLabelText("Password for locked.pdf")).toHaveAttribute(
+      "autocomplete",
+      "one-time-code",
+    );
+  });
+});
+
+describe("UploadsWatcher", () => {
+  it("polls an upload that isn't on screen until its import is done", async () => {
+    const older = anUpload({
+      id: "aaaaaaaa-0000-4000-8000-0000000000a2",
+      original_filename: "september.xls",
+      status: "pending",
+      rows_parsed: 0,
+      rows_inserted: 0,
+      rows_duplicate: 0,
+    });
+    const api = fakeUploadsApi({
+      uploads: [anUpload({ original_filename: "october.xls" }), older],
+    });
+    api.state.scripts.set(older.id, [IMPORTED]);
+    // The home page shows only the latest upload, october.xls...
+    const { fetchImpl, queryClient } = renderWithSession(withWatcher(<HomePage />), {
+      signedIn: true,
+      handler: api.handler,
+    });
+    expect(await screen.findByText("october.xls")).toBeInTheDocument();
+    expect(screen.queryByText("september.xls")).not.toBeInTheDocument();
+
+    // ...but september.xls is still polled, and its result reaches the list.
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData(UPLOADS_QUERY_KEY).find((u) => u.id === older.id).status,
+      ).toBe("completed"),
+    );
+    expect(requestsTo(fetchImpl, "GET", `/uploads/${older.id}`).length).toBeGreaterThan(0);
+  });
+});
+
+describe("HomePage: review fixes", () => {
+  it("shows the first-account step even when GET /uploads fails", async () => {
+    const api = fakeUploadsApi({ accounts: [] });
+    renderWithSession(withWatcher(<HomePage />), {
+      signedIn: true,
+      handler: (path, options) =>
+        path === "/uploads"
+          ? apiError(500, "INTERNAL_ERROR", "Something went wrong.")
+          : api.handler(path, options),
+    });
+
+    expect(await screen.findByText("Add your first account")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

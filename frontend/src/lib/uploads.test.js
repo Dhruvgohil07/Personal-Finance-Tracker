@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
+import { ApiError } from "@/lib/api";
 import {
   MAX_UPLOAD_BYTES,
   MAX_UPLOAD_MB,
   fileProblem,
   isPdf,
   isUnfinished,
+  pollDelayMs,
   reviewSummary,
 } from "@/lib/uploads";
 
@@ -116,5 +118,47 @@ describe("reviewSummary", () => {
   it("copes with no issue list (nothing could be checked)", () => {
     const upload = { reconciliation_errors: 0, reconciliation_issues: null };
     expect(reviewSummary(upload)).toEqual({ rows: [], statementIssues: [], more: 0 });
+  });
+});
+
+describe("pollDelayMs", () => {
+  const tooMany = (retryAfterSeconds) =>
+    new ApiError({ status: 429, code: "RATE_LIMITED", message: "Too many.", retryAfterSeconds });
+
+  it("waits as long as the API's Retry-After for a single upload", () => {
+    expect(pollDelayMs({ retryAfterSeconds: 2, error: null, unfinishedCount: 1 })).toBe(2000);
+  });
+
+  it("shares the pace among several uploads, so the total stays the same", () => {
+    // 6 uploads, each every 12 s: still one request every 2 s in all,
+    // 30 a minute, well inside the 120/minute poll limit.
+    expect(pollDelayMs({ retryAfterSeconds: 2, error: null, unfinishedCount: 6 })).toBe(12_000);
+  });
+
+  it("stops once an answer has no Retry-After (a final status)", () => {
+    expect(pollDelayMs({ retryAfterSeconds: null, error: null, unfinishedCount: 1 })).toBe(false);
+  });
+
+  it("backs off for as long as a 429 says, ahead of the regular pace", () => {
+    expect(pollDelayMs({ retryAfterSeconds: 2, error: tooMany(45), unfinishedCount: 1 })).toBe(
+      45_000,
+    );
+  });
+
+  it("waits a minute after a 429 that doesn't say how long", () => {
+    expect(pollDelayMs({ retryAfterSeconds: 2, error: tooMany(null), unfinishedCount: 1 })).toBe(
+      60_000,
+    );
+  });
+
+  it("keeps polling on another error, at the last known pace", () => {
+    const serverError = new ApiError({ status: 500, code: "INTERNAL_ERROR", message: "Oops." });
+    expect(pollDelayMs({ retryAfterSeconds: 2, error: serverError, unfinishedCount: 1 })).toBe(
+      2000,
+    );
+  });
+
+  it("never returns 0, which TanStack Query would read as 'stop'", () => {
+    expect(pollDelayMs({ retryAfterSeconds: 0, error: null, unfinishedCount: 1 })).toBe(1000);
   });
 });

@@ -5,7 +5,7 @@
 // upload) and the home page (the latest one).
 //
 // What it shows, by status:
-//   pending / processing  "Importing…", while useUploadPolling asks again
+//   pending / processing  "Importing…" (UploadsWatcher polls it meanwhile)
 //   completed             how many transactions were added / already there
 //   needs_review          the same, plus the rows whose balances don't add up
 //   failed                the backend's error_message, written for the user
@@ -19,12 +19,12 @@ import { FormField } from "@/components/form-field";
 import { formatDateTime, formatPeriod } from "@/lib/dates";
 import { formErrorsFrom } from "@/lib/form-errors";
 import {
+  STATEMENT_PASSWORD_AUTOCOMPLETE,
   STATUS_LABELS,
   isUnfinished,
   reviewSummary,
   useDeleteUpload,
   useUnlockUpload,
-  useUploadPolling,
 } from "@/lib/uploads";
 
 const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
@@ -40,9 +40,9 @@ const BADGE_CLASSES = {
 };
 
 export function UploadItem({ upload, accountName }) {
-  // Asks GET /uploads/{id} again while the import runs; every answer
-  // updates `upload` through the cached list (see src/lib/uploads.js).
-  useUploadPolling(upload);
+  // No polling here: UploadsWatcher (in the signed-in layout) polls every
+  // unfinished upload and writes the answers into the cached list, which
+  // re-renders this item with the newer `upload`.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   return (
@@ -194,7 +194,7 @@ function UnlockForm({ upload }) {
         name="password"
         type="password"
         required
-        autoComplete="off"
+        autoComplete={STATEMENT_PASSWORD_AUTOCOMPLETE}
         value={password}
         onChange={(event) => setPassword(event.target.value)}
         hint="This PDF is locked. The email your bank sent it with usually explains its password. It is used once to open the file and never stored."
