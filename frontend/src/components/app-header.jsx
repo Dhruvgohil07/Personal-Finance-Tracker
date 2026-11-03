@@ -13,6 +13,7 @@ import { useMe } from "@/lib/me";
 
 const NAV_LINKS = [
   { href: "/", label: "Home" },
+  { href: "/uploads", label: "Uploads" },
   { href: "/accounts", label: "Accounts" },
 ];
 

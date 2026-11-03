@@ -336,11 +336,16 @@ describe("AccountsView: screen readers", () => {
 });
 
 describe("HomePage: first run", () => {
-  it("asks a new user for their first account, then welcomes them", async () => {
+  // No uploads yet: the step after the first account is the first upload,
+  // which src/components/uploads/uploads.test.jsx follows further.
+  const noUploads = { "/uploads": () => json(200, []) };
+
+  it("asks a new user for their first account, then for their first statement", async () => {
     renderWithSession(<HomePage />, {
       signedIn: true,
       handler: fakeAccountsApi().handler,
       routes: {
+        ...noUploads,
         "/me": () =>
           json(200, {
             id: "u1",
@@ -356,17 +361,20 @@ describe("HomePage: first run", () => {
     fillAccountForm();
     fireEvent.click(screen.getByRole("button", { name: "Add my first account" }));
 
-    expect(await screen.findByText(/You have 1 account\./)).toBeInTheDocument();
+    expect(await screen.findByText("Upload your first statement")).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Welcome, Asha");
     expect(screen.queryByText("Add your first account")).not.toBeInTheDocument();
+    // The new account is already chosen in the upload form.
+    expect(screen.getByLabelText("Account")).toHaveDisplayValue("Rent account (•••• 9876)");
   });
 
-  it("goes straight to the welcome when there already are accounts", async () => {
+  it("goes straight to the upload step when there already are accounts", async () => {
     renderWithSession(<HomePage />, {
       signedIn: true,
       handler: fakeAccountsApi([SALARY]).handler,
+      routes: noUploads,
     });
 
-    expect(await screen.findByText(/You have 1 account\./)).toBeInTheDocument();
+    expect(await screen.findByText("Upload your first statement")).toBeInTheDocument();
   });
 });

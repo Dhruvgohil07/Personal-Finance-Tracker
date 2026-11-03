@@ -1,0 +1,533 @@
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+
+import { UploadsView } from "@/components/uploads/uploads-view";
+import { MAX_UPLOAD_BYTES } from "@/lib/uploads";
+import { apiError, json, renderWithSession } from "@/test/session";
+
+import HomePage from "@/app/(app)/page";
+
+const SALARY = {
+  id: "11111111-1111-4111-8111-111111111111",
+  bank_code: "ICICI",
+  nickname: "Salary account",
+  account_type: "savings",
+  masked_number: "4321",
+  created_at: "2026-11-01T10:00:00Z",
+};
+
+// An upload as GET /uploads returns it; `overrides` changes what a test needs.
+function anUpload(overrides = {}) {
+  return {
+    id: "aaaaaaaa-0000-4000-8000-000000000001",
+    account_id: SALARY.id,
+    original_filename: "october.xls",
+    file_type: "xls",
+    status: "completed",
+    period_start: "2026-10-01",
+    period_end: "2026-10-31",
+    rows_parsed: 42,
+    rows_inserted: 40,
+    rows_duplicate: 2,
+    reconciliation_errors: 0,
+    reconciliation_issues: [],
+    error_message: null,
+    created_at: "2026-11-03T10:00:00Z",
+    completed_at: "2026-11-03T10:00:03Z",
+    ...overrides,
+  };
+}
+
+// What a finished import of a fresh upload looks like.
+const IMPORTED = {
+  status: "completed",
+  rows_parsed: 31,
+  rows_inserted: 31,
+  rows_duplicate: 0,
+  period_start: "2026-10-01",
+  period_end: "2026-10-31",
+};
+
+const UNLOCK_PASSWORD = "right-password";
+
+/**
+ * A pretend uploads API, kept in memory like the real one.
+ *
+ * - `POST /uploads` stores a `pending` upload, unless `createError(options)`
+ *   returns an error answer for this request.
+ *   A PDF sent without a password becomes `needs_password` with a 409
+ *   PASSWORD_REQUIRED, as the backend does.
+ * - `GET /uploads/<id>` plays the upload's `script`: each poll moves it to
+ *   the next state. While unfinished it sends `Retry-After: 1`, so the page
+ *   polls again a second later; a final answer has no header.
+ * - `POST /uploads/<id>/password` unlocks with UNLOCK_PASSWORD only.
+ * - `DELETE /uploads/<id>` removes it, or answers `deleteError`.
+ */
+function fakeUploadsApi({
+  accounts = [SALARY],
+  uploads = [],
+  script = [IMPORTED],
+  createError,
+  deleteError,
+} = {}) {
+  const state = {
+    accounts,
+    uploads: uploads.map((upload) => ({ ...upload })),
+    scripts: new Map(),
+    next: 2,
+  };
+
+  function answer(upload, status = 200) {
+    const unfinished = ["pending", "processing"].includes(upload.status);
+    return json(status, upload, unfinished ? { "Retry-After": "1" } : {});
+  }
+
+  function handler(path, options) {
+    const method = options.method ?? "GET";
+    if (path === "/accounts" && method === "GET") {
+      return json(200, state.accounts);
+    }
+    if (path === "/uploads" && method === "GET") {
+      return json(200, state.uploads);
+    }
+    if (path === "/uploads" && method === "POST") {
+      const failure = createError?.(options);
+      if (failure) {
+        return failure;
+      }
+      const file = options.body.get("file");
+      const locked = file.name.endsWith(".pdf") && !options.body.get("password");
+      const upload = anUpload({
+        id: `aaaaaaaa-0000-4000-8000-00000000000${state.next++}`,
+        account_id: options.body.get("account_id"),
+        original_filename: file.name,
+        file_type: file.name.split(".").pop(),
+        status: locked ? "needs_password" : "pending",
+        period_start: null,
+        period_end: null,
+        rows_parsed: 0,
+        rows_inserted: 0,
+        rows_duplicate: 0,
+        completed_at: null,
+      });
+      state.uploads.unshift(upload); // newest first
+      state.scripts.set(upload.id, [...script]);
+      if (locked) {
+        return apiError(409, "PASSWORD_REQUIRED", "This PDF is password-protected.", {
+          details: { upload_id: upload.id },
+        });
+      }
+      return answer(upload, 202);
+    }
+    const unlock = path.match(/^\/uploads\/([^/]+)\/password$/);
+    if (unlock && method === "POST") {
+      const upload = state.uploads.find((u) => u.id === unlock[1]);
+      if (JSON.parse(options.body).password !== UNLOCK_PASSWORD) {
+        return apiError(400, "INCORRECT_PASSWORD", "That password does not open this PDF.");
+      }
+      upload.status = "pending";
+      return answer(upload, 202);
+    }
+    const one = path.match(/^\/uploads\/([^/]+)$/);
+    if (one && method === "GET") {
+      const upload = state.uploads.find((u) => u.id === one[1]);
+      const nextState = state.scripts.get(upload.id)?.shift();
+      Object.assign(upload, nextState ?? {});
+      return answer(upload);
+    }
+    if (one && method === "DELETE") {
+      if (deleteError) {
+        return deleteError();
+      }
+      state.uploads = state.uploads.filter((u) => u.id !== one[1]);
+      return new Response(null, { status: 204 });
+    }
+    return undefined;
+  }
+  return { state, handler };
+}
+
+const requestsTo = (fetchImpl, method, path) =>
+  fetchImpl.mock.calls.filter(
+    ([url, options]) => url === `/api/v1${path}` && (options?.method ?? "GET") === method,
+  );
+
+const polls = (fetchImpl) =>
+  fetchImpl.mock.calls.filter(
+    ([url, options]) => /\/uploads\/[^/]+$/.test(url) && (options?.method ?? "GET") === "GET",
+  );
+
+function fakeFile(name, { size, type = "" } = {}) {
+  const file = new File(["statement"], name, { type });
+  if (size !== undefined) {
+    // Only `size` is read, so a "15 MB" file needs no 15 MB of memory.
+    Object.defineProperty(file, "size", { value: size });
+  }
+  return file;
+}
+
+function chooseFile(file) {
+  fireEvent.change(screen.getByLabelText("Statement file"), { target: { files: [file] } });
+}
+
+const uploadButton = () => screen.getByRole("button", { name: "Upload statement" });
+
+async function renderUploads(api) {
+  const rendered = renderWithSession(<UploadsView />, { signedIn: true, handler: api.handler });
+  await screen.findByRole("heading", { name: "Upload a statement" });
+  return rendered;
+}
+
+describe("UploadsView: before there is anything to upload into", () => {
+  it("asks for an account first", async () => {
+    renderWithSession(<UploadsView />, {
+      signedIn: true,
+      handler: fakeUploadsApi({ accounts: [] }).handler,
+    });
+
+    expect(await screen.findByText(/add an account/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "add an account" })).toHaveAttribute(
+      "href",
+      "/accounts",
+    );
+    expect(screen.queryByLabelText("Statement file")).not.toBeInTheDocument();
+  });
+});
+
+describe("UploadsView: the history", () => {
+  it("shows what each import did, in words", async () => {
+    const api = fakeUploadsApi({
+      uploads: [
+        anUpload(),
+        anUpload({
+          id: "aaaaaaaa-0000-4000-8000-0000000000a2",
+          original_filename: "september.pdf",
+          status: "needs_review",
+          rows_duplicate: 0,
+          reconciliation_errors: 3,
+          reconciliation_issues: [
+            { row_number: 15, kind: "balance_mismatch" },
+            { row_number: 12, kind: "missing_balance" },
+            { row_number: null, kind: "closing_balance_mismatch" },
+          ],
+        }),
+        anUpload({
+          id: "aaaaaaaa-0000-4000-8000-0000000000a3",
+          original_filename: "notes.csv",
+          status: "failed",
+          error_message: "We could not recognise this statement's layout.",
+        }),
+      ],
+    });
+    await renderUploads(api);
+
+    const completed = (await screen.findByText("october.xls")).closest("li");
+    expect(completed).toHaveTextContent("Salary account · uploaded 3 Nov 2026");
+    expect(completed).toHaveTextContent("Imported");
+    expect(completed).toHaveTextContent(
+      "40 new transactions added, 2 transactions already imported before. Statement period: 1 Oct 2026 – 31 Oct 2026.",
+    );
+
+    const review = screen.getByText("september.pdf").closest("li");
+    expect(review).toHaveTextContent("Imported — please check");
+    expect(review).toHaveTextContent("Rows 12, 15 of the file");
+    expect(review).toHaveTextContent(
+      "The closing balance doesn't match the last transaction's balance.",
+    );
+
+    const failed = screen.getByText("notes.csv").closest("li");
+    expect(failed).toHaveTextContent("Failed");
+    expect(failed).toHaveTextContent("We could not recognise this statement's layout.");
+  });
+
+  it("says so when there are no uploads yet", async () => {
+    await renderUploads(fakeUploadsApi());
+
+    expect(await screen.findByText("No uploads yet.")).toBeInTheDocument();
+  });
+
+  it("does not poll uploads that are already final or wait for a password", async () => {
+    const api = fakeUploadsApi({
+      uploads: [
+        anUpload(),
+        anUpload({
+          id: "aaaaaaaa-0000-4000-8000-0000000000a2",
+          original_filename: "locked.pdf",
+          status: "needs_password",
+        }),
+      ],
+    });
+    const { fetchImpl } = await renderUploads(api);
+
+    await screen.findByText("locked.pdf");
+    expect(polls(fetchImpl)).toHaveLength(0);
+  });
+});
+
+describe("UploadsView: uploading", () => {
+  it(
+    "sends the file to the chosen account, then polls until the import is done",
+    { timeout: 10_000 },
+    async () => {
+      const api = fakeUploadsApi({ script: [{ status: "processing" }, IMPORTED] });
+      const { fetchImpl } = await renderUploads(api);
+
+      chooseFile(fakeFile("october.xls"));
+      // Only a PDF can be locked, so only a PDF gets a password field.
+      expect(screen.queryByLabelText(/PDF password/)).not.toBeInTheDocument();
+      fireEvent.click(uploadButton());
+
+      expect(await screen.findByText(/october\.xls was uploaded/)).toBeInTheDocument();
+      const [[, options]] = requestsTo(fetchImpl, "POST", "/uploads");
+      expect(options.body.get("file").name).toBe("october.xls");
+      expect(options.body.get("account_id")).toBe(SALARY.id);
+      expect(options.body.has("password")).toBe(false);
+
+      // pending, then processing: the page keeps saying so...
+      const row = (await screen.findByText("october.xls", { selector: "p" })).closest("li");
+      expect(within(row).getByRole("status")).toHaveTextContent("Importing…");
+      // ...and asks again after the API's Retry-After (1 s here), until done.
+      await waitFor(
+        () => expect(row).toHaveTextContent("31 new transactions added."),
+        { timeout: 3000 },
+      );
+      expect(polls(fetchImpl)).toHaveLength(2);
+      // "…is being imported" is no longer true, so it is no longer said.
+      expect(screen.queryByText(/october\.xls was uploaded/)).not.toBeInTheDocument();
+
+      // A final answer has no Retry-After: no more polling.
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      expect(polls(fetchImpl)).toHaveLength(2);
+    },
+  );
+
+  it("refuses a file over the size limit without sending it", async () => {
+    const { fetchImpl } = await renderUploads(fakeUploadsApi());
+
+    chooseFile(fakeFile("scan.pdf", { size: MAX_UPLOAD_BYTES + 1 }));
+
+    // Said at once, before the button is even pressed.
+    expect(screen.getByText("This file is 10.0 MB. The limit is 10 MB.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Statement file")).toHaveAttribute("aria-invalid", "true");
+
+    fireEvent.click(uploadButton());
+    expect(requestsTo(fetchImpl, "POST", "/uploads")).toHaveLength(0);
+  });
+
+  it("asks for a file when none was chosen", async () => {
+    const { fetchImpl } = await renderUploads(fakeUploadsApi());
+
+    fireEvent.click(uploadButton());
+
+    expect(screen.getByText("Choose a statement file.")).toBeInTheDocument();
+    expect(requestsTo(fetchImpl, "POST", "/uploads")).toHaveLength(0);
+  });
+
+  it("sends a PDF's password with it when one is typed", async () => {
+    const { fetchImpl } = await renderUploads(fakeUploadsApi());
+
+    chooseFile(fakeFile("october.pdf", { type: "application/pdf" }));
+    fireEvent.change(screen.getByLabelText("PDF password (if it has one)"), {
+      target: { value: "secret" },
+    });
+    fireEvent.click(uploadButton());
+
+    // The form forgets the password (and the file) once it is sent.
+    await waitFor(() => expect(screen.queryByLabelText(/PDF password/)).not.toBeInTheDocument());
+    const [[, options]] = requestsTo(fetchImpl, "POST", "/uploads");
+    expect(options.body.get("password")).toBe("secret");
+  });
+
+  it("keeps the file and asks again when the PDF's password is wrong", async () => {
+    // A wrong password on the upload itself is a 400 and stores nothing.
+    const api = fakeUploadsApi({
+      createError: (options) =>
+        options.body.get("password") === "wrong"
+          ? apiError(400, "INCORRECT_PASSWORD", "That password does not open this PDF.")
+          : undefined,
+    });
+    const { fetchImpl } = await renderUploads(api);
+
+    chooseFile(fakeFile("october.pdf", { type: "application/pdf" }));
+    fireEvent.change(screen.getByLabelText("PDF password (if it has one)"), {
+      target: { value: "wrong" },
+    });
+    fireEvent.click(uploadButton());
+
+    expect(await screen.findByText("That password does not open this PDF.")).toBeInTheDocument();
+    // Emptied, so nothing of the wrong password stays on the page.
+    expect(screen.getByLabelText("PDF password (if it has one)")).toHaveValue("");
+
+    fireEvent.change(screen.getByLabelText("PDF password (if it has one)"), {
+      target: { value: "right" },
+    });
+    fireEvent.click(uploadButton());
+
+    // The same file went again, without choosing it a second time.
+    await waitFor(() => expect(requestsTo(fetchImpl, "POST", "/uploads")).toHaveLength(2));
+    const [, [, second]] = requestsTo(fetchImpl, "POST", "/uploads");
+    expect(second.body.get("file").name).toBe("october.pdf");
+    expect(second.body.get("password")).toBe("right");
+  });
+
+  it("explains a file that was uploaded before", async () => {
+    const api = fakeUploadsApi({
+      createError: () =>
+        apiError(409, "CONFLICT", "You have already uploaded this file.", {
+          details: { upload_id: "aaaaaaaa-0000-4000-8000-000000000001" },
+        }),
+    });
+    await renderUploads(api);
+
+    chooseFile(fakeFile("october.xls"));
+    fireEvent.click(uploadButton());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "You have already uploaded this file.",
+    );
+  });
+
+  it("says how long to wait after the hourly upload limit", async () => {
+    const api = fakeUploadsApi({
+      createError: () =>
+        apiError(429, "RATE_LIMITED", "Too many requests.", {
+          headers: { "Retry-After": "1800" },
+        }),
+    });
+    await renderUploads(api);
+
+    chooseFile(fakeFile("october.xls"));
+    fireEvent.click(uploadButton());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Too many attempts. Try again in 30 minutes.",
+    );
+  });
+});
+
+describe("UploadsView: a password-protected PDF", () => {
+  it(
+    "asks for the password, lets a wrong one be retried, then imports",
+    { timeout: 10_000 },
+    async () => {
+      const { fetchImpl } = await renderUploads(fakeUploadsApi());
+
+      // Sent without a password: the backend keeps it and answers 409.
+      chooseFile(fakeFile("locked.pdf", { type: "application/pdf" }));
+      fireEvent.click(uploadButton());
+
+      expect(
+        await screen.findByText(/locked\.pdf is password-protected\. Enter its password/),
+      ).toBeInTheDocument();
+      const row = (await screen.findByText("locked.pdf", { selector: "p" })).closest("li");
+      expect(row).toHaveTextContent("Needs the PDF's password");
+
+      const field = within(row).getByLabelText("Password for locked.pdf");
+      fireEvent.change(field, { target: { value: "wrong" } });
+      fireEvent.click(within(row).getByRole("button", { name: "Unlock and import" }));
+
+      expect(
+        await within(row).findByText("That password does not open this PDF."),
+      ).toBeInTheDocument();
+      expect(field).toHaveValue("");
+
+      fireEvent.change(field, { target: { value: UNLOCK_PASSWORD } });
+      fireEvent.click(within(row).getByRole("button", { name: "Unlock and import" }));
+
+      await waitFor(() => expect(row).toHaveTextContent("31 new transactions added."), {
+        timeout: 3000,
+      });
+      // Unlocked: "is password-protected" is no longer said above the form.
+      expect(screen.queryByText(/locked\.pdf is password-protected/)).not.toBeInTheDocument();
+      // The password went only in the body of the unlock request, alone.
+      const unlocks = fetchImpl.mock.calls.filter(([url]) => url.endsWith("/password"));
+      expect(unlocks).toHaveLength(2);
+      expect(JSON.parse(unlocks[1][1].body)).toEqual({ password: UNLOCK_PASSWORD });
+      expect(unlocks[1][0]).not.toContain(UNLOCK_PASSWORD);
+    },
+  );
+});
+
+describe("UploadsView: deleting", () => {
+  it("asks first, saying how many transactions go with it, then deletes", async () => {
+    const api = fakeUploadsApi({ uploads: [anUpload()] });
+    await renderUploads(api);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete october.xls" }));
+    const dialog = screen.getByRole("alertdialog", { name: "Delete october.xls?" });
+    expect(dialog).toHaveAccessibleDescription(
+      "Delete october.xls? This also deletes the 40 transactions it added. It can't be undone.",
+    );
+    // A stray Enter lands on Cancel, not on Delete.
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete upload" }));
+
+    expect(await screen.findByText("No uploads yet.")).toBeInTheDocument();
+  });
+
+  it("shows why the backend refused, and keeps the upload", async () => {
+    const message =
+      "A later statement for this account overlaps this one and relies on its transactions. Delete that later upload first, then this one.";
+    const api = fakeUploadsApi({
+      uploads: [anUpload()],
+      deleteError: () => apiError(409, "CONFLICT", message),
+    });
+    await renderUploads(api);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete october.xls" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete upload" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(screen.getByText("october.xls", { selector: "p" })).toBeInTheDocument();
+  });
+
+  it("says nothing is lost when deleting an upload that imported nothing", async () => {
+    const api = fakeUploadsApi({
+      uploads: [anUpload({ status: "failed", rows_inserted: 0, error_message: "Unreadable." })],
+    });
+    await renderUploads(api);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete october.xls" }));
+
+    expect(screen.getByRole("alertdialog")).toHaveTextContent(
+      "Nothing from it has been imported, so no transactions are deleted.",
+    );
+  });
+});
+
+describe("HomePage: the first statement", () => {
+  it("asks for the first statement, then shows what it imported", async () => {
+    renderWithSession(<HomePage />, {
+      signedIn: true,
+      handler: fakeUploadsApi().handler,
+    });
+
+    expect(await screen.findByText("Upload your first statement")).toBeInTheDocument();
+
+    chooseFile(fakeFile("october.xls"));
+    fireEvent.click(screen.getByRole("button", { name: "Upload my first statement" }));
+
+    expect(await screen.findByText("Your latest statement")).toBeInTheDocument();
+    expect(await screen.findByText(/31 new transactions added\./)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Upload another statement" })).toHaveAttribute(
+      "href",
+      "/uploads",
+    );
+  });
+
+  it("shows only the latest upload once there are several", async () => {
+    renderWithSession(<HomePage />, {
+      signedIn: true,
+      handler: fakeUploadsApi({
+        uploads: [
+          anUpload({ original_filename: "november.xls" }),
+          anUpload({ id: "aaaaaaaa-0000-4000-8000-0000000000a2", original_filename: "october.xls" }),
+        ],
+      }).handler,
+    });
+
+    expect(await screen.findByText("november.xls")).toBeInTheDocument();
+    expect(screen.queryByText("october.xls")).not.toBeInTheDocument();
+  });
+});

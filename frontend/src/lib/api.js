@@ -31,6 +31,14 @@ export class ApiError extends Error {
   }
 }
 
+// The `Retry-After` header in seconds, or null when there is none. The API
+// sends it on a 429 (how long to wait) and while an upload is unfinished
+// (when to poll again).
+function retryAfterSecondsOf(response) {
+  const seconds = Number.parseInt(response.headers.get("Retry-After") ?? "", 10);
+  return Number.isNaN(seconds) ? null : seconds;
+}
+
 async function toApiError(response) {
   let body = null;
   try {
@@ -39,13 +47,12 @@ async function toApiError(response) {
     // Not JSON (e.g. a proxy error page): fall back to a generic message.
   }
   const info = body?.error ?? {};
-  const retryAfter = Number.parseInt(response.headers.get("Retry-After") ?? "", 10);
   return new ApiError({
     status: response.status,
     code: info.code ?? "HTTP_ERROR",
     message: info.message ?? `The request failed (HTTP ${response.status}).`,
     details: info.details ?? null,
-    retryAfterSeconds: Number.isNaN(retryAfter) ? null : retryAfter,
+    retryAfterSeconds: retryAfterSecondsOf(response),
   });
 }
 
@@ -148,8 +155,15 @@ export function createApiClient({
   /**
    * Call the API. `body` may be a plain object (sent as JSON) or FormData
    * (a file upload). Resolves to the parsed JSON, or null for a 204.
+   *
+   * `withRetryAfter: true` resolves to `{ data, retryAfterSeconds }`
+   * instead, for the one caller that needs a header of a SUCCESSFUL answer:
+   * upload polling, which waits as long as the API says (src/lib/uploads.js).
    */
-  async function request(path, { method = "GET", body, headers = {}, signal } = {}) {
+  async function request(
+    path,
+    { method = "GET", body, headers = {}, signal, withRetryAfter = false } = {},
+  ) {
     const isForm = typeof FormData !== "undefined" && body instanceof FormData;
 
     async function send() {
@@ -187,10 +201,8 @@ export function createApiClient({
     if (!response.ok) {
       throw await toApiError(response);
     }
-    if (response.status === 204) {
-      return null;
-    }
-    return response.json();
+    const data = response.status === 204 ? null : await response.json();
+    return withRetryAfter ? { data, retryAfterSeconds: retryAfterSecondsOf(response) } : data;
   }
 
   return {
