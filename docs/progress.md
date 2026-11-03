@@ -583,6 +583,14 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   category_id). Decided with Dhruv: the flag, the prompt after choosing, no default
   date range, the guess rule as planned (ADR 022 section). 320 Vitest tests; checked
   live, test user deleted, logs clean
+  - Review of PR 37 (top 5 of 10 findings fixed): backend `similar_key` on every
+    transaction, from the rule-learning code itself (the browser guessed the UPI id;
+    the rule matches the merchant unless the payee is a person); a refused filter shows
+    the 422's reason, not its generic message; rows wait for the categories; save
+    confirmations live above the list; after "apply to similar" the lists refetch
+    until the job's work shows (1/2/4/8 s). Left: month buttons skip the amount
+    validation, duplicated account label and badge, per-row category grouping, the
+    hook's refetch loop tested in parts only. 329 Vitest tests; checked live
 
 ## In progress
 - (nothing)
