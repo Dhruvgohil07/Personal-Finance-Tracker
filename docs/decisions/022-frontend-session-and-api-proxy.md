@@ -171,3 +171,15 @@ Three fixes, each checked so that its test fails without it:
 - Checked live: first-run card → a 12-digit number refused with no request sent → the
   account added → welcome; rename and retype (PATCH 200); delete with the warning and
   focus on Cancel; the test user deleted afterwards; nothing of it in the logs.
+
+### Review of PR 32 (2026-11-03)
+- **A 404 on edit or delete refetches the list.** The account was already gone
+  (deleted in another tab); the dead row used to stay, and every retry said "Account
+  not found.". Done in the hooks (`src/lib/accounts.js`), so both actions get it.
+- **Each row's buttons are named after the account** ("Edit Salary account",
+  "Delete Salary account"). With several accounts a screen reader used to list
+  identical "Edit, Delete" buttons. The names start with the visible word, so voice
+  control ("click Delete") still finds them.
+- **The delete confirmation is a `role="alertdialog"` described by its warning.**
+  Focus moves to "Cancel"; as a plain group a screen reader announced only "Cancel,
+  button", never what gets deleted.

@@ -521,6 +521,11 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   Step 6 (plan change log); inline delete confirmation instead of `<dialog>` (jsdom
   can't test showModal). 129 Vitest tests; checked live in a browser, test user
   deleted, logs clean
+  - Review of PR 32 (top 3 of 8 findings fixed): a 404 on edit/delete refetches the
+    list; each row's buttons are named after the account; the delete confirmation is
+    an alertdialog described by its warning. Left: delete refetches every query,
+    five copies of the submit guard, an unused `onCreated`, aria-label on a span, a
+    PATCH for an unchanged account. 132 Vitest tests
 
 ## In progress
 - (nothing)
