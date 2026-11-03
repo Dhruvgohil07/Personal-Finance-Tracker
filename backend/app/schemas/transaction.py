@@ -103,6 +103,14 @@ class TransactionFilters(QueryFilters):
     category_id: uuid.UUID | None = Field(
         default=None, description="Only transactions in this category"
     )
+    # A separate flag rather than a magic `category_id` value ("none"):
+    # category_id stays a plain UUID, and "what still needs a category?" is
+    # what manual categorization actually asks (decided with Dhruv, Phase 3
+    # Step 8; the Phase 1 open decision).
+    uncategorized: bool = Field(
+        default=False,
+        description="Only transactions that have no category yet (not with category_id)",
+    )
     direction: Direction | None = Field(default=None, description="debit = money out, credit = in")
     q: SearchText | None = Field(
         default=None, description="Free text search in the cleaned-up narration"
@@ -153,6 +161,10 @@ class TransactionFilters(QueryFilters):
         """
         if self.date_from and self.date_to and self.date_from > self.date_to:
             raise ValueError("'from' must not be later than 'to'")
+        # "In Groceries AND without a category" can never match a row; like
+        # a reversed range, it is a mistake to report, not an empty answer.
+        if self.uncategorized and self.category_id is not None:
+            raise ValueError("give either 'category_id' or 'uncategorized', not both")
         if (
             self.min_amount is not None
             and self.max_amount is not None

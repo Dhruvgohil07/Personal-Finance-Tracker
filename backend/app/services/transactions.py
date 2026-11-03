@@ -283,6 +283,8 @@ def _filtered_query(user_id: uuid.UUID, filters: TransactionFilters) -> Select[t
         stmt = stmt.where(Transaction.account_id == filters.account_id)
     if filters.category_id is not None:
         stmt = stmt.where(Transaction.category_id == filters.category_id)
+    if filters.uncategorized:
+        stmt = stmt.where(Transaction.category_id.is_(None))
     if filters.direction is not None:
         stmt = stmt.where(Transaction.direction == filters.direction)
     if filters.q is not None:

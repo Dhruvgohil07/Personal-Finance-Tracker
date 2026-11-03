@@ -426,6 +426,51 @@ def test_the_category_filter_only_shows_that_category(
     assert descriptions(items) == ["GROCERY ROW"]
 
 
+def test_the_uncategorized_filter_lists_what_still_needs_a_category(
+    client: TestClient, db: Session, alice: Owner, system_categories: dict[str, Category]
+) -> None:
+    """Phase 3 Step 8: what manual categorization starts from."""
+    add_transaction(
+        db,
+        alice,
+        txn_date=AUGUST,
+        amount_paise=100,
+        description="GROCERY ROW",
+        category_id=system_categories["groceries"].id,
+    )
+    add_transaction(db, alice, txn_date=AUGUST, amount_paise=100, description="UNCATEGORIZED ROW")
+
+    items, _ = get_page(client, alice, uncategorized="true")
+
+    assert descriptions(items) == ["UNCATEGORIZED ROW"]
+
+
+def test_the_uncategorized_filter_shows_only_your_own_rows(
+    client: TestClient, db: Session, alice: Owner, bob: Owner
+) -> None:
+    """IDOR (rule 2): Bob's uncategorized rows never reach Alice."""
+    add_transaction(db, alice, txn_date=AUGUST, amount_paise=100, description="ALICE ROW")
+    add_transaction(db, bob, txn_date=AUGUST, amount_paise=100, description="BOB ROW")
+
+    items, _ = get_page(client, alice, uncategorized="true")
+
+    assert descriptions(items) == ["ALICE ROW"]
+
+
+def test_uncategorized_and_a_category_together_are_refused(
+    client: TestClient, alice: Owner, system_categories: dict[str, Category]
+) -> None:
+    """Both at once can never match a row: a 422, not an empty page."""
+    response = client.get(
+        TRANSACTIONS,
+        params={"uncategorized": "true", "category_id": str(system_categories["groceries"].id)},
+        headers=alice.headers,
+    )
+
+    assert response.status_code == 422
+    assert "not both" in response.text
+
+
 def test_another_users_account_is_not_found(client: TestClient, alice: Owner, bob: Owner) -> None:
     """Filtering by someone else's account id is a 404, not an empty page.
 
