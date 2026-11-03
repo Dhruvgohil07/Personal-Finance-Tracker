@@ -69,6 +69,28 @@ describe("request", () => {
     expect(await client.request("/accounts/a1", { method: "DELETE" })).toBeNull();
   });
 
+  it("with withRetryAfter, also gives the Retry-After header of a success", async () => {
+    // Upload polling: the API says when to ask again (src/lib/uploads.js).
+    const { fetchImpl } = fakeFetch(() =>
+      json(200, { id: "u1", status: "pending" }, { "Retry-After": "2" }),
+    );
+    const client = createApiClient({ fetchImpl });
+
+    expect(await client.request("/uploads/u1", { withRetryAfter: true })).toEqual({
+      data: { id: "u1", status: "pending" },
+      retryAfterSeconds: 2,
+    });
+  });
+
+  it("with withRetryAfter, gives null when there is no Retry-After", async () => {
+    const { fetchImpl } = fakeFetch(() => json(200, { id: "u1", status: "completed" }));
+    const client = createApiClient({ fetchImpl });
+
+    const { retryAfterSeconds } = await client.request("/uploads/u1", { withRetryAfter: true });
+
+    expect(retryAfterSeconds).toBeNull();
+  });
+
   it("turns the API's error shape into an ApiError", async () => {
     const { fetchImpl } = fakeFetch(() =>
       json(

@@ -52,6 +52,10 @@ describe("formErrorsFrom", () => {
   it.each([
     [42, "Too many attempts. Try again in 42 seconds."],
     [1, "Too many attempts. Try again in 1 second."],
+    [60, "Too many attempts. Try again in 60 seconds."],
+    // Above a minute: whole minutes, rounded up (the upload limit is per hour).
+    [61, "Too many attempts. Try again in 2 minutes."],
+    [3412, "Too many attempts. Try again in 57 minutes."],
     [null, "Too many attempts. Please wait a minute and try again."],
   ])("tells how long to wait after a 429 (Retry-After %j)", (seconds, message) => {
     const error = new ApiError({

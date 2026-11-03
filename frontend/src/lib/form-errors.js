@@ -8,12 +8,17 @@ const NETWORK_MESSAGE = "We couldn't reach Kharcha. Check your connection and tr
 // The backend names a field by where it was found: "body.email".
 const BODY_PREFIX = "body.";
 
+const plural = (count, unit) => `${count} ${unit}${count === 1 ? "" : "s"}`;
+
+// Seconds up to a minute; above that, whole minutes rounded UP, so the user
+// never comes back too early. The upload limit is per hour, and "Try again
+// in 3412 seconds" says nothing useful.
 function rateLimitMessage(seconds) {
   if (seconds === null) {
     return "Too many attempts. Please wait a minute and try again.";
   }
-  const unit = seconds === 1 ? "second" : "seconds";
-  return `Too many attempts. Try again in ${seconds} ${unit}.`;
+  const wait = seconds <= 60 ? plural(seconds, "second") : plural(Math.ceil(seconds / 60), "minute");
+  return `Too many attempts. Try again in ${wait}.`;
 }
 
 /**
