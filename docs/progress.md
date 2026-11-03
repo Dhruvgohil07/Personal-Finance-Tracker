@@ -549,14 +549,25 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
     refetching its own poll, full refetch on every finished poll, the duplicated
     delete confirmation, two `plural` helpers, copied test helpers. 193 Vitest tests;
     checked live, test user deleted, logs clean
+- [x] Step 7: CSV column mapping — choosing a CSV reads its first 64 KB in the browser
+  (`src/lib/csv-preview.js`: the backend's decoding, delimiter and quoting rules, header
+  search in the first 50 rows) and shows "Which column is which?" pre-filled from the
+  column names, with a preview of the first rows as they will be read
+  (`src/lib/column-mapping.js`, `components/uploads/column-mapping-fields.jsx`). Date
+  formats are a preset list checked by a `strptime` reimplementation (cases verified
+  against Python); one is pre-selected only when exactly one fits. Mistakes are caught
+  before sending; the upload carries `column_mapping`. Decided with Dhruv: every CSV,
+  guesses only (nothing stored), own reader, preset formats (ADR 022 section). 257
+  Vitest tests; checked live with a synthetic CSV, imported and reconciled, test user
+  deleted, logs clean
 
 ## In progress
 - (nothing)
 
 ## Next up
 - **Dhruv, after merging Step 3:** add `frontend` to the `protect-main` required checks
-- Phase 3 Step 7: CSV column mapping. Until then a CSV no bank parser recognises
-  fails with the backend's NO_PARSER message, which mentions `column_mapping`
+- Phase 3 Step 8: transactions (filters in the URL, "Load more", inline category edit
+  with "apply to similar?", notes, badges)
 - If the backend's `MAX_UPLOAD_MB` ever changes, change `MAX_UPLOAD_MB` in
   `frontend/src/lib/uploads.js` with it (ADR 022, Step 6)
 - Step 11: verify an upload near 10 MB on the deployed app; the host may limit a
@@ -999,6 +1010,10 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
 - Frontend tooling: ESLint 9.39.5 (npm calls it unsupported) because three of
   `eslint-config-next`'s plugins don't support ESLint 10; `npm audit` reports a moderate
   `minimatch` DoS in that dev-only toolchain. Revisit when they support ESLint 10
+- Windows dev: stopping a backgrounded `npm run dev` stops npm but can leave its `node`
+  child (`next/dist/server/lib/start-server.js`) serving port 3000, and the next
+  `npm run dev` fails with EADDRINUSE. Find it by command line (`Get-CimInstance
+  Win32_Process`) and stop it; port queries can miss it (it listens on `::1`)
 - Windows: use `127.0.0.1`, not `localhost`, in DB/Redis URLs (IPv6 `::1` hangs with Docker);
   engine has a 10 s connect timeout so this fails loudly instead of hanging
 - Run tests from `backend/` with the venv Python, not Anaconda's `python`

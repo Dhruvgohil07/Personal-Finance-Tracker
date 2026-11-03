@@ -263,3 +263,43 @@ Left as they are: the delete refetching its own poll (one extra 404 per delete),
 finished poll refetching all other queries, the duplicated delete confirmation
 (accounts and uploads), the two `plural` helpers, and test helpers copied between test
 files.
+
+## Phase 3 Step 7: CSV column mapping (2026-11-03)
+Decided with Dhruv when the step started:
+- **Every CSV gets the mapping step**, as soon as one is chosen. No bank parser reads
+  CSVs today, so a CSV without a mapping always failed in the worker; if a bank
+  parser ever recognises one, the backend ignores the mapping (ADR 013 order).
+  Rejected: mapping only after a failed upload (a failed upload, and one of the
+  10/hour, every time); only for "Another bank" accounts (HDFC and SBI CSVs would fail).
+- **Guessed from the column names, nothing stored.** Each choice is pre-filled from
+  the file's labels (Txn Date, Narration/Particulars/Remarks, Withdrawal/Debit,
+  Deposit/Credit, Amount, Balance) for the user to confirm. Rejected: remembering the
+  mapping per account (localStorage is per browser; the backend option is a migration
+  for a convenience).
+- **Our own small reader, no new dependency** (`src/lib/csv-preview.js`). It reads
+  only the first 64 KB and mirrors `app/parsers/readers.py` and `generic_csv.py`: UTF-16
+  by byte-order mark, else UTF-8 (BOM dropped, streaming so a cut inside a character
+  isn't "invalid"), else Windows-1252; NUL means unreadable; delimiter among `, ; tab |`
+  by the most consistent cell count; RFC 4180 quoting; the header within the first 50
+  rows. The header is the row with the most label-like cells (letters, no digits); the
+  user can pick another row. Rejected: papaparse (a dependency whose delimiter and
+  encoding choices could differ from the backend's, offering names it never finds).
+- **Date formats: a preset list with a preview.** Eleven `strptime` patterns, each
+  checked against the backend's own validator. `parseDateWith` reimplements Python's
+  rules for the directives used (one- or two-digit `%d`/`%m`, case-insensitive month
+  names, whole-cell match, impossible dates refused, the 69/68 two-digit-year pivot);
+  every test case was checked against real `datetime.strptime`. A format is
+  pre-selected only when exactly ONE reads all the first dates: "01/08/2026" fits both
+  day-first and month-first, and the user must choose (the backend's no-guessing rule).
+  The preview shows the dates as read ("1 Aug 2026" vs "8 Jan 2026").
+
+Also:
+- Mapping mistakes the backend would refuse (a missing column, a column used twice,
+  debit without credit) and a format that doesn't read the file's dates are caught
+  before sending, under their field. A 422 naming `column_mapping.<field>` lands under
+  the same field.
+- Amounts in the preview are the file's own text, never converted (hard constraint 4).
+- Checked live with a synthetic CSV (title rows above the table, a quoted narration
+  containing a comma, CRLF line endings): header found on row 4, every column and the
+  day-first format guessed, imported by the real worker as 3 transactions with the
+  balances reconciling. Test user deleted; nothing of the file in the API or worker logs.
