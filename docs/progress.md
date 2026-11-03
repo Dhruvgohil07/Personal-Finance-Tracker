@@ -591,13 +591,24 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
     until the job's work shows (1/2/4/8 s). Left: month buttons skip the amount
     validation, duplicated account label and badge, per-row category grouping, the
     hook's refetch loop tested in parts only. 329 Vitest tests; checked live
+- [x] Step 9: Dashboard — the home page shows one month once there is an upload:
+  month picker in the URL (`?month=`), money in / out / left over against last month,
+  "N transactions need your attention" linking to them, and a category donut (Recharts
+  3.10.1 + peer `react-is` 19.3.1) with an accessible list linking to each category's
+  transactions. `src/lib/insights.js`, `components/dashboard/`. Backend:
+  `uncategorized_count` on each `PeriodTotals` of GET /insights/summary. Decided with
+  Dhruv: that count (in and out) rather than the donut's bucket, open on the newest
+  transaction's month, guesses not counted (ADR 022 section). The latest-upload card
+  stays only while it needs something or was watched importing. 1580 backend tests
+  (+1 skipped), 100% coverage; 382 Vitest tests; checked live, test user deleted, logs
+  clean
 
 ## In progress
 - (nothing)
 
 ## Next up
 - **Dhruv, after merging Step 3:** add `frontend` to the `protect-main` required checks
-- Phase 3 Step 9: dashboard (this month vs last, the category donut; recharts)
+- Phase 3 Step 10: settings (profile, delete account)
 - If the backend's `MAX_UPLOAD_MB` ever changes, change `MAX_UPLOAD_MB` in
   `frontend/src/lib/uploads.js` with it (ADR 022, Step 6)
 - Step 11: verify an upload near 10 MB on the deployed app; the host may limit a
