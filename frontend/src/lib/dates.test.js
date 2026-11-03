@@ -1,6 +1,26 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { formatDate, formatDateTime, formatPeriod } from "@/lib/dates";
+import { formatDate, formatDateTime, formatPeriod, monthRange, todayInIndia } from "@/lib/dates";
+
+describe("todayInIndia", () => {
+  it("is already tomorrow in India when it is late evening in UTC", () => {
+    // 20:00 UTC on 3 Nov is 1:30 am on 4 Nov in India.
+    expect(todayInIndia(new Date("2026-11-03T20:00:00Z"))).toBe("2026-11-04");
+    expect(todayInIndia(new Date("2026-11-03T10:00:00Z"))).toBe("2026-11-03");
+  });
+});
+
+describe("monthRange", () => {
+  it.each([
+    ["2026-11-03", 0, { from: "2026-11-01", to: "2026-11-30" }],
+    ["2026-11-03", -1, { from: "2026-10-01", to: "2026-10-31" }],
+    ["2026-01-15", -1, { from: "2025-12-01", to: "2025-12-31" }], // across a year
+    ["2024-03-10", -1, { from: "2024-02-01", to: "2024-02-29" }], // leap year
+    ["2026-03-31", -1, { from: "2026-02-01", to: "2026-02-28" }], // from the 31st
+  ])("%s with offset %i", (iso, offset, expected) => {
+    expect(monthRange(iso, offset)).toEqual(expected);
+  });
+});
 
 afterEach(() => {
   vi.unstubAllEnvs();

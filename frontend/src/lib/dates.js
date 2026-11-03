@@ -52,3 +52,33 @@ export function formatPeriod(start, end) {
   }
   return start === end ? formatDate(start) : `${formatDate(start)} – ${formatDate(end)}`;
 }
+
+const indiaDayParts = new Intl.DateTimeFormat("en-US", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  timeZone: APP_TIME_ZONE,
+});
+
+/** Today's date in India, "2026-11-03", whatever the browser's timezone. */
+export function todayInIndia(now = new Date()) {
+  // Assembled from the parts, not from a locale's printed order, which
+  // differs between locales (and could change with the browser's data).
+  const part = (type) => indiaDayParts.formatToParts(now).find((p) => p.type === type).value;
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+/**
+ * The first and last day of a calendar month, as ISO dates:
+ * `monthRange("2026-11-03", 0)` is `{ from: "2026-11-01", to: "2026-11-30" }`,
+ * and `-1` is the month before. Worked out with UTC dates, so no timezone
+ * can move a day (see the top of this file).
+ */
+export function monthRange(isoDate, offset = 0) {
+  const [year, month] = isoDate.split("-").map(Number);
+  const first = new Date(Date.UTC(year, month - 1 + offset, 1));
+  // Day 0 of the NEXT month is the last day of this one.
+  const last = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0));
+  const iso = (date) => date.toISOString().slice(0, 10);
+  return { from: iso(first), to: iso(last) };
+}
