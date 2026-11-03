@@ -404,3 +404,53 @@ Top 5 of 10 findings fixed:
 Left as they are: the quick month buttons skipping the amount fields' validation, the
 duplicated account label and badge styling, the per-row category grouping, and a test
 for the refetch loop inside the hook (its pieces are unit-tested).
+
+## Phase 3 Step 9: dashboard (2026-11-04)
+The home page becomes the month at a glance once there is an upload: a month picker,
+money in / money out / left over against last month (`GET /insights/summary`), "N
+transactions need your attention", and where the money went as a donut plus a list
+(`GET /insights/categories`). Decided with Dhruv when the step started:
+
+- **"Needs your attention" counts every uncategorized transaction, in and out (backend
+  addition).** The summary's `PeriodTotals` gains `uncategorized_count`, one more
+  `COUNT(*) FILTER (WHERE category_id IS NULL)` in the same query, so no extra round
+  trip. The donut's "Not categorized yet" bucket was rejected as the source: it counts
+  debits only, so an unfiled salary or refund would never ask for attention. Self
+  transfers are excluded like every other total, which removes nothing in practice: a
+  row without a category never has the flag (both places that clear a category clear
+  it), so the count equals what the linked `/transactions?category=uncategorized` lists.
+- **The dashboard opens on the newest transaction's month** (one
+  `GET /transactions?limit=1`), not the current month: statements usually cover a month
+  that has ended, and on the 4th the current month is nearly empty. With no
+  transactions it opens on the current month (India's time). A `?month=` in the URL wins,
+  unless it is malformed or after the current month; the picker can't go past it either.
+- **"Guess" rows don't count as needing attention**: they have a category, and the
+  transactions page already marks them.
+- **The month is in the URL** (`/?month=2026-10`, `router.push`), for the same reasons as
+  the transaction filters: reload, bookmark, Back.
+- **The list is the content, the chart a picture of it.** Each category is a row (colour
+  dot, name, count, the API's `amount_display` and `share_pct`) linking to that month's
+  debits in that category; the chart is `aria-hidden` with Recharts'
+  `accessibilityLayer={false}`, so keyboard and screen-reader users meet the data once.
+  Fixed 200 × 200 px, not `ResponsiveContainer`, which measures a 0 × 0 parent before
+  layout and in jsdom. No animation. "Not categorized yet" is a light grey (#D4D4D4),
+  unlike the seeded "Uncategorized" category's #9CA3AF.
+- **No money arithmetic in the browser** (hard constraint 4): every amount is a
+  `*_display` from the API, every percentage the API's own, only formatted (one decimal
+  at most). `net_paise` is compared with zero only, to choose "Left over" or
+  "Overspent". A null `*_change_pct` says "Nothing came in during September" instead of
+  a number (ADR 010).
+- **The latest-upload card stays above the dashboard only while it needs something**
+  (importing, password, check, failed), or when the user watched it import on this page,
+  so the first run still shows "31 new transactions added" next to the dashboard. That
+  is remembered with React's "adjust state while rendering" pattern rather than an
+  effect, which would let the card vanish for a frame.
+- **New dependencies:** `recharts` 3.10.1 (released 2026-07-25; React 19 among its
+  peers) and its peer `react-is` 19.3.1, pinned to match React. `npm audit --omit=dev`
+  reports nothing.
+- Checked live with a synthetic two-month CSV: every total and percentage matched the
+  figures worked out by hand, the attention link listed exactly the 2 rows it counted,
+  filing one of them brought the count to 1 on return, September's comparison with an
+  empty August read "Nothing came in during August", November showed the empty state
+  with "›" disabled, and the phone layout had no sideways scrolling. Test user deleted;
+  the API and worker logs held only ids, counts and event names.

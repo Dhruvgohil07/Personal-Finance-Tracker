@@ -204,3 +204,9 @@ Then I stop for review.
   step, "Upload your first statement", moves to Step 6, where the upload form is built.
   A link to an upload page that doesn't exist yet would break hard constraint 3 (no
   unfinished component).
+- 2026-11-04, Step 9: decided with Dhruv: `GET /insights/summary` gains
+  `uncategorized_count` (debits and credits) for "N transactions need your attention",
+  instead of the donut's debit-only bucket; the dashboard opens on the newest
+  transaction's month; "Guess" rows are not counted. The latest-upload card stays on the
+  home page only while it needs something, or after the user watched it import there.
+  See ADR 022.
