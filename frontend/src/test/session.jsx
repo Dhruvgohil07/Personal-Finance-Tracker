@@ -28,10 +28,18 @@ export function apiError(status, code, message, extra = {}) {
  *
  * `signedIn`: whether the session restore on page load (POST /auth/refresh)
  * succeeds, unless `routes` defines /auth/refresh itself.
+ *
+ * `handler(path, options)`: asked first, for fakes that need the method or a
+ * path with an id in it (e.g. PATCH /accounts/<id>); return undefined to
+ * fall through to `routes`.
  */
-export function renderWithSession(ui, { signedIn = false, routes = {} } = {}) {
+export function renderWithSession(ui, { signedIn = false, routes = {}, handler } = {}) {
   const fetchImpl = vi.fn(async (url, options = {}) => {
     const path = url.replace("/api/v1", "");
+    const handled = handler?.(path, options);
+    if (handled !== undefined) {
+      return handled;
+    }
     if (routes[path]) {
       return routes[path](options);
     }
