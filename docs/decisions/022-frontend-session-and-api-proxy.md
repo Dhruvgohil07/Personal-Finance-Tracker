@@ -377,3 +377,30 @@ Also:
   "Yes, all similar" re-filing both payments to one merchant with one PATCH, Back
   restoring the previous filters and form, a note, and the phone layout without
   sideways scrolling. Test user deleted; nothing of it in the API or worker logs.
+
+### Review of PR 37 (2026-11-04)
+Top 5 of 10 findings fixed:
+- **The API says what "similar" means (backend addition).** Every transaction now has
+  `similar_key`: what `apply_to_similar` would match, a person's UPI id or a merchant
+  key, null when nothing could (then the API answers 400). It is computed by
+  `rules_service.similar_keys` from `_rule_match`, the code `learn_rule` itself uses,
+  with the merchant dictionary read once per page. The browser used to guess, always
+  preferring the UPI id, while the rule uses it only for a person: a Swiggy payment
+  asked "from swiggy@…" and then matched the merchant SWIGGY. Integration tests assert
+  the invariant: for each kind of row, the key shown equals the learned rule's pattern.
+- **A refused filter says why.** A 422's top-level message is always "The request
+  contains invalid data."; `filtersErrorMessage` shows the reasons from `details`
+  instead, labelled with the filter for `query.<name>` ("Smallest amount: …"). The old
+  test faked a 422 the API never sends; the new ones use shapes captured from it.
+- **Rows wait for the categories**, so a row's drop-down can't show "Not categorized
+  yet" for a category it can't find yet.
+- **What a save did is said above the list,** in one status line, not inside the row:
+  in a filtered list the saved row leaves at once and took its message with it.
+- **After "apply to similar" the lists are refetched until the job's work shows**
+  (after 1, 2, 4 and 8 s at most; `refreshUntilSettled`), judged by `similar_key`: no
+  cached row with that key and another category, except rows filed by hand. It used to
+  be one refetch after a guessed 2 s.
+
+Left as they are: the quick month buttons skipping the amount fields' validation, the
+duplicated account label and badge styling, the per-row category grouping, and a test
+for the refetch loop inside the hook (its pieces are unit-tested).
