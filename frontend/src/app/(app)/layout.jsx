@@ -6,10 +6,13 @@
 
 import { AppHeader } from "@/components/app-header";
 import { RequireAuth } from "@/components/require-auth";
+import { UploadsWatcher } from "@/components/uploads/uploads-watcher";
 
 export default function AppLayout({ children }) {
   return (
     <RequireAuth>
+      {/* Polls unfinished uploads whichever page is open (renders nothing). */}
+      <UploadsWatcher />
       <AppHeader />
       <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8">{children}</main>
     </RequireAuth>

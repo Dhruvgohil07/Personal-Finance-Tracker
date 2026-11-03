@@ -40,11 +40,12 @@ export default function HomePage() {
   const uploads = useUploads();
   const greeting = me.data ? `Welcome, ${me.data.name}` : "Welcome";
 
-  const error = accounts.error ?? uploads.error;
-  if (error) {
-    return <FormError message={formErrorsFrom(error).formError} />;
+  // Each step waits only for what it needs: the first step needs just the
+  // accounts, so a failing GET /uploads must not hide it (review of PR 33).
+  if (accounts.error) {
+    return <FormError message={formErrorsFrom(accounts.error).formError} />;
   }
-  if (accounts.isPending || uploads.isPending) {
+  if (accounts.isPending) {
     return <p role="status">Loading…</p>;
   }
 
@@ -58,6 +59,13 @@ export default function HomePage() {
         <AccountForm submitLabel="Add my first account" />
       </FirstRunStep>
     );
+  }
+
+  if (uploads.error) {
+    return <FormError message={formErrorsFrom(uploads.error).formError} />;
+  }
+  if (uploads.isPending) {
+    return <p role="status">Loading…</p>;
   }
 
   if (uploads.data.length === 0) {

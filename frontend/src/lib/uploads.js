@@ -14,9 +14,11 @@
 // it asks GET /uploads/{id} again every few seconds while the upload is
 // pending or processing. How many seconds is the API's choice, sent in the
 // `Retry-After` header; the header is absent once there is nothing to wait
-// for, and polling stops (Phase 3 plan, design decisions).
+// for, and polling stops (Phase 3 plan, design decisions). The polling is
+// done by ONE watcher for the whole signed-in app (useUnfinishedUploadsPolling,
+// mounted by UploadsWatcher in the layout), not by each row on screen.
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -24,7 +26,7 @@ import { useAuth } from "@/lib/auth";
 export const UPLOADS_QUERY_KEY = ["uploads"];
 // The root of each upload's POLLING query, ["upload", id]. Deliberately a
 // different word from the list's "uploads": "refetch everything except the
-// polls" can then be said by the first element alone (see useUploadPolling).
+// polls" can then be said by the first element alone (see pollQuery).
 const POLL_QUERY_ROOT = "upload";
 
 // The backend's default MAX_UPLOAD_MB (app/core/config.py), decided with
@@ -39,6 +41,20 @@ export const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 // can still pick "All files"), so the backend's own type check by file
 // signature is what really decides.
 export const ACCEPTED_FILE_TYPES = ".pdf,.xls,.csv";
+
+// The `autocomplete` of every statement-password field. A statement
+// password is NOT a password for this site, so the browser's password
+// manager must neither fill it in nor offer to save it. "off" doesn't do
+// that: browsers ignore autocomplete="off" on type="password" fields, so
+// Chrome could fill in the user's saved Kharcha login (which would be sent
+// to the API as the PDF's password) or offer to store the bank's statement
+// password (review of PR 33). "one-time-code" marks the field as a code
+// typed once; Chromium's password manager leaves such fields alone.
+// Rejected: "new-password", which makes Chrome suggest a generated password
+// and offer to save what was typed as this site's new password.
+// Browser behaviour, so not provable in the jsdom tests: they only check
+// that both fields carry this value.
+export const STATEMENT_PASSWORD_AUTOCOMPLETE = "one-time-code";
 
 const UNFINISHED_STATUSES = ["pending", "processing"];
 
@@ -130,31 +146,46 @@ function replaceInList(queryClient, upload) {
   );
 }
 
+// The API's own pace, `Retry-After`, is for ONE upload. GET /uploads/{id}
+// has its own limit, UPLOAD_POLL_LIMIT (120/minute per user), and several
+// uploads polled at that pace each would add up: 6 uploads waiting for a
+// stopped worker, at 2 s each, are 180 requests a minute, and the API
+// starts answering 429. So the polls SHARE the pace: with n uploads
+// waiting, each one waits n times as long, and the total stays at one
+// request per `Retry-After`, however many there are (review of PR 33).
 /**
- * Keep one upload fresh while the worker imports it.
+ * How long to wait before polling one upload again, in milliseconds, or
+ * `false` to stop.
+ *
+ * - After a 429, the 429's own `Retry-After` comes first: the API has said
+ *   how long to back off, so the regular pace must not override it.
+ * - Otherwise the last answer's `Retry-After`, times the number of uploads
+ *   being polled. A final answer has no header: stop.
+ * - A `Retry-After: 0` still waits a second: TanStack Query reads an
+ *   interval of 0 as "no interval", which would stop the polling.
+ */
+export function pollDelayMs({ retryAfterSeconds, error, unfinishedCount }) {
+  if (error instanceof ApiError && error.status === 429) {
+    return Math.max(error.retryAfterSeconds ?? 60, 1) * 1000;
+  }
+  if (retryAfterSeconds == null) {
+    return false;
+  }
+  return Math.max(retryAfterSeconds, 1) * 1000 * Math.max(unfinishedCount, 1);
+}
+
+/**
+ * The polling query of one upload (for useQueries below).
  *
  * Every answer is written into the cached LIST, so whatever shows the list
- * (the uploads page, the home page's latest upload) updates by itself;
- * this hook returns nothing to render.
- *
- * - `enabled` only while pending/processing. When the list's copy turns
- *   final, the query switches itself off.
- * - `refetchInterval`: the API's `Retry-After`, in milliseconds. A final
- *   answer has no header, so the interval becomes `false`: stop.
- * - On a final status, every OTHER query is marked stale and refetched:
- *   new transactions change what the other pages show. The polls are left
- *   out, so this one isn't cancelled while it is still running.
- * - A 404 means the upload was deleted (in another tab): refetch the list,
- *   and the row disappears.
- *
- * TanStack Query pauses `refetchInterval` while the browser tab is hidden
- * (refetchIntervalInBackground defaults to false), so a forgotten tab
- * doesn't poll for nothing.
+ * (the uploads page, the home page's latest upload) updates by itself.
+ * On a final status every OTHER query is marked stale and refetched: new
+ * transactions change what the other pages show. The polls are left out,
+ * so a poll still running isn't cancelled. A 404 means the upload was
+ * deleted (in another tab): refetch the list, and its row disappears.
  */
-export function useUploadPolling(upload) {
-  const { status, client } = useAuth();
-  const queryClient = useQueryClient();
-  useQuery({
+function pollQuery({ upload, client, queryClient, enabled, unfinishedCount }) {
+  return {
     queryKey: [POLL_QUERY_ROOT, upload.id],
     queryFn: async ({ signal }) => {
       try {
@@ -176,11 +207,54 @@ export function useUploadPolling(upload) {
         throw error;
       }
     },
-    enabled: status === "authenticated" && isUnfinished(upload.status),
-    refetchInterval: (query) => {
-      const seconds = query.state.data?.retryAfterSeconds;
-      return seconds == null ? false : seconds * 1000;
-    },
+    enabled,
+    refetchInterval: (query) =>
+      pollDelayMs({
+        retryAfterSeconds: query.state.data?.retryAfterSeconds,
+        error: query.state.error,
+        unfinishedCount,
+      }),
+  };
+}
+
+/**
+ * Keep every pending/processing upload fresh until its import ends.
+ *
+ * Mounted ONCE, by UploadsWatcher in the signed-in layout, so it keeps
+ * running across pages: an upload finishing while the user is on another
+ * page still updates the list and refreshes the other pages' data. It used
+ * to live in each upload's row, so an upload that wasn't on screen (the
+ * home page shows only the latest) was never polled and its finish
+ * refreshed nothing (review of PR 33).
+ *
+ * It reads the list from the cache only (`enabled: false`): it never
+ * fetches GET /uploads itself, it watches whatever the pages fetched.
+ * `useQueries` is useQuery for a list whose length changes: one polling
+ * query per unfinished upload.
+ *
+ * TanStack Query pauses `refetchInterval` while the browser tab is hidden
+ * (refetchIntervalInBackground defaults to false), so a forgotten tab
+ * doesn't poll for nothing.
+ */
+export function useUnfinishedUploadsPolling() {
+  const { status, client } = useAuth();
+  const queryClient = useQueryClient();
+  const { data: uploads } = useQuery({
+    queryKey: UPLOADS_QUERY_KEY,
+    queryFn: ({ signal }) => client.request("/uploads", { signal }),
+    enabled: false,
+  });
+  const unfinished = (uploads ?? []).filter((upload) => isUnfinished(upload.status));
+  useQueries({
+    queries: unfinished.map((upload) =>
+      pollQuery({
+        upload,
+        client,
+        queryClient,
+        enabled: status === "authenticated",
+        unfinishedCount: unfinished.length,
+      }),
+    ),
   });
 }
 

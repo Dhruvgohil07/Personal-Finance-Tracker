@@ -17,6 +17,7 @@ import { FormField } from "@/components/form-field";
 import { formErrorsFrom } from "@/lib/form-errors";
 import {
   ACCEPTED_FILE_TYPES,
+  STATEMENT_PASSWORD_AUTOCOMPLETE,
   MAX_UPLOAD_MB,
   fileProblem,
   isPdf,
@@ -30,7 +31,16 @@ const NO_ERRORS = { fieldErrors: {}, formError: null };
 
 export function UploadForm({ accounts, submitLabel = "Upload statement" }) {
   const createUpload = useCreateUpload();
+  // The account the user picked. What the form USES is `selectedAccountId`:
+  // the pick if it is still one of `accounts`, otherwise the first account.
+  // `accounts` can change under the form (an account deleted in another
+  // tab, refetched when this tab regains focus); the drop-down then shows
+  // the first remaining account, and the upload must go to that same one,
+  // not to the deleted id still in state (review of PR 33).
   const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
+  const selectedAccountId = accounts.some((account) => account.id === accountId)
+    ? accountId
+    : (accounts[0]?.id ?? "");
   const [file, setFile] = useState(null);
   // The statement's password lives here only while the form is open, and
   // is cleared after every attempt; it is never stored (CLAUDE.md §7.2).
@@ -85,7 +95,7 @@ export function UploadForm({ accounts, submitLabel = "Upload statement" }) {
     try {
       const upload = await createUpload.mutateAsync({
         file,
-        accountId,
+        accountId: selectedAccountId,
         password: isPdf(file) ? password : "",
       });
       setNotice({
@@ -140,7 +150,7 @@ export function UploadForm({ accounts, submitLabel = "Upload statement" }) {
         label="Account"
         name="account_id"
         options={accountOptions}
-        value={accountId}
+        value={selectedAccountId}
         onChange={(event) => setAccountId(event.target.value)}
         error={errors.fieldErrors.account_id}
       />
@@ -159,7 +169,7 @@ export function UploadForm({ accounts, submitLabel = "Upload statement" }) {
           label="PDF password (if it has one)"
           name="password"
           type="password"
-          autoComplete="off"
+          autoComplete={STATEMENT_PASSWORD_AUTOCOMPLETE}
           value={password}
           onChange={(event) => setPassword(event.target.value)}
           hint="Banks often lock statement PDFs. The password is used once to open the file and is never stored."
