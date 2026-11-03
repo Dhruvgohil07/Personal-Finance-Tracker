@@ -8,6 +8,14 @@ const NETWORK_MESSAGE = "We couldn't reach Kharcha. Check your connection and tr
 // The backend names a field by where it was found: "body.email".
 const BODY_PREFIX = "body.";
 
+// Pydantic starts the message of an error raised inside a validator with
+// "Value error, " (or "Assertion failed, "): library wording, not ours.
+// Shown as it is, a field said "Value error, each column may be mapped
+// only once" (review of PR 34).
+const PYDANTIC_PREFIX = /^(Value error|Assertion failed), /;
+
+const readable = (message) => message.replace(PYDANTIC_PREFIX, "");
+
 const plural = (count, unit) => `${count} ${unit}${count === 1 ? "" : "s"}`;
 
 // Seconds up to a minute; above that, whole minutes rounded UP, so the user
@@ -53,7 +61,7 @@ export function formErrorsFrom(error, fields = []) {
         : null;
       if (field !== null && fields.includes(field)) {
         // Only the first problem per field: one clear message is enough.
-        fieldErrors[field] ??= problem.message;
+        fieldErrors[field] ??= readable(problem.message);
       } else {
         formError = error.message;
       }

@@ -49,6 +49,24 @@ describe("formErrorsFrom", () => {
     });
   });
 
+  it("drops Pydantic's 'Value error, ' wording from a field's message", () => {
+    // Review of PR 34: a validator's message reached the page as
+    // "Value error, each column may be mapped only once: amount".
+    const error = new ApiError({
+      status: 422,
+      code: "VALIDATION_ERROR",
+      message: "The request contains invalid data.",
+      details: [
+        { field: "body.column_mapping", message: "Value error, each column may be mapped only once: amount" },
+        { field: "body.email", message: "Assertion failed, not an email" },
+      ],
+    });
+    expect(formErrorsFrom(error, ["column_mapping", "email"]).fieldErrors).toEqual({
+      column_mapping: "each column may be mapped only once: amount",
+      email: "not an email",
+    });
+  });
+
   it.each([
     [42, "Too many attempts. Try again in 42 seconds."],
     [1, "Too many attempts. Try again in 1 second."],

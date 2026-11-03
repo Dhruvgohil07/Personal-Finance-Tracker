@@ -11,16 +11,22 @@
 //              may contain the delimiter or a line break
 //   header     searched in the first 50 rows, like the backend
 //
-// Only the first 64 KB are read: the column names and a few rows to preview
-// are near the top, and a statement can be megabytes long. Nothing here is
+// The WHOLE file is decoded, as the backend does: whether a file is UTF-8
+// or Windows-1252 depends on every byte, and a single Windows-1252 byte
+// far down the file changes how the backend reads the column names at the
+// top (review of PR 34). Files are at most 10 MB and checked before this
+// runs. Only the first rows are then split into cells. Nothing here is
 // sent anywhere; the file itself is uploaded as it is.
 
-const PREVIEW_BYTES = 64 * 1024;
 const DELIMITERS = [",", ";", "\t", "|"];
+// How many rows the delimiter is judged on: the backend's _SNIFF_ROWS
+// (app/parsers/readers.py), which runs this same rule. Keep them in step.
+export const SNIFF_ROWS = 60;
 // The backend's _MAX_HEADER_SEARCH_ROWS (app/parsers/generic_csv.py).
 export const MAX_HEADER_SEARCH_ROWS = 50;
-// Rows kept for the preview: the header search area plus a few data rows.
-const MAX_PREVIEW_ROWS = MAX_HEADER_SEARCH_ROWS + 10;
+// Rows kept for the mapping: the header search area plus up to 200 data
+// rows, whose dates decide between day-first and month-first.
+const MAX_PREVIEW_ROWS = MAX_HEADER_SEARCH_ROWS + 200;
 
 /** A file whose first rows can't be read as a CSV; `message` is for the user. */
 export class CsvPreviewError extends Error {
@@ -32,29 +38,42 @@ export class CsvPreviewError extends Error {
 
 const UNREADABLE = "This file isn't readable text. Export the statement as a CSV and try again.";
 
+// Bytes that Python's cp1252 codec REFUSES but the browser's windows-1252
+// decoder turns into control characters. The backend fails a file
+// containing one ("file is not readable text"), so the browser must too,
+// instead of offering a mapping for a file that can't be imported.
+const CP1252_UNDEFINED = new Set([0x81, 0x8d, 0x8f, 0x90, 0x9d]);
+
 /**
- * Bytes → text, as the backend's _decode_csv does.
+ * Bytes → text, exactly as the backend's _decode_csv:
  *
- * `stream: true` matters because only the START of the file is decoded:
- * the 64 KB cut can fall inside a multi-byte UTF-8 character, and a
- * streaming decoder keeps those last bytes back instead of reporting them
- * as invalid (which would wrongly fall back to Windows-1252).
+ *   starts with a UTF-16 byte-order mark  → UTF-16, refused if broken
+ *   valid UTF-8 (all of it)               → UTF-8, a leading BOM dropped
+ *   otherwise                             → Windows-1252, refused if it
+ *                                           holds a byte cp1252 lacks
  *
  * No real CSV contains a NUL character; finding one means the file was in
- * some other encoding (or isn't text at all), and reading it on would show
- * garbage column names.
+ * some other encoding (or isn't text at all).
  */
 export function decodeCsvBytes(bytes) {
   let text;
-  if (bytes[0] === 0xff && bytes[1] === 0xfe) {
-    text = new TextDecoder("utf-16le").decode(bytes, { stream: true });
-  } else if (bytes[0] === 0xfe && bytes[1] === 0xff) {
-    text = new TextDecoder("utf-16be").decode(bytes, { stream: true });
-  } else {
+  try {
+    if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+      text = new TextDecoder("utf-16le", { fatal: true }).decode(bytes);
+    } else if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+      text = new TextDecoder("utf-16be", { fatal: true }).decode(bytes);
+    }
+  } catch {
+    throw new CsvPreviewError(UNREADABLE);
+  }
+  if (text === undefined) {
     try {
       // The UTF-8 decoder drops a leading byte-order mark by itself.
-      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes, { stream: true });
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     } catch {
+      if (bytes.some((byte) => CP1252_UNDEFINED.has(byte))) {
+        throw new CsvPreviewError(UNREADABLE);
+      }
       text = new TextDecoder("windows-1252").decode(bytes);
     }
   }
@@ -115,20 +134,25 @@ export function parseCsv(text, delimiter, maxRows = Infinity) {
 }
 
 /**
- * The delimiter that splits the lines most consistently, like Python's
- * csv.Sniffer restricted to the backend's , ; tab |.
+ * The delimiter that splits the lines most consistently, among , ; tab |.
  *
- * For each candidate: split the first rows with it and find the most
- * common number of cells (above 1). The winner is the candidate for which
- * the most rows have that common count. Ties go to the earlier candidate,
- * so a file with no delimiter at all (one column) is read with a comma,
- * the backend's fallback too.
+ * For each candidate: split the first SNIFF_ROWS rows with it and find the
+ * most common number of cells (above 1). The winner is the candidate for
+ * which the most rows have that common count. Ties go to the earlier
+ * candidate, so a file with no delimiter at all (one column) is read with
+ * a comma.
+ *
+ * The backend runs the SAME rule (_sniff_delimiter in
+ * app/parsers/readers.py); it used to run Python's csv.Sniffer, which gave
+ * up on any file with a title line above the table and fell back to a
+ * comma, so a semicolon CSV mapped here could never be read there (review
+ * of PR 34). Change one, change both.
  */
 export function sniffDelimiter(text) {
   let best = { delimiter: ",", rows: 0 };
   for (const delimiter of DELIMITERS) {
     const counts = new Map();
-    for (const row of parseCsv(text, delimiter, MAX_PREVIEW_ROWS)) {
+    for (const row of parseCsv(text, delimiter, SNIFF_ROWS)) {
       if (row.length > 1) {
         counts.set(row.length, (counts.get(row.length) ?? 0) + 1);
       }
@@ -171,7 +195,7 @@ export function findHeaderRow(rows) {
  * Throws CsvPreviewError with a message for the user when it can't.
  */
 export async function readCsvPreview(file) {
-  const bytes = new Uint8Array(await file.slice(0, PREVIEW_BYTES).arrayBuffer());
+  const bytes = new Uint8Array(await file.arrayBuffer());
   const text = decodeCsvBytes(bytes);
   const rows = parseCsv(text, sniffDelimiter(text), MAX_PREVIEW_ROWS);
   const headerIndex = findHeaderRow(rows);
