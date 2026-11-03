@@ -338,3 +338,42 @@ and a balance column scaled the same way hid it from reconciliation. Semicolon C
 `parse_amount_to_paise` now accepts commas only as a real Indian (1,25,000) or
 international (125,000) grouping and refuses anything else, so such a row fails with
 its row number. Both real statements in `samples/` still parse in full.
+
+## Phase 3 Step 8: transactions (2026-11-03)
+Decided with Dhruv when the step started:
+- **`uncategorized=true` on `GET /transactions` (backend addition).** Lists rows with no
+  category (`category_id IS NULL`); with `category_id` too it is a 422 ("not both").
+  This closes the Phase 1 open decision. Rejected: a magic `category_id=none` (the
+  field stops being a plain UUID), and no such filter (the view manual categorization
+  needs most).
+- **"Apply to similar?" is asked after choosing a category,** inline in the row: "File
+  every transaction from <UPI id or merchant> as <category>?" with "Yes, all similar",
+  "Just this one" and "Cancel"; ONE PATCH carries the answer. Rows with neither a UPI id
+  nor a merchant key aren't asked (the API would answer 400 NOTHING_TO_MATCH).
+  Rejected: a checkbox by each drop-down (easy to miss or leave ticked).
+- **No date range by default:** everything, newest first, 50 at a time with "Load
+  more" (TanStack Query's useInfiniteQuery over the API's cursor). "This month" and
+  "Last month" fill in the calendar month in India's time.
+- **The "Guess" badge** marks `heuristic` rows with confidence ≤ 0.80, as planned;
+  self transfers get their own badge.
+
+Also:
+- **Filters live in the URL** (`?category=…&q=…`), read with useSearchParams and
+  written with router.push: bookmarkable, reload-proof, and the Back button returns to
+  the previous filters. The form edits a draft and is re-created (`key` = the query)
+  when the URL changes by itself. Invalid values in a hand-edited link are dropped
+  rather than sent. The page wraps the view in Suspense, which `next build` requires
+  around useSearchParams.
+- **"Not categorized yet", not "Uncategorized",** for category_id null (badge,
+  drop-down, filter). The seed has a real system category named "Uncategorized" (the
+  user's "nothing fits"), so the null case uses the insights API's name for it. Found in
+  the live check, where both appeared in one drop-down.
+- After a PATCH the returned row replaces the cached one at once, then every list is
+  refetched (the row may leave the filter); with apply_to_similar once more after 2 s,
+  when the background job has usually re-filed the others.
+- One markup for both layouts: a card per row on a phone, a CSS grid row lined up with
+  hidden-on-phone column headings from `md`.
+- Checked live with a synthetic import: the Uncategorized filter (`uncategorized=true`),
+  "Yes, all similar" re-filing both payments to one merchant with one PATCH, Back
+  restoring the previous filters and form, a note, and the phone layout without
+  sideways scrolling. Test user deleted; nothing of it in the API or worker logs.

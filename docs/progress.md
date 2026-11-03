@@ -569,14 +569,27 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
     `formErrorsFrom`. Left: two untested guards, two duplicated helpers, nested 422
     fields in the form, the `isCsv` comment. 283 Vitest tests; checked live with the
     worker rebuilt from the branch (`docker compose up -d --build worker`)
+  - Money fix found in that review's live check (its own PR, from
+    `phase-3/step-7-decimal-comma`): a decimal comma ("70,00") was
+    read as digit grouping (₹70.00 -> ₹7,000.00); `parse_amount_to_paise` now accepts
+    commas only as Indian or international grouping. PR 35 was closed: it carried
+    PR 34's commits under their pre-merge IDs and conflicted with `main`
+- [x] Step 8: Transactions — `/transactions` page: filters in the URL (dates, account,
+  category incl. "Not categorized yet", direction, search, amounts; "This month" / "Last
+  month" in India's time), newest first with "Load more" (useInfiniteQuery over the
+  cursor), cards on a phone and a grid table from `md`, category change with the
+  inline "file every transaction from X as Y?" question (one PATCH), notes, "Guess" and
+  "Self transfer" badges. Backend: `uncategorized=true` on GET /transactions (422 with
+  category_id). Decided with Dhruv: the flag, the prompt after choosing, no default
+  date range, the guess rule as planned (ADR 022 section). 320 Vitest tests; checked
+  live, test user deleted, logs clean
 
 ## In progress
 - (nothing)
 
 ## Next up
 - **Dhruv, after merging Step 3:** add `frontend` to the `protect-main` required checks
-- Phase 3 Step 8: transactions (filters in the URL, "Load more", inline category edit
-  with "apply to similar?", notes, badges)
+- Phase 3 Step 9: dashboard (this month vs last, the category donut; recharts)
 - If the backend's `MAX_UPLOAD_MB` ever changes, change `MAX_UPLOAD_MB` in
   `frontend/src/lib/uploads.js` with it (ADR 022, Step 6)
 - Step 11: verify an upload near 10 MB on the deployed app; the host may limit a
@@ -803,10 +816,8 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   manual category always sets `category_source = user_manual` and clears
   `category_confidence`. `apply_to_similar` (SPEC §10) is a 422 until Phase 2 builds the
   learned rules (§8.1)
-- Step 8 → open: no way to list UNCATEGORIZED transactions yet (`category_id` has no "is
-  null" form), which is what the Phase 1 manual-categorization flow actually wants. Not in
-  SPEC §10's parameter list; decide the spelling (`uncategorized=true`?) in Phase 3 when
-  the frontend needs it
+- Step 8 → decided in Phase 3 Step 8 (with Dhruv): `uncategorized=true` on GET
+  /transactions lists rows without a category; with `category_id` it is a 422
 - Step 8 → note: category NAME ordering inside a kind is Postgres' collation ("Education"
   vs "EMI & Loans" sort differently there than in Python), so the test asserts the grouping
   by kind only
