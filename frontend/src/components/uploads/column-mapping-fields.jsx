@@ -11,10 +11,11 @@
 
 import { FormField } from "@/components/form-field";
 import {
-  DATE_FORMATS,
   columnLabels,
   dataRows,
+  dateFormatsFor,
   dateSamples,
+  formatLabel,
   formatsFitting,
   guessMapping,
   previewDate,
@@ -54,14 +55,15 @@ export function ColumnMappingFields({ rows, values, onChange, errors = {} }) {
 
   const samples = dateSamples(rows, values);
   const fitting = formatsFitting(samples);
+  // Date-only formats, or date-and-time ones when the cells carry a time.
   const formatOptions = [
     { value: "", label: "Choose a format" },
-    ...DATE_FORMATS.map(({ pattern, example }) => ({
-      value: pattern,
+    ...dateFormatsFor(samples).map((format) => ({
+      value: format.pattern,
       label:
-        samples.length > 0 && !fitting.includes(pattern)
-          ? `${example} (doesn't match this file)`
-          : example,
+        samples.length > 0 && !fitting.includes(format.pattern)
+          ? `${formatLabel(format)}: doesn't match this file`
+          : formatLabel(format),
     })),
   ];
 

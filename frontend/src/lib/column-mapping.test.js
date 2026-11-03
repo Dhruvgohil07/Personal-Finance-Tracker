@@ -4,7 +4,9 @@ import {
   DATE_FORMATS,
   columnLabels,
   dataRows,
+  dateFormatsFor,
   dateSamples,
+  formatLabel,
   formatsFitting,
   guessMapping,
   mappingProblems,
@@ -105,10 +107,52 @@ describe("parseDateWith (Python strptime's rules)", () => {
     expect(parseDateWith(text, pattern)).toBeNull();
   });
 
-  it("can read every offered format's own example", () => {
+  it("can read every offered format's own example, with or without a time", () => {
     for (const { pattern, example } of DATE_FORMATS) {
-      expect(parseDateWith(example.split(" (")[0], pattern)).toBe("2026-08-01");
+      expect(parseDateWith(example, pattern)).toBe("2026-08-01");
     }
+    // Every date-and-time combination too (all 48, from a cell no
+    // combination reads, which lists them all).
+    for (const { pattern, example } of dateFormatsFor(["99:99"])) {
+      expect(parseDateWith(example, pattern)).toBe("2026-08-01");
+    }
+  });
+
+  // Review of PR 34: a time in the date column. Every case checked
+  // against Python's datetime.strptime, like those above.
+  it.each([
+    ["01/08/2026 14:05:09", "%d/%m/%Y %H:%M:%S", "2026-08-01"],
+    ["01/08/2026 2:5", "%d/%m/%Y %H:%M", "2026-08-01"],
+    ["01/08/2026 02:05 pm", "%d/%m/%Y %I:%M %p", "2026-08-01"],
+    ["Aug 01, 2026", "%b %d, %Y", "2026-08-01"],
+  ])("%s with %s is %s", (text, pattern, expected) => {
+    expect(parseDateWith(text, pattern)).toBe(expected);
+  });
+
+  it.each([
+    ["01/08/2026 10:32:60", "%d/%m/%Y %H:%M:%S"], // Python: second must be in 0..59
+    ["01/08/2026 24:00", "%d/%m/%Y %H:%M"], // no hour 24
+    ["01/08/2026 13:05 PM", "%d/%m/%Y %I:%M %p"], // %I is 1-12
+    ["01/08/2026 14:05", "%d/%m/%Y"], // the time must be in the pattern
+  ])("refuses %s with %s", (text, pattern) => {
+    expect(parseDateWith(text, pattern)).toBeNull();
+  });
+});
+
+describe("dateFormatsFor", () => {
+  it("offers the date formats for dates without a time", () => {
+    expect(dateFormatsFor(["01/08/2026"])).toBe(DATE_FORMATS);
+  });
+
+  it("offers only the date-and-time formats that fit, when there is a time", () => {
+    const offered = dateFormatsFor(["01/08/2026 14:05:09", "25/08/2026 09:00:00"]);
+    expect(offered.map((format) => format.pattern)).toEqual(["%d/%m/%Y %H:%M:%S"]);
+    expect(formatLabel(offered[0])).toBe("01/08/2026 14:05:09");
+  });
+
+  it("keeps the note of a format, as in '(month first, US style)'", () => {
+    const usStyle = DATE_FORMATS.find((format) => format.pattern === "%m/%d/%Y");
+    expect(formatLabel(usStyle)).toBe("08/01/2026 (month first, US style)");
   });
 });
 
@@ -121,6 +165,28 @@ describe("formatsFitting / suggestDateFormat", () => {
 
   it("finds only day-first once a day above 12 appears", () => {
     expect(formatsFitting(["01/08/2026", "25/08/2026"])).toEqual(["%d/%m/%Y"]);
+  });
+
+  it("suggests a time-aware format for dates that carry a time", () => {
+    const values = { ...VALID, date_format: "" };
+    const rows = rowsWith("05/08/2026 10:00:00", "25/08/2026 18:30:00");
+    expect(suggestDateFormat(values, rows).date_format).toBe("%d/%m/%Y %H:%M:%S");
+  });
+
+  it("decides on every row read, not just the first few", () => {
+    // Review of PR 34: seven ambiguous days, then the 25th settles it.
+    const values = { ...VALID, date_format: "" };
+    const rows = rowsWith(
+      "01/08/2026",
+      "02/08/2026",
+      "03/08/2026",
+      "04/08/2026",
+      "05/08/2026",
+      "06/08/2026",
+      "07/08/2026",
+      "25/08/2026",
+    );
+    expect(suggestDateFormat(values, rows).date_format).toBe("%d/%m/%Y");
   });
 
   it("suggests a format only when exactly one fits", () => {

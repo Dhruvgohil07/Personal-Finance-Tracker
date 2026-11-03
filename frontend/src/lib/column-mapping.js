@@ -50,7 +50,7 @@ export function columnLabels(headerRow) {
  * Each row is returned as a function `cell(label)`: the trimmed text under
  * that column name ("" for no label), found the way the backend finds it.
  */
-export function dataRows(rows, headerIndex, dateColumn, limit = 5) {
+export function dataRows(rows, headerIndex, dateColumn, limit = Infinity) {
   const header = rows[headerIndex] ?? [];
   // label (lower case) -> the index of the FIRST column with that name
   const indexOf = new Map();
@@ -141,9 +141,26 @@ export const DATE_FORMATS = [
   { pattern: "%d %b %Y", example: "01 Aug 2026" },
   { pattern: "%d-%b-%y", example: "01-Aug-26" },
   { pattern: "%d %B %Y", example: "01 August 2026" },
+  { pattern: "%b %d, %Y", example: "Aug 01, 2026" },
   { pattern: "%Y-%m-%d", example: "2026-08-01" },
-  { pattern: "%m/%d/%Y", example: "08/01/2026 (month first, US style)" },
+  { pattern: "%m/%d/%Y", example: "08/01/2026", note: "month first, US style" },
 ];
+
+// Some banks put the time in the date column ("01/08/2026 14:05:09"). The
+// backend must match the WHOLE cell, so such a file needs a pattern with
+// the time too; these are added to each date format when the file's dates
+// carry one (review of PR 34). Only the date is kept: SPEC §5 stores a DATE.
+const TIME_FORMATS = [
+  { pattern: " %H:%M:%S", example: " 14:05:09" },
+  { pattern: " %H:%M", example: " 14:05" },
+  { pattern: " %I:%M:%S %p", example: " 02:05:09 PM" },
+  { pattern: " %I:%M %p", example: " 02:05 PM" },
+];
+
+/** What a format looks like in the drop-down: its example and any note. */
+export function formatLabel({ example, note }) {
+  return note ? `${example} (${note})` : example;
+}
 
 const MONTHS = [
   "january",
@@ -160,10 +177,10 @@ const MONTHS = [
   "december",
 ];
 
-// Each directive as Python's _strptime writes its regular expression, so a
-// cell matches here exactly when it matches on the server: %d and %m take
-// one or two digits, %Y exactly four, %y exactly two, and month names
-// ignore case.
+// Each directive as Python's _strptime writes its regular expression
+// (printed from _strptime.TimeRE), so a cell matches here exactly when it
+// matches on the server: %d and %m take one or two digits, %Y exactly four,
+// %y exactly two, and month names and am/pm ignore case.
 const DIRECTIVES = {
   d: "(3[01]|[12]\\d|0[1-9]|[1-9]| [1-9])",
   m: "(1[0-2]|0[1-9]|[1-9])",
@@ -171,6 +188,11 @@ const DIRECTIVES = {
   y: "(\\d{2})",
   b: `(${MONTHS.map((month) => month.slice(0, 3)).join("|")})`,
   B: `(${MONTHS.join("|")})`,
+  H: "(2[0-3]|[0-1]\\d|\\d)",
+  I: "(1[0-2]|0[1-9]|[1-9]| [1-9])",
+  M: "([0-5]\\d|\\d)",
+  S: "(6[0-1]|[0-5]\\d|\\d)",
+  p: "(am|pm)",
 };
 
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -179,11 +201,13 @@ const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  * Read `text` with a strptime `pattern`, as the backend will:
  * `"2026-08-01"`-style ISO date, or null when it doesn't match.
  *
- * Supports the directives DATE_FORMATS uses (%d %m %Y %y %b %B). Like
- * strptime: the WHOLE cell must match (after trimming, which the backend
- * does too), a space in the pattern matches any run of spaces, and an
- * impossible date (31 June) is refused. Two-digit years: 69-99 are the
- * 1900s and 00-68 the 2000s, Python's rule.
+ * Supports the directives the offered formats use (%d %m %Y %y %b %B, and
+ * %H %I %M %S %p for a time). Like strptime: the WHOLE cell must match
+ * (after trimming, which the backend does too), a space in the pattern
+ * matches any run of spaces, and an impossible date (31 June) is refused.
+ * Two-digit years: 69-99 are the 1900s and 00-68 the 2000s, Python's rule.
+ * A time is matched and then dropped; second 60 or 61 passes Python's
+ * regular expression but is refused by datetime, so it is refused here.
  */
 export function parseDateWith(text, pattern) {
   const parts = [];
@@ -207,6 +231,7 @@ export function parseDateWith(text, pattern) {
   let day;
   let month;
   let year;
+  let second = 0;
   parts.forEach((part, index) => {
     const value = match[index + 1].trim().toLowerCase();
     if (part === "d") day = Number(value);
@@ -215,7 +240,11 @@ export function parseDateWith(text, pattern) {
     if (part === "y") year = Number(value) + (Number(value) >= 69 ? 1900 : 2000);
     if (part === "b") month = MONTHS.findIndex((name) => name.startsWith(value)) + 1;
     if (part === "B") month = MONTHS.indexOf(value) + 1;
+    if (part === "S") second = Number(value);
   });
+  if (second > 59) {
+    return null;
+  }
 
   // Date.UTC rolls 31 June over to 1 July; a real date survives unchanged.
   const date = new Date(Date.UTC(year, month - 1, day));
@@ -226,17 +255,46 @@ export function parseDateWith(text, pattern) {
   return `${year}-${pad(month)}-${pad(day)}`;
 }
 
-/** The DATE_FORMATS patterns that read every one of `samples`. */
+const readsAll = (samples, pattern) =>
+  samples.every((sample) => parseDateWith(sample, pattern) !== null);
+
+/**
+ * The formats to offer for these date cells: DATE_FORMATS, or, when the
+ * cells carry a time, each date format joined with each time layout. Then
+ * only the combinations that read the cells are listed (all of them if
+ * none does), or the list would be 48 long.
+ */
+export function dateFormatsFor(samples) {
+  if (!samples.some((sample) => /\d:\d/.test(sample))) {
+    return DATE_FORMATS;
+  }
+  const combined = DATE_FORMATS.flatMap((date) =>
+    TIME_FORMATS.map((time) => ({
+      pattern: date.pattern + time.pattern,
+      example: date.example + time.example,
+      note: date.note,
+    })),
+  );
+  const fitting = combined.filter((format) => readsAll(samples, format.pattern));
+  return fitting.length > 0 ? fitting : combined;
+}
+
+/** The offered patterns that read every one of `samples`. */
 export function formatsFitting(samples) {
   if (samples.length === 0) {
     return [];
   }
-  return DATE_FORMATS.map((format) => format.pattern).filter((pattern) =>
-    samples.every((sample) => parseDateWith(sample, pattern) !== null),
-  );
+  return dateFormatsFor(samples)
+    .map((format) => format.pattern)
+    .filter((pattern) => readsAll(samples, pattern));
 }
 
-/** The date cells of the first data rows, for checking a format against. */
+/**
+ * The date cells of EVERY data row read (up to 200), for checking a format
+ * against. All of them, not a handful: a statement's first week reads the
+ * same day-first and month-first, and only a later "25/08" settles it
+ * (review of PR 34).
+ */
 export function dateSamples(rows, values) {
   return dataRows(rows, values.headerIndex, values.date_column).map((cell) =>
     cell(values.date_column),

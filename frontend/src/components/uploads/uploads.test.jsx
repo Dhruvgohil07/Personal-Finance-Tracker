@@ -784,3 +784,38 @@ describe("UploadsView: a CSV and its columns", () => {
     expect(options.body.has("column_mapping")).toBe(false);
   });
 });
+
+describe("UploadsView: CSV review fixes (PR 34)", () => {
+  it("maps a semicolon file with a title line, and sends the mapping", async () => {
+    // The backend now reads this with ";" too (_sniff_delimiter).
+    const { fetchImpl } = await renderUploads(fakeUploadsApi());
+    chooseFile(
+      csvFile("Synthetic Bank statement\nDate;Narration;Amount\n25/08/2026;SHOP;-70,00\n"),
+    );
+
+    expect(await screen.findByLabelText("Date column")).toHaveDisplayValue("Date");
+    expect(screen.getByLabelText("Amount column")).toHaveDisplayValue("Amount");
+    fireEvent.click(uploadButton());
+
+    await waitFor(() => expect(requestsTo(fetchImpl, "POST", "/uploads")).toHaveLength(1));
+    const [[, options]] = requestsTo(fetchImpl, "POST", "/uploads");
+    expect(JSON.parse(options.body.get("column_mapping")).date_column).toBe("Date");
+  });
+
+  it("offers and sends a date format with the time when the dates carry one", async () => {
+    const { fetchImpl } = await renderUploads(fakeUploadsApi());
+    chooseFile(
+      csvFile(
+        "Date,Narration,Amount\n01/08/2026 14:05:09,SHOP,-70.00\n25/08/2026 09:00:00,PAY,500.00\n",
+      ),
+    );
+
+    expect(await screen.findByLabelText("Date format")).toHaveDisplayValue("01/08/2026 14:05:09");
+    expect(screen.getByText("25 Aug 2026")).toBeInTheDocument();
+    fireEvent.click(uploadButton());
+
+    await waitFor(() => expect(requestsTo(fetchImpl, "POST", "/uploads")).toHaveLength(1));
+    const [[, options]] = requestsTo(fetchImpl, "POST", "/uploads");
+    expect(JSON.parse(options.body.get("column_mapping")).date_format).toBe("%d/%m/%Y %H:%M:%S");
+  });
+});

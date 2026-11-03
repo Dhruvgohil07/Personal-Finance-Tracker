@@ -35,10 +35,34 @@ describe("decodeCsvBytes", () => {
     expect(decodeCsvBytes(bytes)).toBe("Date\tAmount");
   });
 
-  it("stays UTF-8 when the 64 KB cut falls inside a character", () => {
-    // "₹" is three bytes; keep only the first: a cut, not bad UTF-8.
-    const bytes = new Uint8Array([...utf8("Amount ₹,Café")].slice(0, 8));
-    expect(decodeCsvBytes(bytes)).toBe("Amount ");
+  it("decides on the WHOLE file, as the backend does", () => {
+    // Valid UTF-8 at the top, one Windows-1252 byte far below: the backend
+    // reads the whole file as Windows-1252, so "₹" in the header becomes
+    // "â‚¹" there, and must here too, or the mapped name is never found.
+    const bytes = new Uint8Array([
+      ...utf8("Amount (₹),Narration\n"),
+      ...utf8("1,x\n".repeat(20_000)),
+      ...utf8("2,Caf"),
+      0xe9,
+    ]);
+    expect(decodeCsvBytes(bytes).split("\n")[0]).toBe("Amount (â‚¹),Narration");
+  });
+
+  it.each([0x81, 0x8d, 0x8f, 0x90, 0x9d])(
+    "refuses byte %d, which Python's cp1252 can't decode either",
+    (byte) => {
+      // The browser's windows-1252 would turn it into a control character;
+      // the backend fails the file ("file is not readable text").
+      const bytes = new Uint8Array([...utf8("Date,Narration\n01/08/2026,A"), byte]);
+      expect(() => decodeCsvBytes(bytes)).toThrow(CsvPreviewError);
+    },
+  );
+
+  it("refuses broken UTF-16, as the backend does", () => {
+    // A byte-order mark, then an odd number of bytes: not whole UTF-16.
+    expect(() => decodeCsvBytes(new Uint8Array([0xff, 0xfe, 0x44, 0x00, 0x61]))).toThrow(
+      CsvPreviewError,
+    );
   });
 
   it("refuses text with NUL characters (another encoding, or not text)", () => {
@@ -90,6 +114,20 @@ describe("sniffDelimiter", () => {
 
   it("falls back to a comma for a file with one column, like the backend", () => {
     expect(sniffDelimiter("just\none\ncolumn\n")).toBe(",");
+  });
+
+  // The same files as the backend's test_read_csv_finds_the_delimiter_below_
+  // a_title_line: both sides must pick the same delimiter (review of PR 34).
+  it.each([
+    ["Synthetic Bank statement\nDate;Narration;Amount\n01/08/2026;SHOP;-70.00\n", ";"],
+    ["Statement\n\nDate\tNarration\tAmount\n01/08/2026\tSHOP\t70\n", "\t"],
+    ["Title\nDate;Narration;Amount\n01/08/2026;UPI, SHOP;-70,00\n02/08/2026;PAY;5,00\n", ";"],
+  ])("finds the delimiter below a bank's title line (%#)", (text, expected) => {
+    expect(sniffDelimiter(text)).toBe(expected);
+  });
+
+  it("prefers the earlier delimiter on a tie, like the backend", () => {
+    expect(sniffDelimiter("a,b;c\nd,e;f\n")).toBe(",");
   });
 });
 
