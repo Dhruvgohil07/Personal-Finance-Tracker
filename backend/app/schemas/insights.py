@@ -138,6 +138,9 @@ class PeriodTotals(BaseModel):
     spend_paise: int = Field(description="Money out (debits), in paise")
     net_paise: int = Field(description="income - spend, in paise; negative if you overspent")
     transaction_count: int = Field(description="How many transactions are behind these totals")
+    uncategorized_count: int = Field(
+        description="How many of those transactions are not categorized yet (debits and credits)"
+    )
 
     @computed_field(description='Income in Indian format, e.g. "₹50,000.00"')
     @property

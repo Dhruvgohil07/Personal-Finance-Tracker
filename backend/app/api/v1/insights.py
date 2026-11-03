@@ -108,4 +108,5 @@ def _totals(totals: insights_service.PeriodTotals) -> PeriodTotals:
         spend_paise=totals.spend_paise,
         net_paise=totals.net_paise,
         transaction_count=totals.transaction_count,
+        uncategorized_count=totals.uncategorized_count,
     )
