@@ -8,7 +8,9 @@
 
 import { useId } from "react";
 
-const CONTROL_CLASSES =
+// Exported for controls FormField doesn't draw itself (a <select> with
+// <optgroup>s, see CategorySelect), so every control looks the same.
+export const CONTROL_CLASSES =
   "rounded-md border border-neutral-300 bg-background px-3 py-2 outline-none focus:border-neutral-500 aria-[invalid]:border-red-600 dark:border-neutral-700";
 
 export function FormField({ label, hint, error, options, ...controlProps }) {
