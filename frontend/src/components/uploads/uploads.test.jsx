@@ -1,12 +1,21 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { UploadsView } from "@/components/uploads/uploads-view";
 import { UploadsWatcher } from "@/components/uploads/uploads-watcher";
 import { MAX_UPLOAD_BYTES, UPLOADS_QUERY_KEY } from "@/lib/uploads";
+import { emptyDashboardHandler } from "@/test/insights";
 import { apiError, json, renderWithSession } from "@/test/session";
 
 import HomePage from "@/app/(app)/page";
+
+// The home page's dashboard reads the URL (?month=) and can change it;
+// next/navigation only works inside a running Next.js app, so it is faked.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
+  usePathname: () => "/",
+}));
 
 const SALARY = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -143,7 +152,8 @@ function fakeUploadsApi({
       state.uploads = state.uploads.filter((u) => u.id !== one[1]);
       return new Response(null, { status: 204 });
     }
-    return undefined;
+    // The home page's dashboard: an empty month.
+    return emptyDashboardHandler(path);
   }
   return { state, handler };
 }
@@ -524,11 +534,11 @@ describe("HomePage: the first statement", () => {
     fireEvent.click(screen.getByRole("button", { name: "Upload my first statement" }));
 
     expect(await screen.findByText("Your latest statement")).toBeInTheDocument();
+    // Watched importing on this page, so its result stays once it is done,
+    // with the dashboard below it.
     expect(await screen.findByText(/31 new transactions added\./)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Upload another statement" })).toHaveAttribute(
-      "href",
-      "/uploads",
-    );
+    expect(await screen.findByRole("region", { name: "Your month" })).toBeInTheDocument();
+    expect(screen.getByText("october.xls")).toBeInTheDocument();
   });
 
   it("shows only the latest upload once there are several", async () => {
@@ -536,7 +546,7 @@ describe("HomePage: the first statement", () => {
       signedIn: true,
       handler: fakeUploadsApi({
         uploads: [
-          anUpload({ original_filename: "november.xls" }),
+          anUpload({ original_filename: "november.xls", status: "needs_password" }),
           anUpload({ id: "aaaaaaaa-0000-4000-8000-0000000000a2", original_filename: "october.xls" }),
         ],
       }).handler,
@@ -544,6 +554,33 @@ describe("HomePage: the first statement", () => {
 
     expect(await screen.findByText("november.xls")).toBeInTheDocument();
     expect(screen.queryByText("october.xls")).not.toBeInTheDocument();
+  });
+
+  it("leaves out a latest upload that imported cleanly before the page opened", async () => {
+    renderWithSession(withWatcher(<HomePage />), {
+      signedIn: true,
+      handler: fakeUploadsApi({ uploads: [anUpload({ original_filename: "october.xls" })] }).handler,
+    });
+
+    expect(await screen.findByRole("region", { name: "Your month" })).toBeInTheDocument();
+    expect(screen.queryByText("Your latest statement")).not.toBeInTheDocument();
+    expect(screen.queryByText("october.xls")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["needs_review", { reconciliation_errors: 1, reconciliation_issues: [{ row_number: 7, kind: "balance_mismatch" }] }],
+    ["failed", { error_message: "This file could not be read." }],
+  ])("keeps a latest upload that is %s above the dashboard", async (status, extra) => {
+    renderWithSession(withWatcher(<HomePage />), {
+      signedIn: true,
+      handler: fakeUploadsApi({
+        uploads: [anUpload({ original_filename: "october.xls", status, ...extra })],
+      }).handler,
+    });
+
+    expect(await screen.findByText("Your latest statement")).toBeInTheDocument();
+    expect(screen.getByText("october.xls")).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Your month" })).toBeInTheDocument();
   });
 });
 
@@ -601,8 +638,12 @@ describe("UploadsWatcher", () => {
       rows_inserted: 0,
       rows_duplicate: 0,
     });
+    // october.xls failed, so the home page keeps it in view.
     const api = fakeUploadsApi({
-      uploads: [anUpload({ original_filename: "october.xls" }), older],
+      uploads: [
+        anUpload({ original_filename: "october.xls", status: "failed", error_message: "Unreadable." }),
+        older,
+      ],
     });
     api.state.scripts.set(older.id, [IMPORTED]);
     // The home page shows only the latest upload, october.xls...

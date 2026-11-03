@@ -6,20 +6,28 @@
 // value in under 2 minutes):
 //   1. no accounts yet   → "Add your first account"
 //   2. no uploads yet    → "Upload your first statement"
-//   3. otherwise         → the latest upload: while it imports, its status;
-//                          then what it added (or its password prompt).
-// The dashboard (Phase 3 Step 9) will take the place of the placeholder text.
+//   3. otherwise         → the dashboard (Phase 3 Step 9). Above it, the
+//                          latest upload while it still needs something:
+//                          it is importing, needs its password or a check,
+//                          or failed. A plain "Imported" is left out,
+//                          unless the user watched it import on this page:
+//                          then what it added stays in view.
+//
+// Suspense: the dashboard reads the URL's ?month= with useSearchParams,
+// which Next.js only knows in the browser; `next build` requires a
+// boundary around it (see the transactions page).
 
-import Link from "next/link";
+import { Suspense, useState } from "react";
 
 import { AccountForm } from "@/components/accounts/account-form";
+import { Dashboard } from "@/components/dashboard/dashboard";
 import { FormError } from "@/components/form-error";
 import { UploadForm } from "@/components/uploads/upload-form";
 import { UploadList } from "@/components/uploads/upload-list";
 import { useAccounts } from "@/lib/accounts";
 import { formErrorsFrom } from "@/lib/form-errors";
 import { useMe } from "@/lib/me";
-import { useUploads } from "@/lib/uploads";
+import { isUnfinished, useUploads } from "@/lib/uploads";
 
 function FirstRunStep({ greeting, title, text, children }) {
   return (
@@ -39,6 +47,18 @@ export default function HomePage() {
   const accounts = useAccounts();
   const uploads = useUploads();
   const greeting = me.data ? `Welcome, ${me.data.name}` : "Welcome";
+
+  // Uploads come newest first, so [0] is the latest.
+  const latest = uploads.data?.[0];
+  // The upload this page saw importing, so its result stays shown once it
+  // is "Imported". Remembered with React's "adjust state while rendering"
+  // pattern: a state update during render, guarded so it happens once per
+  // upload, makes React render again at once with the new value. An effect
+  // would do the same a frame later, after the card had already vanished.
+  const [watchedId, setWatchedId] = useState(null);
+  if (latest && isUnfinished(latest.status) && watchedId !== latest.id) {
+    setWatchedId(latest.id);
+  }
 
   // Each step waits only for what it needs: the first step needs just the
   // accounts, so a failing GET /uploads must not hide it (review of PR 33).
@@ -83,21 +103,15 @@ export default function HomePage() {
   return (
     <div className="flex flex-col gap-6">
       <h1 className="text-2xl font-semibold">{greeting}</h1>
-      <section className="flex flex-col gap-3">
-        <h2 className="text-lg font-semibold">Your latest statement</h2>
-        {/* Uploads come newest first, so [0] is the latest. */}
-        <UploadList uploads={uploads.data.slice(0, 1)} accounts={accounts.data} />
-      </section>
-      <p className="text-muted">
-        <Link href="/uploads" className="underline">
-          Upload another statement
-        </Link>{" "}
-        or{" "}
-        <Link href="/accounts" className="underline">
-          manage your accounts
-        </Link>
-        . Your spending will appear here as Kharcha grows.
-      </p>
+      {latest.status !== "completed" || latest.id === watchedId ? (
+        <section className="flex flex-col gap-3">
+          <h2 className="text-lg font-semibold">Your latest statement</h2>
+          <UploadList uploads={[latest]} accounts={accounts.data} />
+        </section>
+      ) : null}
+      <Suspense fallback={<p role="status">Loading your month…</p>}>
+        <Dashboard />
+      </Suspense>
     </div>
   );
 }
