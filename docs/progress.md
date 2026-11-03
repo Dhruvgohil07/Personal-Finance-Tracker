@@ -1019,11 +1019,11 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
 - Frontend tooling: ESLint 9.39.5 (npm calls it unsupported) because three of
   `eslint-config-next`'s plugins don't support ESLint 10; `npm audit` reports a moderate
   `minimatch` DoS in that dev-only toolchain. Revisit when they support ESLint 10
-- **Decimal-comma amounts are read as digit grouping:** `parse_amount_to_paise("70,00")`
-  is 700000 paise (₹7,000.00, not ₹70.00), and the grouping's shape is not checked.
-  Reachable since the PR 34 review fix lets semicolon CSVs (where decimal commas are
-  usual) import; balances scale the same way, so reconciliation does not catch it.
-  Needs a decision on the money rules (CLAUDE.md rule 1)
+- **SOLVED (PR 34 review): decimal-comma amounts were read as digit grouping**
+  ("70,00" became ₹7,000.00). `parse_amount_to_paise` now accepts commas only as a
+  real Indian (1,25,000) or international (125,000) grouping and refuses anything
+  else, so such a row fails with its row number instead of importing 100 times too
+  much. Both real statements in `samples/` still parse in full
 - The Docker `worker` runs code baked into its image (`build: ./backend`, no volume):
   after a backend change, `docker compose up -d --build worker` before a live check
 - Windows dev: stopping a backgrounded `npm run dev` stops npm but can leave its `node`

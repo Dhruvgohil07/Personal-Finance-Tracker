@@ -331,6 +331,10 @@ Left as they are: tests for the stale-read guard and the header-row re-guess, th
 duplicated initial-mapping expression and "first column with this name" rule, nested
 422 fields handled in the upload form, and the misleading `isCsv` comment.
 
-Found during the live check, not fixed: a decimal-comma amount ("70,00") is read as
-digit grouping, so ₹70.00 becomes ₹7,000.00. Semicolon CSVs (where decimal commas are
-usual) can now be imported, which makes this reachable. See progress, Known issues.
+Found during the live check, then fixed on the same branch (decided with Dhruv): a
+decimal-comma amount ("70,00") was read as digit grouping, so ₹70.00 became ₹7,000.00,
+and a balance column scaled the same way hid it from reconciliation. Semicolon CSVs
+(where decimal commas are usual) can now be imported, which made this reachable.
+`parse_amount_to_paise` now accepts commas only as a real Indian (1,25,000) or
+international (125,000) grouping and refuses anything else, so such a row fails with
+its row number. Both real statements in `samples/` still parse in full.
