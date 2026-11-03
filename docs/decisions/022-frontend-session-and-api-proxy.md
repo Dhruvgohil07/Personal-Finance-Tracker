@@ -150,3 +150,24 @@ Three fixes, each checked so that its test fails without it:
   `loggedOut` when the session ends through `logout()`, so the next person at a
   shared computer finds nothing of the previous user's page in the URL. An expired
   session still gets `?next=`.
+
+## Phase 3 Step 5: accounts (2026-11-03)
+- **Only the last 4 digits leave the browser.** The add form checks for exactly 4
+  digits in code before sending, not only with the input's `pattern` (which a script
+  can bypass), so a pasted full account number is refused on the page. No `maxLength`
+  either: it would silently cut a pasted 12-digit number down to its FIRST 4 digits.
+- **Deleting is confirmed inline**, in the account's row: the warning that its
+  statements and transactions go too, "Delete account" and "Cancel", with focus on
+  "Cancel" so a stray Enter deletes nothing. A native `<dialog>` was the first plan,
+  but jsdom (the test browser) has no `showModal()`, so it couldn't be tested as it
+  really runs.
+- **The bank and the last 4 digits can't be edited** (the backend's rule: they say
+  which real account this is); the edit form says to delete and re-add instead.
+- **After every change the data is fetched again** (TanStack Query invalidation)
+  rather than patched locally. Deleting an account invalidates ALL cached data, since
+  its uploads and transactions are gone too.
+- **One shared `Button`** (`type="button"` by default, so a button inside a form
+  never submits it by accident).
+- Checked live: first-run card → a 12-digit number refused with no request sent → the
+  account added → welcome; rename and retype (PATCH 200); delete with the warning and
+  focus on Cancel; the test user deleted afterwards; nothing of it in the logs.
