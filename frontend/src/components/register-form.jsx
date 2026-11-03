@@ -6,6 +6,7 @@
 import Link from "next/link";
 import { useRef, useState } from "react";
 
+import { Button } from "@/components/button";
 import { FormError } from "@/components/form-error";
 import { FormField } from "@/components/form-field";
 import { useAuth } from "@/lib/auth";
@@ -102,13 +103,9 @@ export function RegisterForm() {
         onChange={(event) => setPassword(event.target.value)}
         error={errors.fieldErrors.password}
       />
-      <button
-        type="submit"
-        disabled={submitting}
-        className="rounded-md bg-neutral-900 px-4 py-2 font-medium text-white hover:bg-neutral-700 disabled:opacity-60 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300"
-      >
+      <Button type="submit" disabled={submitting}>
         {submitting ? "Creating your account…" : "Create account"}
-      </button>
+      </Button>
       <p className="text-muted text-sm">
         Already have an account?{" "}
         <Link href="/login" className="underline">
