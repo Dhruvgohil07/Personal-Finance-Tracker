@@ -560,6 +560,15 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   guesses only (nothing stored), own reader, preset formats (ADR 022 section). 257
   Vitest tests; checked live with a synthetic CSV, imported and reconciled, test user
   deleted, logs clean
+  - Review of PR 34 (top 5 of 10 findings fixed): the backend's `csv.Sniffer` replaced
+    by the browser's delimiter rule (`_sniff_delimiter`; Sniffer fell back to a comma
+    whenever a title line lacked the delimiter, so semicolon/tab CSVs could never be
+    mapped); the browser decodes the whole file and refuses the bytes Python's cp1252
+    refuses; date formats judged on every row read; date-and-time formats (%H %I %M %S
+    %p) and "Aug 01, 2026"; Pydantic's "Value error, " prefix dropped in
+    `formErrorsFrom`. Left: two untested guards, two duplicated helpers, nested 422
+    fields in the form, the `isCsv` comment. 283 Vitest tests; checked live with the
+    worker rebuilt from the branch (`docker compose up -d --build worker`)
 
 ## In progress
 - (nothing)
@@ -1010,6 +1019,13 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
 - Frontend tooling: ESLint 9.39.5 (npm calls it unsupported) because three of
   `eslint-config-next`'s plugins don't support ESLint 10; `npm audit` reports a moderate
   `minimatch` DoS in that dev-only toolchain. Revisit when they support ESLint 10
+- **Decimal-comma amounts are read as digit grouping:** `parse_amount_to_paise("70,00")`
+  is 700000 paise (₹7,000.00, not ₹70.00), and the grouping's shape is not checked.
+  Reachable since the PR 34 review fix lets semicolon CSVs (where decimal commas are
+  usual) import; balances scale the same way, so reconciliation does not catch it.
+  Needs a decision on the money rules (CLAUDE.md rule 1)
+- The Docker `worker` runs code baked into its image (`build: ./backend`, no volume):
+  after a backend change, `docker compose up -d --build worker` before a live check
 - Windows dev: stopping a backgrounded `npm run dev` stops npm but can leave its `node`
   child (`next/dist/server/lib/start-server.js`) serving port 3000, and the next
   `npm run dev` fails with EADDRINUSE. Find it by command line (`Get-CimInstance
