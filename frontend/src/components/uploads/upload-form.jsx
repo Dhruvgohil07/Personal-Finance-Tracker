@@ -8,26 +8,65 @@
 // can't hold it in state the way it holds a text field. The chosen File is
 // copied into state from onChange, and to empty the input after an upload
 // the input is re-created by changing its `key`.
+//
+// A CSV gets one more step (Phase 3 Step 7): its first rows are read in the
+// browser and the user says which column is which (ColumnMappingFields).
+// The mapping goes with the upload as `column_mapping`.
 
 import { useRef, useState } from "react";
 
 import { Button } from "@/components/button";
 import { FormError } from "@/components/form-error";
 import { FormField } from "@/components/form-field";
+import { ColumnMappingFields } from "@/components/uploads/column-mapping-fields";
+import {
+  COLUMN_FIELDS,
+  columnLabels,
+  dateSamples,
+  guessMapping,
+  mappingProblems,
+  suggestDateFormat,
+  toColumnMapping,
+} from "@/lib/column-mapping";
+import { CsvPreviewError, readCsvPreview } from "@/lib/csv-preview";
 import { formErrorsFrom } from "@/lib/form-errors";
 import {
   ACCEPTED_FILE_TYPES,
   STATEMENT_PASSWORD_AUTOCOMPLETE,
   MAX_UPLOAD_MB,
   fileProblem,
+  isCsv,
   isPdf,
   isUnfinished,
   useCreateUpload,
   useUploads,
 } from "@/lib/uploads";
 
-const FIELDS = ["file", "account_id", "password"];
 const NO_ERRORS = { fieldErrors: {}, formError: null };
+
+// The fields a 422 can name. The backend names a mapping field
+// "column_mapping.date_format" (or just "column_mapping" for a rule about
+// the whole mapping); the form shows those under its own field names.
+const MAPPING_PREFIX = "column_mapping.";
+const FIELDS = [
+  "file",
+  "account_id",
+  "password",
+  "column_mapping",
+  ...[...COLUMN_FIELDS, "date_format"].map((field) => MAPPING_PREFIX + field),
+];
+
+function uploadErrorsFrom(error) {
+  const { fieldErrors, formError } = formErrorsFrom(error, FIELDS);
+  const renamed = {};
+  for (const [field, message] of Object.entries(fieldErrors)) {
+    renamed[field.startsWith(MAPPING_PREFIX) ? field.slice(MAPPING_PREFIX.length) : field] =
+      message;
+  }
+  return { fieldErrors: renamed, formError };
+}
+
+const CSV_READING = "Still reading the file's columns. Try again in a moment.";
 
 export function UploadForm({ accounts, submitLabel = "Upload statement" }) {
   const createUpload = useCreateUpload();
@@ -54,6 +93,13 @@ export function UploadForm({ accounts, submitLabel = "Upload statement" }) {
   const uploads = useUploads();
   const noticeUpload = uploads.data?.find((upload) => upload.id === notice?.uploadId);
   const noticeText = noticeUpload && notice.showWhile(noticeUpload.status) ? notice.text : null;
+  // A chosen CSV's first rows (`{ rows }`) and the column mapping the
+  // user is building for it; both null for any other file.
+  const [csv, setCsv] = useState(null);
+  const [mapping, setMapping] = useState(null);
+  // Counts file choices. Reading a CSV takes a moment; if another file is
+  // chosen meanwhile, the older read's result must not replace the newer.
+  const fileChoice = useRef(0);
   // Changing the key re-creates the file input, which empties it.
   const [fileInputKey, setFileInputKey] = useState(0);
   // Blocks a second submit while one is on its way (see LoginForm).
@@ -70,11 +116,38 @@ export function UploadForm({ accounts, submitLabel = "Upload statement" }) {
     if (!isPdf(chosen)) {
       setPassword("");
     }
+    setCsv(null);
+    setMapping(null);
+    const choice = ++fileChoice.current;
+    if (chosen && !problem && isCsv(chosen)) {
+      readCsv(chosen, choice);
+    }
+  }
+
+  async function readCsv(chosen, choice) {
+    try {
+      const { rows, headerIndex } = await readCsvPreview(chosen);
+      if (choice !== fileChoice.current) {
+        return; // another file was chosen meanwhile
+      }
+      setCsv({ rows });
+      setMapping(suggestDateFormat(guessMapping(columnLabels(rows[headerIndex]), headerIndex), rows));
+    } catch (error) {
+      if (choice !== fileChoice.current) {
+        return;
+      }
+      const message =
+        error instanceof CsvPreviewError ? error.message : "We couldn't read this file.";
+      setErrors({ fieldErrors: { file: message }, formError: null });
+    }
   }
 
   function resetFile() {
     setFile(null);
     setPassword("");
+    setCsv(null);
+    setMapping(null);
+    fileChoice.current += 1;
     setFileInputKey((key) => key + 1);
   }
 
@@ -88,6 +161,25 @@ export function UploadForm({ accounts, submitLabel = "Upload statement" }) {
       setErrors({ fieldErrors: { file: problem }, formError: null });
       return;
     }
+    let columnMapping = null;
+    if (isCsv(file)) {
+      if (mapping === null) {
+        // Still being read, or unreadable (its message is already shown).
+        if (!errors.fieldErrors.file) {
+          setErrors({ fieldErrors: { file: CSV_READING }, formError: null });
+        }
+        return;
+      }
+      const mappingErrors = mappingProblems(mapping, dateSamples(csv.rows, mapping));
+      if (Object.keys(mappingErrors).length > 0) {
+        setErrors({
+          fieldErrors: mappingErrors,
+          formError: "Check the column choices below.",
+        });
+        return;
+      }
+      columnMapping = toColumnMapping(mapping);
+    }
 
     inFlight.current = true;
     setErrors(NO_ERRORS);
@@ -97,6 +189,7 @@ export function UploadForm({ accounts, submitLabel = "Upload statement" }) {
         file,
         accountId: selectedAccountId,
         password: isPdf(file) ? password : "",
+        columnMapping,
       });
       setNotice({
         uploadId: upload.id,
@@ -129,7 +222,7 @@ export function UploadForm({ accounts, submitLabel = "Upload statement" }) {
       setErrors({ fieldErrors: { password: error.message }, formError: null });
       return;
     }
-    setErrors(formErrorsFrom(error, FIELDS));
+    setErrors(uploadErrorsFrom(error));
   }
 
   const accountOptions = accounts.map((account) => ({
@@ -174,6 +267,14 @@ export function UploadForm({ accounts, submitLabel = "Upload statement" }) {
           onChange={(event) => setPassword(event.target.value)}
           hint="Banks often lock statement PDFs. The password is used once to open the file and is never stored."
           error={errors.fieldErrors.password}
+        />
+      ) : null}
+      {csv && mapping ? (
+        <ColumnMappingFields
+          rows={csv.rows}
+          values={mapping}
+          onChange={setMapping}
+          errors={errors.fieldErrors}
         />
       ) : null}
       <Button type="submit" disabled={createUpload.isPending}>
