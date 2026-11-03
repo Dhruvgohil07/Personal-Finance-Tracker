@@ -31,6 +31,9 @@ Three rules shape this module:
 import codecs
 import csv
 import io
+import itertools
+from collections import Counter
+from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import PurePosixPath
 
@@ -77,10 +80,15 @@ _SPREADSHEET_EXTENSIONS = frozenset({".xls", ".xlsx", ".xlsm"})
 # almost any byte sequence, so it doubles as a last resort.
 _CSV_ENCODINGS = ("utf-8-sig", "cp1252")
 
-# Delimiters csv.Sniffer is allowed to choose between. Restricting the list
-# matters: given a free choice, Sniffer can decide that some character
-# inside a narration is the delimiter and shred every row.
+# The delimiters a CSV may use, in order of preference on a tie. A fixed
+# short list: a free choice could pick some character inside a narration.
 _CSV_DELIMITERS = ",;\t|"
+
+# How many rows the delimiter is judged on. The browser judges the same
+# number of rows with the same rule (SNIFF_ROWS in
+# frontend/src/lib/csv-preview.js), so the column names it offers for a
+# mapping are the ones read here. Keep the two in step.
+_SNIFF_ROWS = 60
 
 
 def detect_file_type(filename: str, content: bytes) -> FileType:
@@ -210,29 +218,57 @@ def read_csv(content: bytes) -> ParserInput:
     """Read CSV bytes into rows of text cells.
 
     Decoding is tried as UTF-8 (with or without a BOM) and then as
-    Windows-1252; the delimiter is sniffed from the start of the file among
-    `,` `;` tab `|`.
+    Windows-1252; the delimiter is chosen among `,` `;` tab `|` by
+    `_sniff_delimiter`.
 
     Blank lines are kept. They carry no transaction, but dropping rows here
     would shift every `row_number` and make the parser's error messages
     point at the wrong line of the user's file.
     """
     text = _decode_csv(content)
-
-    # csv.Sniffer reads a sample and guesses the dialect. It raises when the
-    # sample has no consistent delimiter - a single-column file, for
-    # instance - and a comma is then exactly the right assumption.
-    try:
-        dialect: type[csv.Dialect] | csv.Dialect = csv.Sniffer().sniff(
-            text[:8192], delimiters=_CSV_DELIMITERS
-        )
-    except csv.Error:
-        dialect = csv.excel
-
-    # newline="" is what the csv module documents: the reader must see the
-    # raw line endings itself, because a quoted field may contain one.
-    reader = csv.reader(io.StringIO(text, newline=""), dialect)
+    reader = _csv_reader(text, _sniff_delimiter(text))
     return ParserInput(file_type=FileType.CSV, rows=_padded(list(reader)))
+
+
+def _csv_reader(text: str, delimiter: str) -> Iterator[list[str]]:
+    """A standard (Excel-style, `"` quoting) CSV reader with `delimiter`.
+
+    newline="" is what the csv module documents: the reader must see the
+    raw line endings itself, because a quoted field may contain one.
+    """
+    return csv.reader(io.StringIO(text, newline=""), dialect=csv.excel, delimiter=delimiter)
+
+
+def _sniff_delimiter(text: str) -> str:
+    """The delimiter that splits the first rows most consistently.
+
+    For each candidate, split the first `_SNIFF_ROWS` rows with it and find
+    the most common number of cells above 1; the winner is the candidate
+    for which the most rows have that count. A tie goes to the earlier
+    candidate, so a file with no delimiter at all (one column) is read with
+    a comma.
+
+    This replaced `csv.Sniffer` (review of PR 34). Sniffer gives up as soon
+    as one line lacks the delimiter - a bank's title line above the table is
+    enough - and the comma fallback then read a semicolon statement as one
+    cell per line, so no column mapping could ever match it. The rule also
+    has to agree with the browser, which shows the user the column names to
+    map: frontend/src/lib/csv-preview.js runs this same rule.
+
+    A candidate that makes the csv module fail (a field over its size limit,
+    from a quote that is never closed) simply doesn't win.
+    """
+    best, best_rows = ",", 0
+    for delimiter in _CSV_DELIMITERS:
+        try:
+            rows = list(itertools.islice(_csv_reader(text, delimiter), _SNIFF_ROWS))
+        except csv.Error:
+            continue
+        counts = Counter(len(row) for row in rows if len(row) > 1)
+        consistent_rows = max(counts.values(), default=0)
+        if consistent_rows > best_rows:
+            best, best_rows = delimiter, consistent_rows
+    return best
 
 
 def read_xls(content: bytes) -> ParserInput:

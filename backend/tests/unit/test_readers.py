@@ -5,6 +5,7 @@ The `.xls` tests go through a real workbook written by `xlwt`
 whole xlrd path is exercised exactly as it will be for a real upload.
 """
 
+import csv
 import datetime
 import io
 from pathlib import Path
@@ -15,6 +16,7 @@ import xlwt
 
 from app.parsers import readers
 from app.parsers.base import FileType, ParseError
+from app.parsers.generic_csv import ColumnMapping, GenericCsvParser
 from app.parsers.readers import (
     _cell_to_text,
     detect_file_type,
@@ -148,10 +150,70 @@ def test_read_csv_rejects_bytes_that_are_not_text() -> None:
 
 
 def test_read_csv_of_a_single_column_file_still_works() -> None:
-    """csv.Sniffer raises here; the comma fallback must take over."""
+    """No delimiter splits any row, so the comma is used."""
     data = read_csv(b"Narration\nSHOP\n")
 
     assert data.rows == [["Narration"], ["SHOP"]]
+
+
+# --- the delimiter rule (review of PR 34) ---------------------------------
+# csv.Sniffer used to choose the delimiter. It gives up as soon as one line
+# lacks the delimiter, and the comma fallback then read these files as one
+# cell per line, so no column mapping could match. The browser applies the
+# same rule as _sniff_delimiter (frontend/src/lib/csv-preview.js).
+
+
+@pytest.mark.parametrize(
+    ("content", "header"),
+    [
+        (
+            b"Synthetic Bank statement\nDate;Narration;Amount\n01/08/2026;SHOP;-70.00\n",
+            ["Date", "Narration", "Amount"],
+        ),
+        (
+            b"Statement\n\nDate\tNarration\tAmount\n01/08/2026\tSHOP\t70\n",
+            ["Date", "Narration", "Amount"],
+        ),
+        (
+            # Decimal commas, and commas inside a narration: still ";".
+            b"Title\nDate;Narration;Amount\n01/08/2026;UPI, SHOP;-70,00\n02/08/2026;PAY;5,00\n",
+            ["Date", "Narration", "Amount"],
+        ),
+    ],
+)
+def test_read_csv_finds_the_delimiter_below_a_title_line(content: bytes, header: list[str]) -> None:
+    data = read_csv(content)
+
+    assert header in data.rows
+
+
+def test_a_title_line_above_a_semicolon_table_no_longer_breaks_the_mapping() -> None:
+    """End to end through the generic parser: the bug the review found."""
+    data = read_csv(b"Synthetic Bank\nDate;Narration;Amount\n05/08/2026;SHOP;-70.00\n")
+    mapping = ColumnMapping(
+        date_column="Date",
+        description_column="Narration",
+        date_format="%d/%m/%Y",
+        amount_column="Amount",
+    )
+
+    statement = GenericCsvParser(mapping).parse(data)
+
+    assert [row.amount_paise for row in statement.rows] == [7000]
+
+
+def test_sniff_delimiter_prefers_the_earlier_delimiter_on_a_tie() -> None:
+    # Every row splits into 2 cells with "," and with ";": the comma wins.
+    assert readers._sniff_delimiter("a,b;c\nd,e;f\n") == ","
+
+
+def test_sniff_delimiter_skips_a_delimiter_the_csv_module_cannot_read() -> None:
+    # An unclosed quote turns the rest of the text into one field, over the
+    # csv module's size limit (128 KiB) for EVERY candidate; none wins, and
+    # the comma is the answer instead of a crash.
+    text = 'Date,Narration\n"' + "x" * (csv.field_size_limit() + 10)
+
+    assert readers._sniff_delimiter(text) == ","
 
 
 # --- read_xls -------------------------------------------------------------
