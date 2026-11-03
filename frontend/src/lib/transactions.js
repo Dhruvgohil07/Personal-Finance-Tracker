@@ -14,7 +14,9 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 
+import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { formErrorsFrom, readableMessage } from "@/lib/form-errors";
 import { formatInr } from "@/lib/money";
 
 export const TRANSACTIONS_QUERY_KEY = ["transactions"];
@@ -121,6 +123,42 @@ export function transactionsPath(filters, cursor = null) {
   return query ? `/transactions?${query}` : "/transactions";
 }
 
+// The filters' names on screen, for the API's `query.<name>` error fields.
+const FILTER_LABELS = {
+  from: "From",
+  to: "To",
+  account_id: "Account",
+  category_id: "Category",
+  uncategorized: "Category",
+  direction: "Money in or out",
+  q: "Search",
+  min_amount: "Smallest amount",
+  max_amount: "Largest amount",
+};
+
+/**
+ * What to say when the list request fails.
+ *
+ * A 422's top-level message is always the generic "The request contains
+ * invalid data."; the reason is in `details` (review of PR 37). A rule
+ * about the filters together comes as field `query` ("'from' must not be
+ * later than 'to'"), a problem with one filter as `query.<name>`, which is
+ * prefixed with that filter's label. Anything else: the usual message.
+ */
+export function filtersErrorMessage(error) {
+  const details = error instanceof ApiError && error.code === "VALIDATION_ERROR" ? error.details : null;
+  if (!Array.isArray(details) || details.length === 0) {
+    return formErrorsFrom(error).formError;
+  }
+  return details
+    .map(({ field, message }) => {
+      const label = FILTER_LABELS[(field ?? "").replace(/^query\./, "")];
+      const reason = readableMessage(message);
+      return label ? `${label}: ${reason}` : reason;
+    })
+    .join(" ");
+}
+
 // ---- what a row shows --------------------------------------------------
 
 /**
@@ -146,15 +184,9 @@ export function isGuess(transaction) {
   );
 }
 
-/**
- * What "similar transactions" are recognised by, for the "apply to
- * similar?" question: the UPI id of a person, else the merchant name.
- * null when there is neither: the API would refuse `apply_to_similar`
- * (400 NOTHING_TO_MATCH), so the question isn't asked.
- */
-export function similarKey(transaction) {
-  return transaction.counterparty_vpa ?? transaction.merchant_key ?? null;
-}
+// What "similar transactions" are recognised by is the API's
+// `similar_key` on each row, computed from the rule-learning code itself;
+// the browser used to guess it and got it wrong (review of PR 37).
 
 // ---- hooks ---------------------------------------------------------------
 
@@ -193,20 +225,61 @@ export function useCategories() {
   });
 }
 
-// How long after "apply to similar" the list is fetched once more. The
-// other rows are re-filed by a background job (SPEC §8.1), which usually
-// takes well under a second; the first refetch can come too early.
-const SIMILAR_REFRESH_MS = 2000;
+// After "apply to similar", the other rows are re-filed by a background
+// job (SPEC §8.1) that usually takes well under a second but can wait
+// behind an import. So the lists are refetched after each of these delays
+// (15 s in all) until the job's work shows up, rather than once after a
+// guessed 2 s (review of PR 37).
+export const SIMILAR_REFRESH_DELAYS_MS = [1000, 2000, 4000, 8000];
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Refetch, wait, refetch… until `settled()` says the job has run, or the
+ * delays run out. Resolves to whether it settled. `wait` is replaceable so
+ * the tests needn't sleep.
+ */
+export async function refreshUntilSettled({
+  refetch,
+  settled,
+  delays = SIMILAR_REFRESH_DELAYS_MS,
+  wait = sleep,
+}) {
+  for (const delay of delays) {
+    await wait(delay);
+    await refetch();
+    if (settled()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when no cached row still waits for the rule: no row with the same
+ * `similar_key` and another category, except rows the user filed by hand,
+ * which a rule never changes.
+ */
+export function similarRowsSettled(lists, similarKey, categoryId) {
+  return !lists
+    .flatMap((data) => data?.pages.flatMap((page) => page.items) ?? [])
+    .some(
+      (row) =>
+        row.similar_key === similarKey &&
+        row.category_source !== "user_manual" &&
+        row.category_id !== categoryId,
+    );
+}
 
 /**
  * Change one transaction: `mutateAsync({ id, changes })`, where `changes`
- * holds any of `category_id` (null = uncategorized), `notes` (null =
+ * holds any of `category_id` (null = not categorized), `notes` (null =
  * remove) and `apply_to_similar`.
  *
  * Afterwards every cached transaction list is fetched again: the row may
  * no longer match the filters (it left "Not categorized yet"), and with
- * `apply_to_similar` other rows change too - once now and once more after
- * the background job has had time to run.
+ * `apply_to_similar` other rows change too, so the lists are refetched
+ * again until those rows show the new category (refreshUntilSettled).
  */
 export function useUpdateTransaction() {
   const { client } = useAuth();
@@ -230,10 +303,17 @@ export function useUpdateTransaction() {
       );
       queryClient.invalidateQueries({ queryKey: TRANSACTIONS_QUERY_KEY });
       if (changes.apply_to_similar) {
-        setTimeout(
-          () => queryClient.invalidateQueries({ queryKey: TRANSACTIONS_QUERY_KEY }),
-          SIMILAR_REFRESH_MS,
-        );
+        // Not awaited: the save is done; this only brings in what the job
+        // does next. Returning it would make mutateAsync wait up to 15 s.
+        refreshUntilSettled({
+          refetch: () => queryClient.refetchQueries({ queryKey: TRANSACTIONS_QUERY_KEY }),
+          settled: () =>
+            similarRowsSettled(
+              queryClient.getQueriesData({ queryKey: TRANSACTIONS_QUERY_KEY }).map(([, d]) => d),
+              updated.similar_key,
+              changes.category_id,
+            ),
+        });
       }
     },
   });
