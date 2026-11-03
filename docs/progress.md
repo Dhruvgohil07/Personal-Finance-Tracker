@@ -539,6 +539,16 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   waits in minutes above a minute; `.gitignore` exception `!frontend/src/**/uploads/`
   (the data rule `uploads/` hid the new source folders). 182 Vitest tests; checked
   live with synthetic files, test user deleted, logs clean
+  - Review of PR 33 (top 5 of 10 findings fixed): polling moved from each row to one
+    `UploadsWatcher` in the signed-in layout (an upload not on screen was never polled
+    and its finish refreshed nothing); the polls share the API's pace (n uploads wait
+    n × Retry-After; a 429's own Retry-After first) so they stay under the 120/minute
+    poll limit; the form falls back to an account that still exists; statement
+    password fields use `autocomplete="one-time-code"` (browsers ignore "off"); the
+    home page's account step no longer waits on GET /uploads. Left: a delete
+    refetching its own poll, full refetch on every finished poll, the duplicated
+    delete confirmation, two `plural` helpers, copied test helpers. 193 Vitest tests;
+    checked live, test user deleted, logs clean
 
 ## In progress
 - (nothing)

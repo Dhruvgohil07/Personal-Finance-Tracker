@@ -232,3 +232,34 @@ Also in this step:
   there; deleting the earlier `.xls` refused with the "later statement" 409, then
   allowed after the PDF was deleted. Test user deleted with `DELETE /me`; no
   password, narration or amount in the API or worker logs.
+
+### Review of PR 33 (2026-11-03)
+Top 5 of 10 findings fixed:
+- **Polling moved from each row to one watcher** (`UploadsWatcher` in the signed-in
+  layout, `useUnfinishedUploadsPolling`). It reads the uploads list from the cache only
+  and polls every unfinished upload in it, whichever page is open. Each row used to
+  poll itself, so an upload not on screen (the home page shows only the latest; or the
+  user left /uploads) was never polled, and its finish refreshed nothing. Checked live:
+  an upload left on /uploads while "Waiting to import" was polled from the Accounts
+  page and finished there.
+- **The polls share the API's pace** (`pollDelayMs`). With n uploads waiting, each
+  waits n × `Retry-After`, so the total stays at one request per `Retry-After` and
+  can't reach the 120/minute poll limit (6 uploads at 2 s each were 180/minute). After a
+  429 the 429's own `Retry-After` is used, not the last success's. Never 0, which
+  TanStack Query reads as "no interval".
+- **The upload form uses an account that is still in the list.** The picked id falls
+  back to the first account when the picked one disappears (deleted in another tab), so
+  the request goes to the account the drop-down shows instead of a deleted id (404).
+- **Statement password fields use `autocomplete="one-time-code"`.** Browsers ignore
+  `"off"` on password fields, so a saved Kharcha login could be filled in (and sent as
+  the PDF's password) or the statement password offered for saving. Rejected:
+  `"new-password"`, which makes Chrome suggest a generated password and offer to save
+  the typed one as this site's new password. Browser behaviour: the tests only check
+  the attribute.
+- **The home page's first step needs only the accounts.** A failing GET /uploads used
+  to replace the "Add your first account" step with an error.
+
+Left as they are: the delete refetching its own poll (one extra 404 per delete), every
+finished poll refetching all other queries, the duplicated delete confirmation
+(accounts and uploads), the two `plural` helpers, and test helpers copied between test
+files.
