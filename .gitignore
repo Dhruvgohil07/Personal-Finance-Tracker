@@ -11,6 +11,9 @@ samples/
 data/
 exports/
 uploads/
+# ...except the frontend's source folders that are NAMED uploads (the
+# /uploads page and its components): code, not data.
+!frontend/src/**/uploads/
 
 # Secrets (.env.example is safe and SHOULD be committed)
 .env
