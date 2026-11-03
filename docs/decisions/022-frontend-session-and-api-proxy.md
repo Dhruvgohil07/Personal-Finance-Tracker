@@ -183,3 +183,52 @@ Three fixes, each checked so that its test fails without it:
 - **The delete confirmation is a `role="alertdialog"` described by its warning.**
   Focus moves to "Cancel"; as a plain group a screen reader announced only "Cancel,
   button", never what gets deleted.
+
+## Phase 3 Step 6: uploads (2026-11-03)
+Decided with Dhruv when the step started:
+- **The browser refuses a file over 10 MB before sending it**, from a constant
+  (`MAX_UPLOAD_MB` in `src/lib/uploads.js`) that mirrors the backend's default
+  `MAX_UPLOAD_MB`. Rejected: a `NEXT_PUBLIC_` variable (one more value to keep in step
+  by hand per deployment) and a limits endpoint (backend work for one number). The
+  check matters because the Next.js proxy answers a bare 500 above 12 MB (see the
+  review of PR 30), so the backend's readable 413 never arrives for a big file. The
+  backend still enforces its own limit; the two numbers must be changed together.
+- **Polling follows the API's `Retry-After`.** Each `pending`/`processing` upload has
+  its own TanStack Query poll of `GET /uploads/{id}` whose `refetchInterval` is the
+  header's value; a final answer has no header, so polling stops by itself. The API
+  client gained `withRetryAfter: true` to return that header of a successful answer.
+  Every poll answer is written into the cached LIST, so the uploads page and the home
+  page update from one source; a final status refetches every other query (new
+  transactions change other pages). Rejected: refetching the whole list every 2 s
+  (counts against the general 100/min limit and ignores what the API asks for).
+- **Uploads get their own page, `/uploads`**, and the home page's first run goes
+  account → first statement → the latest upload's result.
+- **The password field appears only once a PDF is chosen**, and is optional. A locked
+  PDF sent without it is stored as `needs_password` (409 `PASSWORD_REQUIRED`), and its
+  row in the list shows a password prompt; the same prompt serves a locked upload
+  found after a reload. A wrong password at upload time stores nothing (400), so the
+  form keeps the file and asks only for the password again. Every password field is
+  emptied after each attempt, right or wrong.
+
+Also in this step:
+- **`.gitignore` exception `!frontend/src/**/uploads/`.** The data rule `uploads/`
+  matches a folder of that name anywhere, so the new page and component folders were
+  silently left out of `git status`. The exception re-includes only source folders
+  under `frontend/src/`; `uploads/` at the root or in `backend/` stays ignored
+  (checked with `git check-ignore`).
+- **A 429's wait is said in minutes above one minute** (`form-errors.js`): the upload
+  limit is per hour, and "3412 seconds" helped nobody.
+- **Statement dates are formatted as UTC dates** (`src/lib/dates.js`): `new
+  Date("2026-08-01")` is midnight UTC, which a browser west of UTC shows as 31 July.
+  Timestamps are shown in Asia/Kolkata.
+- **A notice above the form says only what is still true.** "…is being imported" and
+  "…is password-protected" are tied to their upload in the cached list and disappear
+  once it is imported, unlocked or deleted. Found in the live check: the password
+  notice stayed on the page after its upload had been unlocked and deleted.
+- Checked live with synthetic files (the fixtures' ICICI `.xls` and a locked PDF): an
+  11 MB file refused with no request sent; first run account → first statement →
+  imported counts on the home page, polled at the API's 2 s; the locked PDF → 409 →
+  prompt → wrong password (field emptied) → right one → imported as 5 rows already
+  there; deleting the earlier `.xls` refused with the "later statement" 409, then
+  allowed after the PDF was deleted. Test user deleted with `DELETE /me`; no
+  password, narration or amount in the API or worker logs.

@@ -526,17 +526,29 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
     an alertdialog described by its warning. Left: delete refetches every query,
     five copies of the submit guard, an unused `onCreated`, aria-label on a span, a
     PATCH for an unchanged account. 132 Vitest tests
+- [x] Step 6: Uploads — `/uploads` page (form, history, delete) and the home page's
+  first run continued: account → first statement → the latest upload's result.
+  `src/lib/uploads.js` (size check, status words, `reviewSummary`, hooks),
+  `src/lib/dates.js` (statement dates as UTC dates, timestamps in Asia/Kolkata),
+  `components/uploads/`. Polling per unfinished upload follows `Retry-After` (new
+  `withRetryAfter` option in the API client) and writes into the cached list; the
+  password field shows only for a PDF; a locked PDF's row asks for its password, a
+  wrong one can be retried; the delete 409s are shown as the backend words them.
+  Decided with Dhruv: 10 MB as a frontend constant, a separate `/uploads` page,
+  password field only for PDFs, polling as planned (ADR 022 section). Also: 429
+  waits in minutes above a minute; `.gitignore` exception `!frontend/src/**/uploads/`
+  (the data rule `uploads/` hid the new source folders). 182 Vitest tests; checked
+  live with synthetic files, test user deleted, logs clean
 
 ## In progress
 - (nothing)
 
 ## Next up
 - **Dhruv, after merging Step 3:** add `frontend` to the `protect-main` required checks
-- Phase 3 Step 6: uploads (form, status polling, history, delete, the password prompt)
-  plus the first-run step "Upload your first statement" on the home page; refuse files
-  over the size limit in the browser
-- Step 6 (uploads) must refuse a file over the backend's limit in the browser before
-  sending: above `proxyClientMaxBodySize` (12 MB) Next.js answers a bare 500 (ADR 022)
+- Phase 3 Step 7: CSV column mapping. Until then a CSV no bank parser recognises
+  fails with the backend's NO_PARSER message, which mentions `column_mapping`
+- If the backend's `MAX_UPLOAD_MB` ever changes, change `MAX_UPLOAD_MB` in
+  `frontend/src/lib/uploads.js` with it (ADR 022, Step 6)
 - Step 11: verify an upload near 10 MB on the deployed app; the host may limit a
   proxy's request size too
 - Carried over from the Phase 2 acceptance (each needs a real file, no code):
