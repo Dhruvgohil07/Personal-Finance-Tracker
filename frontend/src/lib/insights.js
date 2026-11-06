@@ -27,6 +27,11 @@ export function isMonth(value) {
   return MONTH_PATTERN.test(value ?? "");
 }
 
+// The first month the summary API can answer for: it accepts years from
+// 1900 (MIN_YEAR in backend app/utils/dates.py) and also reports the month
+// before, so January 1900 is refused with a 422 (review of PR 38).
+export const EARLIEST_MONTH = "1900-02";
+
 /** The month a date is in: "2026-08-15" → "2026-08". */
 export function monthOf(isoDate) {
   return isoDate.slice(0, 7);
@@ -76,11 +81,12 @@ export function monthName(month) {
 }
 
 /**
- * True for a ?month= the dashboard can show: a real month, not after
- * `today`. "YYYY-MM" strings compare correctly as text, so `<=` is enough.
+ * True for a ?month= the dashboard can show: a real month, from
+ * EARLIEST_MONTH up to `today`. "YYYY-MM" strings compare correctly as
+ * text, so `>=` and `<=` are enough.
  */
 export function urlMonthIsUsable(urlMonth, today) {
-  return isMonth(urlMonth) && urlMonth <= today;
+  return isMonth(urlMonth) && urlMonth >= EARLIEST_MONTH && urlMonth <= today;
 }
 
 /**
@@ -135,11 +141,6 @@ export function changeText(pct, previousMonth, emptyText) {
   return `${formatPercent(Math.abs(pct))} ${direction} than ${name}`;
 }
 
-/** "1 transaction" / "3 transactions". */
-export function transactionCount(count) {
-  return `${count} ${count === 1 ? "transaction" : "transactions"}`;
-}
-
 // ---- links into the transactions page ---------------------------------------
 
 function transactionsLink(filters) {
@@ -169,11 +170,14 @@ export function uncategorizedTransactionsLink(month) {
 }
 
 // The colour of the "Not categorized yet" slice, which has no category and
-// so no colour from the API. A light grey, unlike the seeded
-// "Uncategorized" category's darker #9CA3AF: they mean different things
+// so no colour from the API. A plain grey, unlike the seeded
+// "Uncategorized" category's bluish #9CA3AF: they mean different things
 // (src/lib/transactions.js, NOT_CATEGORIZED_LABEL). The list beside the
 // chart names every slice, so colour is never the only way to tell them apart.
-export const NOT_CATEGORIZED_COLOR = "#D4D4D4";
+// One colour for both themes, so it needs 3:1 contrast (WCAG, graphics)
+// against both page backgrounds: 3.4:1 on white, 5.9:1 on #0a0a0a. The
+// lighter #D4D4D4 it replaced was 1.5:1 on white (review of PR 38).
+export const NOT_CATEGORIZED_COLOR = "#8C8C8C";
 // For a category the user made without a colour (Phase 4's custom ones).
 export const FALLBACK_COLOR = "#737373";
 

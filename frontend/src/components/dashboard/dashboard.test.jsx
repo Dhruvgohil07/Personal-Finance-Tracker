@@ -2,8 +2,8 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Dashboard } from "@/components/dashboard/dashboard";
-import { aBreakdown, aSummary } from "@/test/insights";
-import { apiError, json, renderWithSession } from "@/test/session";
+import { aBreakdown, aSummary, fakeInsightsHandler } from "@/test/insights";
+import { apiError, renderWithSession } from "@/test/session";
 
 // next/navigation only works inside a running Next.js app, so the router
 // and the URL's query are faked (as in transactions.test.jsx).
@@ -75,40 +75,20 @@ const OCTOBER_BREAKDOWN = aBreakdown([
 ]);
 
 /**
- * A pretend insights API: `newest` is the newest transaction's date (null
- * for none), `summaries` and `breakdowns` are keyed by month; a month not
- * listed is empty. `fail` returns an error answer for a path, or nothing.
+ * The dashboard against the shared fake insights API (src/test/insights.js),
+ * with October 2026 filled in and the newest transaction on 28 October.
+ * `fail(path)` may return an error answer for a path first.
  */
-function fakeInsightsApi({ newest = "2026-10-28", summaries = {}, breakdowns = {}, fail } = {}) {
-  return (path) => {
-    const failure = fail?.(path);
-    if (failure) {
-      return failure;
-    }
-    if (path === "/transactions?limit=1") {
-      const items = newest ? [{ id: "t1", txn_date: newest }] : [];
-      return json(200, { items, next_cursor: null });
-    }
-    const summary = path.match(/^\/insights\/summary\?month=(\d{4}-\d{2})$/);
-    if (summary) {
-      return json(200, summaries[summary[1]] ?? aSummary({ month: summary[1] }));
-    }
-    const categories = path.match(/^\/insights\/categories\?from=(\d{4}-\d{2})-01&to=\d{4}-\d{2}-\d{2}$/);
-    if (categories) {
-      return json(200, breakdowns[categories[1]] ?? aBreakdown());
-    }
-    return undefined;
-  };
-}
-
-function renderDashboard(api = {}) {
+function renderDashboard({ fail, ...api } = {}) {
+  const insights = fakeInsightsHandler({
+    newest: "2026-10-28",
+    summaries: { "2026-10": OCTOBER },
+    breakdowns: { "2026-10": OCTOBER_BREAKDOWN },
+    ...api,
+  });
   return renderWithSession(<Dashboard />, {
     signedIn: true,
-    handler: fakeInsightsApi({
-      summaries: { "2026-10": OCTOBER },
-      breakdowns: { "2026-10": OCTOBER_BREAKDOWN },
-      ...api,
-    }),
+    handler: (path) => fail?.(path) ?? insights(path),
   });
 }
 
@@ -137,7 +117,8 @@ describe("Dashboard: which month", () => {
     expect(requested(fetchImpl, "/transactions?limit=1")).toBe(false);
   });
 
-  it.each(["2026-13", "2027-01", "march"])("ignores ?month=%s", async (month) => {
+  // 1900-01: the API refuses it, as it can't report the month before.
+  it.each(["2026-13", "2027-01", "march", "1900-01", "1899-05"])("ignores ?month=%s", async (month) => {
     navigation.search = `month=${month}`;
     renderDashboard();
 
@@ -160,6 +141,13 @@ describe("Dashboard: which month", () => {
 
     expect(await screen.findByRole("button", { name: "Show December 2026" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Show October 2026" })).toBeEnabled();
+  });
+
+  it("can't go before the first month the API accepts", async () => {
+    navigation.search = "month=1900-02";
+    renderDashboard();
+
+    expect(await screen.findByRole("button", { name: "Show January 1900" })).toBeDisabled();
   });
 });
 
@@ -207,16 +195,26 @@ describe("Dashboard: the month's totals", () => {
     expect(screen.queryByText("Left over")).not.toBeInTheDocument();
   });
 
-  it("invites an upload for a month with nothing in it", async () => {
+  it("says what is counted for a month with no money in or out", async () => {
     navigation.search = "month=2026-11";
     renderDashboard();
 
-    expect(await screen.findByText(/Nothing in November 2026 yet\./)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Upload that month's statement" })).toHaveAttribute(
-      "href",
-      "/uploads",
-    );
+    // Such a month may hold self transfers, so it isn't called empty.
+    expect(
+      await screen.findByText(/No money came in or went out in November 2026 \(money moved/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Upload it" })).toHaveAttribute("href", "/uploads");
     expect(screen.queryByText("Money in")).not.toBeInTheDocument();
+  });
+
+  it("doesn't ask for an upload before any transaction exists", async () => {
+    // The first run: the first statement is still importing.
+    renderDashboard({ newest: null });
+
+    expect(
+      await screen.findByText("Your months appear here once a statement has been imported."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Upload it" })).not.toBeInTheDocument();
   });
 });
 

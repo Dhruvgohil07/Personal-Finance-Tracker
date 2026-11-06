@@ -28,8 +28,8 @@ import {
   categoryTransactionsLink,
   formatPercent,
   sliceColor,
-  transactionCount,
 } from "@/lib/insights";
+import { plural } from "@/lib/text";
 
 const CHART_SIZE = 200;
 
@@ -88,7 +88,7 @@ export function CategoryBreakdown({ breakdown, month }) {
               />
               <span className="flex flex-1 flex-col">
                 <span className="font-medium">{item.name}</span>
-                <span className="text-muted text-xs">{transactionCount(item.transaction_count)}</span>
+                <span className="text-muted text-xs">{plural(item.transaction_count, "transaction")}</span>
               </span>
               <span className="flex flex-col items-end">
                 <span className="tabular-nums">{item.amount_display}</span>

@@ -2,6 +2,7 @@
 // field that was wrong, and/or one message for the whole form.
 
 import { ApiError } from "@/lib/api";
+import { plural } from "@/lib/text";
 
 const NETWORK_MESSAGE = "We couldn't reach Kharcha. Check your connection and try again.";
 
@@ -17,8 +18,6 @@ const PYDANTIC_PREFIX = /^(Value error|Assertion failed), /;
 /** A validation message without Pydantic's own wording in front. */
 export const readableMessage = (message) => (message ?? "").replace(PYDANTIC_PREFIX, "");
 const readable = readableMessage;
-
-const plural = (count, unit) => `${count} ${unit}${count === 1 ? "" : "s"}`;
 
 // Seconds up to a minute; above that, whole minutes rounded UP, so the user
 // never comes back too early. The upload limit is per hour, and "Try again
