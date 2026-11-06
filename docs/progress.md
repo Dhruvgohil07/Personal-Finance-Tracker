@@ -602,6 +602,12 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   stays only while it needs something or was watched importing. 1580 backend tests
   (+1 skipped), 100% coverage; 382 Vitest tests; checked live, test user deleted, logs
   clean
+  - Review of PR 38 (7 of 8 findings fixed): no upload prompt while the first
+    statement imports; a month with no money in or out isn't called empty (it may hold
+    self transfers); `?month=` before 1900-02 falls back (the API refuses it) and "‹"
+    stops there; "Not categorized yet" grey with 3:1 contrast in both themes; one
+    shared `plural` (`src/lib/text.js`); one fake insights API for tests. Left: the
+    breakdown requested for empty months. 387 Vitest tests
 
 ## In progress
 - (nothing)

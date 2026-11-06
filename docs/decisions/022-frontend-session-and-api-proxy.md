@@ -433,8 +433,9 @@ transactions need your attention", and where the money went as a donut plus a li
   debits in that category; the chart is `aria-hidden` with Recharts'
   `accessibilityLayer={false}`, so keyboard and screen-reader users meet the data once.
   Fixed 200 × 200 px, not `ResponsiveContainer`, which measures a 0 × 0 parent before
-  layout and in jsdom. No animation. "Not categorized yet" is a light grey (#D4D4D4),
-  unlike the seeded "Uncategorized" category's #9CA3AF.
+  layout and in jsdom. No animation. "Not categorized yet" is a plain grey,
+  unlike the seeded "Uncategorized" category's bluish #9CA3AF (#8C8C8C since the review
+  below).
 - **No money arithmetic in the browser** (hard constraint 4): every amount is a
   `*_display` from the API, every percentage the API's own, only formatted (one decimal
   at most). `net_paise` is compared with zero only, to choose "Left over" or
@@ -454,3 +455,25 @@ transactions need your attention", and where the money went as a donut plus a li
   empty August read "Nothing came in during August", November showed the empty state
   with "›" disabled, and the phone layout had no sideways scrolling. Test user deleted;
   the API and worker logs held only ids, counts and event names.
+
+### Review of PR 38 (2026-11-07)
+Seven of eight findings fixed:
+- **No "upload that month's statement" while the first statement imports.** With no
+  transactions yet the dashboard opened on the current month and asked for an upload
+  beneath the "Importing" card. It now says the months appear once a statement is
+  imported.
+- **A month with no money in or out isn't called empty**: it may hold only self
+  transfers (left out of every total). It says what is counted and asks "Missing this
+  month's statement? Upload it".
+- **The first month the API accepts is respected.** The summary takes years from 1900
+  and reports the month before, so `?month=` before 1900-02 now falls back like any
+  other bad value, and "‹" is disabled there.
+- **"Not categorized yet" is #8C8C8C**, 3.4:1 on white and 5.9:1 on the dark background;
+  the earlier #D4D4D4 was 1.5:1 on white in light mode.
+- **One `plural` helper** (`src/lib/text.js`) replaces the copies in form-errors.js and
+  upload-item.jsx and the dashboard's own `transactionCount`.
+- **One fake insights API for the tests** (`fakeInsightsHandler`), and the fake
+  summary's `to` is the month's real last day.
+
+Left as it is: the breakdown is requested even for a month that turns out empty.
+Waiting for the summary first would make every non-empty month load in two steps.
