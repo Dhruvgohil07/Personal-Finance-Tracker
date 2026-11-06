@@ -9,7 +9,8 @@
 
 import Link from "next/link";
 
-import { monthName, transactionCount, uncategorizedTransactionsLink } from "@/lib/insights";
+import { monthName, uncategorizedTransactionsLink } from "@/lib/insights";
+import { plural } from "@/lib/text";
 
 export function AttentionLink({ count, month }) {
   if (count === 0) {
@@ -17,7 +18,7 @@ export function AttentionLink({ count, month }) {
   }
   return (
     <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
-      {transactionCount(count)} in {monthName(month)} {count === 1 ? "needs" : "need"} your
+      {plural(count, "transaction")} in {monthName(month)} {count === 1 ? "needs" : "need"} your
       attention: {count === 1 ? "it has" : "they have"} no category yet.{" "}
       <Link href={uncategorizedTransactionsLink(month)} className="font-medium underline">
         Sort {count === 1 ? "it" : "them"} now

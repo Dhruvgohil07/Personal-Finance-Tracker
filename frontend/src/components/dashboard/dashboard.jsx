@@ -49,6 +49,9 @@ export function Dashboard() {
     needsNewest && !newest.isSuccess
       ? null
       : chooseMonth({ urlMonth, newestDate: newest.data ?? null, today });
+  // Known only when the newest transaction was asked for: no transactions
+  // at all, e.g. while the first statement is still importing.
+  const noTransactionsYet = needsNewest && newest.data === null;
 
   const summary = useSummary(month);
   const breakdown = useCategoryBreakdown(month);
@@ -73,7 +76,7 @@ export function Dashboard() {
       {summary.isPending ? <p role="status">Loading the totals…</p> : null}
       {summary.data ? (
         summary.data.current.transaction_count === 0 ? (
-          <EmptyMonth month={month} />
+          <EmptyMonth month={month} noTransactionsYet={noTransactionsYet} />
         ) : (
           <>
             <SummaryCards summary={summary.data} />
@@ -104,14 +107,30 @@ function Breakdown({ query, month }) {
   return <CategoryBreakdown breakdown={query.data} month={month} />;
 }
 
-function EmptyMonth({ month }) {
+// A month with no income or spending. Two cases, worded apart (review of
+// PR 38):
+// - no transactions at all: during the first run the upload above is
+//   usually still importing, so asking for an upload would read as if it
+//   hadn't counted;
+// - otherwise the month may have only self transfers (left out of every
+//   total), so "nothing here" would be untrue: say what is counted, and
+//   offer the upload only as a question.
+function EmptyMonth({ month, noTransactionsYet }) {
+  if (noTransactionsYet) {
+    return (
+      <p className="text-muted">
+        Your months appear here once a statement has been imported.
+      </p>
+    );
+  }
   return (
     <p className="text-muted">
-      Nothing in {monthLabel(month)} yet.{" "}
+      No money came in or went out in {monthLabel(month)} (money moved between your own
+      accounts isn&apos;t counted). Missing this month&apos;s statement?{" "}
       <Link href="/uploads" className="underline">
-        Upload that month&apos;s statement
-      </Link>{" "}
-      to see it here, or pick another month.
+        Upload it
+      </Link>
+      .
     </p>
   );
 }

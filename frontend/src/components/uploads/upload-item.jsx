@@ -18,6 +18,7 @@ import { FormError } from "@/components/form-error";
 import { FormField } from "@/components/form-field";
 import { formatDateTime, formatPeriod } from "@/lib/dates";
 import { formErrorsFrom } from "@/lib/form-errors";
+import { plural } from "@/lib/text";
 import {
   STATEMENT_PASSWORD_AUTOCOMPLETE,
   STATUS_LABELS,
@@ -26,8 +27,6 @@ import {
   useDeleteUpload,
   useUnlockUpload,
 } from "@/lib/uploads";
-
-const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
 // Each status's badge colours, light and dark.
 const BADGE_CLASSES = {

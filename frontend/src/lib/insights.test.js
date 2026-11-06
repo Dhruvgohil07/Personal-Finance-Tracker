@@ -14,7 +14,6 @@ import {
   monthName,
   shiftMonth,
   sliceColor,
-  transactionCount,
   uncategorizedTransactionsLink,
 } from "@/lib/insights";
 
@@ -79,6 +78,11 @@ describe("chooseMonth", () => {
     expect(chooseMonth({ urlMonth: "2026-12", newestDate: "2026-10-31", today })).toBe("2026-10");
   });
 
+  it("ignores a URL month before the first one the API accepts", () => {
+    expect(chooseMonth({ urlMonth: "1900-01", newestDate: "2026-10-31", today })).toBe("2026-10");
+    expect(chooseMonth({ urlMonth: "1900-02", newestDate: "2026-10-31", today })).toBe("1900-02");
+  });
+
   it("opens on this month when there are no transactions", () => {
     expect(chooseMonth({ urlMonth: null, newestDate: null, today })).toBe(today);
   });
@@ -101,14 +105,6 @@ describe("formatPercent and changeText", () => {
     expect(changeText(null, "2026-09", "Nothing came in during September")).toBe(
       "Nothing came in during September",
     );
-  });
-});
-
-describe("transactionCount", () => {
-  it("is singular for one", () => {
-    expect(transactionCount(1)).toBe("1 transaction");
-    expect(transactionCount(0)).toBe("0 transactions");
-    expect(transactionCount(3)).toBe("3 transactions");
   });
 });
 

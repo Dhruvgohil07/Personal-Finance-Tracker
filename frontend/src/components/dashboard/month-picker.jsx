@@ -2,11 +2,12 @@
 // month (it lives in the URL); this only asks for the one before or after.
 //
 // The month after the current one can't be chosen: nothing can have
-// happened in it yet. The button is disabled rather than hidden, so the
-// name of the month doesn't jump sideways when it appears.
+// happened in it yet. Nor a month before EARLIEST_MONTH, which the API
+// refuses. The buttons are disabled rather than hidden, so the name of
+// the month doesn't jump sideways when one appears.
 
 import { Button } from "@/components/button";
-import { monthLabel, shiftMonth } from "@/lib/insights";
+import { EARLIEST_MONTH, monthLabel, shiftMonth } from "@/lib/insights";
 
 export function MonthPicker({ month, today, onChange }) {
   const previous = shiftMonth(month, -1);
@@ -16,6 +17,7 @@ export function MonthPicker({ month, today, onChange }) {
       <Button
         variant="secondary"
         onClick={() => onChange(previous)}
+        disabled={month <= EARLIEST_MONTH}
         aria-label={`Show ${monthLabel(previous)}`}
       >
         ‹
