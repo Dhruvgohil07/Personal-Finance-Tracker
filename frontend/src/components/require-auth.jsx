@@ -10,6 +10,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
+import { WakingUpHint } from "@/components/waking-up-hint";
 import { useAuth } from "@/lib/auth";
 import { loginPathFor } from "@/lib/safe-redirect";
 
@@ -41,8 +42,13 @@ export function RequireAuth({ children }) {
     return children;
   }
   return (
-    <p role="status" className="text-muted mx-auto my-16 text-center">
-      {status === "loading" ? "Checking your session…" : "Taking you to the login page…"}
-    </p>
+    <div className="mx-auto my-16 flex max-w-sm flex-col gap-2 text-center">
+      <p role="status" className="text-muted">
+        {status === "loading" ? "Checking your session…" : "Taking you to the login page…"}
+      </p>
+      {/* The session check is the first request of a visit, so it is the
+          one that meets a sleeping backend (ADR 023). */}
+      <WakingUpHint waiting={status === "loading"} />
+    </div>
   );
 }

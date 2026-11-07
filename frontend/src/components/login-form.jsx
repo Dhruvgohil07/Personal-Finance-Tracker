@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/button";
 import { FormError } from "@/components/form-error";
 import { FormField } from "@/components/form-field";
+import { WakingUpHint } from "@/components/waking-up-hint";
 import { useAuth } from "@/lib/auth";
 import { formErrorsFrom } from "@/lib/form-errors";
 
@@ -103,6 +104,7 @@ export function LoginForm() {
       <Button type="submit" disabled={submitting}>
         {submitting ? "Logging in…" : "Log in"}
       </Button>
+      <WakingUpHint waiting={submitting} />
       <p className="text-muted text-sm">
         New here?{" "}
         <Link href="/register" className="underline">
