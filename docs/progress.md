@@ -637,10 +637,17 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   Decided with Dhruv: Render Key Value instead of Upstash (RQ's scheduler: ~400K
   commands a day vs Upstash's 500K a month), Neon direct connection, Singapore,
   the hint instead of a pinger
+  - Review of PR 40 (4 of 5 findings fixed): no keep-awake pinger in the README
+    (Render's health checks would keep Neon's compute up all month: 186 of 100 free
+    CU-hours); children get 100 s to stop (the worker finishes its import), with
+    `maxShutdownDelaySeconds: 120` and a test tying the two together; a SIGTERM during
+    setup ends it at once (PID 1 had no handler yet); type hints in the test helpers.
+    Left: setup on every start adds to the cold start, measured in part 2 first
   - Part 2, after this PR is merged: **Dhruv** creates Neon, Render (Blueprint) and
     Vercel per the README; then the checks on the deployed URLs: health, the full
-    flow with a synthetic statement, memory on Render, cold start with the hint, an
-    upload near 10 MB, logs
+    flow with a synthetic statement, memory on Render, cold start with the hint (and
+    how long setup takes in it), an upload near 10 MB, logs, Neon's CU-hours after a
+    few days
 
 ## Next up
 - **Dhruv, after merging Step 3:** add `frontend` to the `protect-main` required checks

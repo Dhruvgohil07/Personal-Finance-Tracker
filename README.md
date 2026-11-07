@@ -400,8 +400,10 @@ statement and check the dashboard.
 ### What to expect on free plans
 - **The first visit after 15 quiet minutes takes about a minute**: Render's free
   service sleeps and wakes on the next request. The page says so after 5 seconds.
-  To keep it awake, a free pinger (e.g. cron-job.org) can open `/api/v1/health`
-  every 10 minutes. That uses about 744 of Render's 750 free hours a month.
+  **Don't keep it awake with a pinger.** While the service is up, Render keeps
+  calling `/api/v1/health`, which queries the database, so Neon's compute could
+  never suspend. That needs at least 0.25 CU × 744 h = 186 CU-hours a month, and
+  Neon's free plan has 100, so the database would stop mid-month (ADR 023).
 - **Redis is in memory only.** A Render restart loses imports still waiting in
   the queue. The hourly cleanup marks them failed, and they can be uploaded again.
 - **Deploys:** Render deploys `main` after its CI checks pass, and only when
