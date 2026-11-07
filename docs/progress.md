@@ -619,6 +619,11 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
   `SignedOutOnly`, which unmounts the (auth) form once signed in. No backend change.
   400 Vitest tests; checked live, test users deleted (0 rows left, audit rows kept),
   logs clean
+  - Review of PR 39 (3 of 5 findings fixed): the delete question closes when Settings
+    is left (a hidden page kept the password and an enabled delete button); the
+    session-end flags clear whenever a session starts, not only on login(); the
+    deletion notice takes the focus. Left: statement-password forms on other pages
+    are kept while hidden, and six copies of the submit guard. 402 Vitest tests
 
 ## In progress
 - (nothing)
@@ -981,6 +986,9 @@ created (CLAUDE.md §0). Kept as a record of which tests and endpoints Dhruv wro
      sibling now compare against the message constants
 
 ## Known issues
+- Statement password fields (upload form, unlock form) keep what was typed while
+  their page is hidden (`cacheComponents`), until logout. Same fix shape as the
+  Settings delete question (review of PR 39)
 - Categorization of UPI ids ICICI cut too short to read the handle (`…@ok`, or cut
   before the `@`: 67 of the real `.xls`'s UPI rows) falls back to "person". 47 real PDF
   rows on Paytm handles (`pty`, `ptys`) are filed as people, unverified (ADR 016 amendment)
