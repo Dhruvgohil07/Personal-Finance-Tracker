@@ -1,4 +1,10 @@
-# The image the RQ worker runs in (the `worker` service in docker-compose.yml).
+# The backend's image. Two uses (ADR 023):
+#
+# - locally, the RQ worker and the scheduler (docker-compose.yml); the
+#   default command below is the worker;
+# - deployed on Render, the whole backend in one container: render.yaml runs
+#   `python -m app.run_all` instead, which migrates, seeds, and then starts
+#   the API, the worker and the scheduler and watches them.
 #
 # Why a container at all: RQ's worker runs every job in a child process made
 # with fork(), which Windows does not have, so the worker always runs on
@@ -37,6 +43,9 @@ COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --locked --no-dev --no-install-project
 
 COPY app ./app
+# The migrations and their config, for `alembic upgrade head` in run_all.
+COPY alembic.ini ./
+COPY alembic ./alembic
 
 # Don't run as root: if a job were ever exploited (it parses untrusted
 # files), the attacker gets an unprivileged user in a throwaway container.
