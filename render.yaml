@@ -41,6 +41,11 @@ services:
     # Render calls this to decide whether a new deploy is healthy before
     # sending traffic to it. It checks Postgres and Redis too (503 if not).
     healthCheckPath: /api/v1/health
+    # How long Render waits after its SIGTERM before killing the container
+    # (default 30, max 300). The worker finishes the import it is running
+    # before it stops, which can take a minute on 0.1 CPU; run_all.py gives
+    # its children STOP_GRACE_SECONDS (100), which must stay below this.
+    maxShutdownDelaySeconds: 120
     # Deploy a new commit on main only after its GitHub checks (the
     # `backend` and `frontend` CI jobs) have passed.
     autoDeployTrigger: checksPass

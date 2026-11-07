@@ -52,9 +52,13 @@ SETUP_COMMANDS: tuple[tuple[str, list[str]], ...] = (
 )
 
 # How often the children are checked, and how long they get to stop after
-# SIGTERM before they are killed. Render waits 30 s after its own SIGTERM.
+# SIGTERM before they are killed. On SIGTERM the RQ worker finishes the job
+# it is running (a "warm shutdown"), and an import can take a minute on the
+# free plan's 0.1 CPU, so the grace is generous. It must stay below
+# render.yaml's `maxShutdownDelaySeconds` (120), after which Render kills
+# the whole container; a test checks the two together (review of PR 40).
 POLL_SECONDS = 1.0
-STOP_GRACE_SECONDS = 20.0
+STOP_GRACE_SECONDS = 100.0
 
 # Render passes the port to listen on in $PORT (10000 unless changed).
 PORT_VARIABLE = "PORT"
@@ -196,6 +200,19 @@ def _start_command(command: Sequence[str]) -> Child:
     return subprocess.Popen(command)  # noqa: S603 - fixed commands
 
 
+def _stop_during_setup(signum: int, frame: FrameType | None = None) -> None:
+    """SIGTERM/SIGINT while migrating or seeding: give up at once.
+
+    The SystemExit raised here interrupts `subprocess.run`, which kills the
+    running alembic or seed child before letting the exception through. A
+    half-run migration is rolled back by Postgres (alembic runs it in one
+    transaction), and the next start runs it again. 128 + the signal's
+    number is the conventional exit code for "ended by a signal".
+    """
+    log.info("stop_requested_during_setup", signal=signal.Signals(signum).name)
+    raise SystemExit(128 + signum)
+
+
 def main(
     environ: Mapping[str, str] = os.environ,
     run: Callable[[list[str]], int] = _run_command,
@@ -205,15 +222,19 @@ def main(
     settings = get_settings()
     configure_logging(settings.env)
 
+    # A handler from the very start: as PID 1 in a container, this process
+    # IGNORES any signal it has no handler for, so a stop that arrived
+    # during the migrations used to wait for Render's SIGKILL (review of
+    # PR 40).
+    signal.signal(signal.SIGTERM, _stop_during_setup)
+    signal.signal(signal.SIGINT, _stop_during_setup)
     code = run_setup(run)
     if code != 0:
         return code
 
     supervisor = Supervisor(service_commands(listen_port(environ, settings.api_port)), start)
-    # Installed before the children start, so a stop that arrives while
-    # they are starting is not lost. PID 1 in a container ignores a signal
-    # it has no handler for, so without this a stop would wait for Render's
-    # SIGKILL instead.
+    # From here a stop means "stop the children cleanly". Installed before
+    # they start, so a stop that arrives while they are starting is not lost.
     signal.signal(signal.SIGTERM, supervisor.request_stop)
     signal.signal(signal.SIGINT, supervisor.request_stop)
     return supervisor.run()
