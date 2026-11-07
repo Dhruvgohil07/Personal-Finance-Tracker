@@ -1,4 +1,5 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { Activity, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LoginForm } from "@/components/login-form";
@@ -144,9 +145,9 @@ describe("Settings: delete account", () => {
     fill("Your password", PASSWORD);
     fireEvent.click(deleteButton());
 
-    expect(
-      await screen.findByText("Your account and all its data have been deleted."),
-    ).toBeInTheDocument();
+    const notice = await screen.findByText("Your account and all its data have been deleted.");
+    // Focused, so a screen reader reads it on the new page.
+    expect(notice).toHaveFocus();
     // Only the password goes to the API; the typed word stays in the browser.
     const [[, options]] = deleteRequests(fetchImpl);
     expect(JSON.parse(options.body)).toEqual({ password: PASSWORD });
@@ -204,6 +205,37 @@ describe("Settings: delete account", () => {
 
     await screen.findByText("Your account and all its data have been deleted.");
     expect(deleteRequests(fetchImpl)).toHaveLength(1);
+  });
+
+  it("closes the question when the page is left, forgetting the password", async () => {
+    // With cacheComponents, Next.js hides a page that was left in React's
+    // <Activity mode="hidden"> instead of unmounting it.
+    // The mode is state inside the tree, so the providers that
+    // renderWithSession put around it stay (a rerender would drop them).
+    let setMode;
+    function Page() {
+      const [mode, set] = useState("visible");
+      setMode = set;
+      return (
+        <Activity mode={mode}>
+          <SettingsView />
+        </Activity>
+      );
+    }
+    renderWithSession(<Page />, {
+      signedIn: true,
+      handler: (path) => (path === "/me" ? json(200, ME) : undefined),
+    });
+    await openConfirmation();
+    fill("Type DELETE to confirm", "DELETE");
+    fill("Your password", PASSWORD);
+
+    act(() => setMode("hidden"));
+    act(() => setMode("visible"));
+
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Your password")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete my account…" })).toBeInTheDocument();
   });
 
   it("closes the question on Cancel without deleting anything", async () => {
