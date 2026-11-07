@@ -126,6 +126,64 @@ describe("AuthProvider", () => {
     expect(status()).toBe("anonymous");
   });
 
+  it("deletes the account: sends only the password, then ends the session", async () => {
+    const { fetchImpl, queryClient, getAuth } = renderSession((url) => {
+      if (url === "/api/v1/auth/refresh") {
+        return json(200, { access_token: "token-1" });
+      }
+      return new Response(null, { status: 204 }); // DELETE /me
+    });
+    await waitFor(() => expect(status()).toBe("authenticated"));
+    queryClient.setQueryData(["accounts"], [{ id: "a1" }]);
+
+    await act(() => getAuth().deleteAccount("correct horse battery"));
+
+    const [, options] = fetchImpl.mock.calls.find(([url]) => url === "/api/v1/me");
+    expect(options.method).toBe("DELETE");
+    expect(JSON.parse(options.body)).toEqual({ password: "correct horse battery" });
+    expect(status()).toBe("anonymous");
+    expect(getAuth().loggedOut).toBe(true);
+    expect(getAuth().accountDeleted).toBe(true);
+    expect(queryClient.getQueryData(["accounts"])).toBeUndefined();
+  });
+
+  it("keeps the session when the password is wrong", async () => {
+    const { client, getAuth } = renderSession((url) => {
+      if (url === "/api/v1/auth/refresh") {
+        return json(200, { access_token: "token-1" });
+      }
+      return json(400, {
+        error: { code: "INCORRECT_PASSWORD", message: "That password is not correct." },
+      });
+    });
+    await waitFor(() => expect(status()).toBe("authenticated"));
+
+    await expect(getAuth().deleteAccount("wrong")).rejects.toThrow("That password is not correct.");
+
+    expect(status()).toBe("authenticated");
+    expect(client.getAccessToken()).toBe("token-1");
+    expect(getAuth().accountDeleted).toBe(false);
+  });
+
+  it("forgets the deletion at the next login", async () => {
+    const { getAuth } = renderSession((url) => {
+      if (url === "/api/v1/auth/refresh") {
+        return json(200, { access_token: "token-1" });
+      }
+      if (url === "/api/v1/auth/login") {
+        return json(200, { access_token: "token-2", token_type: "bearer", expires_in: 900 });
+      }
+      return new Response(null, { status: 204 });
+    });
+    await waitFor(() => expect(status()).toBe("authenticated"));
+    await act(() => getAuth().deleteAccount("correct horse battery"));
+
+    await act(() => getAuth().login("new@example.com", "another password"));
+
+    expect(getAuth().accountDeleted).toBe(false);
+    expect(getAuth().loggedOut).toBe(false);
+  });
+
   it("a session the API ended clears the cache too", async () => {
     const { client, queryClient } = renderSession((url) =>
       url === "/api/v1/auth/refresh" ? json(200, { access_token: "token-1" }) : unauthorized(),

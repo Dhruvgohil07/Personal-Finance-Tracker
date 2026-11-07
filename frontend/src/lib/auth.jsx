@@ -86,6 +86,11 @@ export function AuthProvider({ children, client = defaultClient }) {
   // person shouldn't find the previous user's page in the URL (review of
   // PR 31). Cleared by the next login.
   const [loggedOut, setLoggedOut] = useState(false);
+  // True when the session ended because the account was deleted
+  // (deleteAccount below), so the login page can say so. Kept here, not in
+  // the URL (decided with Dhruv): a reload or a bookmark of /login must not
+  // announce a deletion again. Cleared by the next login.
+  const [accountDeleted, setAccountDeleted] = useState(false);
 
   const login = useCallback(
     async (email, password) => {
@@ -94,6 +99,7 @@ export function AuthProvider({ children, client = defaultClient }) {
         body: { email, password },
       });
       setLoggedOut(false);
+      setAccountDeleted(false);
       client.setAccessToken(body.access_token);
     },
     [client],
@@ -112,6 +118,22 @@ export function AuthProvider({ children, client = defaultClient }) {
     }
   }, [client]);
 
+  // DELETE /me (ADR 021): the password is asked for again, and the API
+  // deletes the user and everything that belongs to them, then clears the
+  // refresh cookie. Only on that success does this browser end the session,
+  // the same way logout() does, plus the flag for the login page. A wrong
+  // password (400) or a rate limit (429) throws before any of it: the
+  // session goes on, and the form shows the error.
+  const deleteAccount = useCallback(
+    async (password) => {
+      await client.request("/me", { method: "DELETE", body: { password } });
+      setLoggedOut(true);
+      setAccountDeleted(true);
+      client.setAccessToken(null);
+    },
+    [client],
+  );
+
   let status = "anonymous";
   if (accessToken !== null) {
     status = "authenticated";
@@ -124,17 +146,19 @@ export function AuthProvider({ children, client = defaultClient }) {
   // `client` is passed on so hooks such as useMe() call the API through the
   // same client (and its token) as the session itself.
   const value = useMemo(
-    () => ({ status, loggedOut, login, logout, client }),
-    [status, loggedOut, login, logout, client],
+    () => ({ status, loggedOut, accountDeleted, login, logout, deleteAccount, client }),
+    [status, loggedOut, accountDeleted, login, logout, deleteAccount, client],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
 /**
- * The session: `{ status, loggedOut, login, logout, client }`.
+ * The session: `{ status, loggedOut, accountDeleted, login, logout,
+ * deleteAccount, client }`.
  * status is "loading" | "authenticated" | "anonymous"; loggedOut is true
- * when the session ended through logout() (not by expiring).
+ * when the session ended through logout() or deleteAccount() (not by
+ * expiring), and accountDeleted only after deleteAccount().
  */
 export function useAuth() {
   const value = useContext(AuthContext);

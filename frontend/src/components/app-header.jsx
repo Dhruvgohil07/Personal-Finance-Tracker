@@ -16,6 +16,7 @@ const NAV_LINKS = [
   { href: "/transactions", label: "Transactions" },
   { href: "/uploads", label: "Uploads" },
   { href: "/accounts", label: "Accounts" },
+  { href: "/settings", label: "Settings" },
 ];
 
 export function AppHeader() {
@@ -44,7 +45,8 @@ export function AppHeader() {
             Kharcha
           </Link>
           <nav aria-label="Main">
-            <ul className="flex gap-4 text-sm">
+            {/* flex-wrap: five links don't fit beside the name on a phone. */}
+            <ul className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
               {NAV_LINKS.map((link) => (
                 <li key={link.href}>
                   {/* aria-current tells screen readers which page this is;
