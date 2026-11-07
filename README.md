@@ -326,12 +326,93 @@ transfer automatically ([ADR 018](docs/decisions/018-self-transfer-matching.md))
 
 | Missing | Arrives in |
 |---|---|
-| Web UI pages (sign-in, accounts, uploads, transactions, dashboard) | Phase 3 ([plan](docs/plans/phase-3.md)) |
 | Creating your own categories, CSV export, `/insights/trend`, `/insights/top-merchants` | Phase 4 |
 | Search that uses its trigram index (`q=` works, unindexed) | not scheduled yet |
 | LLM categorization for what the rules cannot place | Phase 4 |
 | Recurring payments, budgets, alerts | Phases 4–5 |
 | Parsers for banks other than ICICI | when real samples exist ([SPEC §6.2](docs/SPEC.md)) |
+
+## Deploying
+
+The app runs on free plans: the web app on **Vercel**, the whole backend (API,
+worker, scheduler) in **one Render container**, Redis on **Render Key Value**,
+Postgres on **Neon**. All four are in Singapore. Why this shape:
+[ADR 023](docs/decisions/023-deployment-topology.md).
+
+```
+browser ──► Vercel (Next.js, frontend/) ──/api/v1/*──► Render: app/run_all.py
+                                                         ├─ uvicorn (API)
+                                                         ├─ RQ worker ──► Render Key Value (Redis)
+                                                         └─ scheduler
+                                                       all three ──► Neon (Postgres)
+```
+
+You need accounts at [Neon](https://neon.com), [Render](https://render.com) and
+[Vercel](https://vercel.com), each with access to this GitHub repository. Never
+paste a secret into a file in the repository: each one goes in its host's
+dashboard only.
+
+### 1. Database (Neon)
+1. Create a project in **AWS Asia Pacific (Singapore)**, Postgres **16** (the
+   version CI tests against).
+2. On the dashboard's **Connect** dialog, turn **Connection pooling off** and
+   copy the connection string. It must be the *direct* one: its host has no
+   `-pooler` in it (ADR 023, decision 4).
+3. Change its start from `postgresql://` to `postgresql+psycopg://`. Keep the
+   rest, including `?sslmode=require…`. This is your `DATABASE_URL`.
+
+### 2. Backend (Render)
+1. Generate the file encryption key on your computer and keep it at hand:
+   ```bash
+   python -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
+   ```
+2. In Render: **New → Blueprint**, pick this repository. Render reads
+   [render.yaml](render.yaml) and shows the two things it will create:
+   `kharcha-api` (web service) and `kharcha-redis` (Key Value).
+3. It asks for the three values it can't generate:
+   - `DATABASE_URL`: from step 1;
+   - `FILE_ENCRYPTION_KEY`: the key from above;
+   - `FRONTEND_ORIGIN`: the address Vercel will give the web app, e.g.
+     `https://kharcha.vercel.app`. A guess is fine for now, and step 4 fixes it.
+4. **Apply.** The first deploy builds the image, runs the migrations and the
+   seed, then starts the three processes. When it is live, open
+   `https://<your-service>.onrender.com/api/v1/health`. It should show
+   `"status":"ok"`, with the database and Redis both `ok`.
+5. In `kharcha-api` → **Environment**, copy the value of `PROXY_SHARED_SECRET`
+   (Render generated it). Vercel needs the same value.
+
+### 3. Web app (Vercel)
+1. **Add New → Project**, import this repository.
+2. **Root Directory:** `frontend`. Vercel detects Next.js by itself.
+3. **Environment Variables:**
+   - `API_ORIGIN`: the Render address, e.g. `https://kharcha-api.onrender.com`
+     (no trailing slash, no `/api/v1`);
+   - `PROXY_SHARED_SECRET`: the value copied from Render.
+4. **Deploy.** Note the address Vercel gives the project.
+
+### 4. Connect the two
+If Vercel's address differs from what you entered as `FRONTEND_ORIGIN`, change it
+in Render (`kharcha-api` → **Environment**). Render redeploys by itself.
+
+Then open the Vercel address, create an account, add an account, upload a
+statement and check the dashboard.
+
+### What to expect on free plans
+- **The first visit after 15 quiet minutes takes about a minute**: Render's free
+  service sleeps and wakes on the next request. The page says so after 5 seconds.
+  To keep it awake, a free pinger (e.g. cron-job.org) can open `/api/v1/health`
+  every 10 minutes. That uses about 744 of Render's 750 free hours a month.
+- **Redis is in memory only.** A Render restart loses imports still waiting in
+  the queue. The hourly cleanup marks them failed, and they can be uploaded again.
+- **Deploys:** Render deploys `main` after its CI checks pass, and only when
+  `backend/` changed. Vercel deploys every push to `main`.
+
+### Changing a secret
+- `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET`: everyone is logged out.
+- `PROXY_SHARED_SECRET`: change it in Render **and** Vercel. Until both match,
+  every browser shares one rate limit (the API ignores the unsigned IP).
+- `FILE_ENCRYPTION_KEY`: only when no upload is waiting to be imported. A waiting
+  file encrypted with the old key can't be read any more.
 
 ## Tests and lint
 
@@ -363,6 +444,8 @@ against real Postgres 16 and Redis 7 containers, the `frontend` job on Node 24.
 backend/
   app/
     main.py        app factory: middleware, error handlers, routers
+    run_all.py     the deployed container's command: migrate, seed, then
+                   run the API, worker and scheduler, stopping all if one dies
     core/          config, logging (with redaction), errors, middleware,
                    security (argon2id + JWT), rate limiting
     api/v1/        HTTP routes (thin: validate -> call a service -> respond)
@@ -384,14 +467,17 @@ backend/
                    dates.py  IST clock + the Month value object
                    cursor.py opaque keyset pagination cursors
   alembic/         database migrations (append-only)
+  Dockerfile       one image: the local worker/scheduler, and the deployed backend
   tests/unit/  tests/integration/
 frontend/          Next.js app, plain JavaScript
   next.config.mjs  forwards /api/v1/* to the API (API_ORIGIN)
+  vercel.json      Vercel settings (functions in Singapore)
   src/proxy.js     adds the signed client-IP headers to API calls
   src/app/         pages and the root layout (App Router)
   src/lib/         api.js (fetch wrapper: token, errors, one refresh at a
                    time), auth.jsx (the session), money.js (paise -> INR),
                    client-ip.js (HMAC for the backend)
+render.yaml        the backend's Render services, as code (see "Deploying")
 docs/
   SPEC.md          full specification
   decisions/       architecture decision records (ADRs)
