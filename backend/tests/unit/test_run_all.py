@@ -7,10 +7,12 @@ Two tests at the end run real, tiny subprocesses to cover the two
 one-line wrappers around `subprocess`.
 """
 
+import re
 import signal
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from pathlib import Path
 
 import pytest
 
@@ -32,7 +34,9 @@ class FakeChild:
     `stubborn`: ignores SIGTERM, so `wait(timeout=...)` times out.
     """
 
-    def __init__(self, *, exits_after: int | None = None, code: int = 1, stubborn: bool = False):
+    def __init__(
+        self, *, exits_after: int | None = None, code: int = 1, stubborn: bool = False
+    ) -> None:
         self.exits_after = exits_after
         self.code = code
         self.stubborn = stubborn
@@ -66,7 +70,9 @@ class FakeChild:
 COMMANDS = {"api": ["api"], "worker": ["worker"], "scheduler": ["scheduler"]}
 
 
-def starter(children: dict[str, FakeChild]):
+def starter(
+    children: dict[str, FakeChild],
+) -> tuple[Callable[[Sequence[str]], FakeChild], list[Sequence[str]]]:
     """A `start` function that hands out `children` by the command's first word."""
     started: list[Sequence[str]] = []
 
@@ -205,7 +211,20 @@ def test_a_service_that_ignores_sigterm_is_killed() -> None:
 
     assert children["api"].killed is True
     assert children["worker"].killed is False
-    assert STOP_GRACE_SECONDS < 30  # inside Render's own 30 s before SIGKILL
+
+
+def test_the_stop_grace_fits_inside_renders_shutdown_delay() -> None:
+    """Render SIGKILLs the container after `maxShutdownDelaySeconds`.
+
+    If the launcher's grace were longer, a worker finishing its import would
+    be killed by Render instead of being waited for. Read from render.yaml
+    itself, so changing one without the other fails here.
+    """
+    render_yaml = (Path(__file__).resolve().parents[3] / "render.yaml").read_text(encoding="utf-8")
+    match = re.search(r"^\s*maxShutdownDelaySeconds:\s*(\d+)", render_yaml, re.MULTILINE)
+    assert match is not None
+
+    assert STOP_GRACE_SECONDS + 10 <= int(match.group(1))  # 10 s to spare for the exit itself
 
 
 # --- main -----------------------------------------------------------------------
@@ -229,7 +248,32 @@ def test_main_starts_nothing_when_setup_fails(quiet_main: list[tuple[int, object
 
     assert code == 1
     assert started == []
-    assert quiet_main == []
+    # Only the setup-phase handlers were installed: nothing to supervise.
+    assert [handler for _, handler in quiet_main] == [run_all._stop_during_setup] * 2
+
+
+def test_a_stop_during_setup_is_handled_from_the_start(
+    quiet_main: list[tuple[int, object]],
+) -> None:
+    """PID 1 ignores a signal without a handler, so one must exist before setup."""
+    handlers_while_migrating: list[object] = []
+
+    def run(command: list[str]) -> int:
+        handlers_while_migrating.extend(handler for _, handler in quiet_main)
+        return 1
+
+    run_all.main(environ={}, run=run, start=lambda command: FakeChild())
+
+    assert handlers_while_migrating == [run_all._stop_during_setup] * 2
+    assert [sig for sig, _ in quiet_main] == [signal.SIGTERM, signal.SIGINT]
+
+
+def test_the_setup_handler_ends_the_launcher_with_the_signals_code() -> None:
+    """SystemExit interrupts subprocess.run, which then kills the child."""
+    with pytest.raises(SystemExit) as stopped:
+        run_all._stop_during_setup(signal.SIGTERM)
+
+    assert stopped.value.code == 128 + signal.SIGTERM
 
 
 def test_main_sets_up_then_supervises_on_renders_port(quiet_main: list[tuple[int, object]]) -> None:
@@ -243,7 +287,9 @@ def test_main_sets_up_then_supervises_on_renders_port(quiet_main: list[tuple[int
 
     assert code == 1
     assert started[0][-2:] == ["--port", "10000"]
-    assert [sig for sig, _ in quiet_main] == [signal.SIGTERM, signal.SIGINT]
+    # The setup handlers first, then the supervisor's.
+    assert [sig for sig, _ in quiet_main] == [signal.SIGTERM, signal.SIGINT] * 2
+    assert all(handler != run_all._stop_during_setup for _, handler in quiet_main[2:])
 
 
 # --- the real subprocess wrappers ---------------------------------------------------
