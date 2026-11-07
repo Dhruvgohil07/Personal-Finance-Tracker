@@ -8,7 +8,7 @@
 // the session context, not the URL, so a reload doesn't say it again.
 
 import Link from "next/link";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/button";
 import { FormError } from "@/components/form-error";
@@ -32,6 +32,16 @@ export function LoginForm() {
   // the NEXT render, so a second submit in the same instant still sees
   // false. A ref changes at once (review of PR 31).
   const inFlight = useRef(false);
+  // The deletion notice takes the focus when the form appears with it, so
+  // a screen reader reads it out. A live region (role="status") that
+  // arrives with its text already in it, on a new page, is usually not
+  // announced (review of PR 39).
+  const noticeRef = useRef(null);
+  useEffect(() => {
+    if (accountDeleted) {
+      noticeRef.current?.focus();
+    }
+  }, [accountDeleted]);
 
   async function handleSubmit(event) {
     // A form would otherwise reload the page with the values in the URL.
@@ -56,11 +66,14 @@ export function LoginForm() {
     <form onSubmit={handleSubmit} className="flex flex-col gap-4">
       <h1 className="text-2xl font-semibold">Log in</h1>
       {accountDeleted ? (
-        // role="status": announced by screen readers, without the urgency
-        // of an alert (nothing went wrong).
+        // role="status": a message, without the urgency of an alert
+        // (nothing went wrong). tabIndex -1: focusable from code only, so
+        // the effect above can move the focus here.
         <p
+          ref={noticeRef}
           role="status"
-          className="rounded-md border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700"
+          tabIndex={-1}
+          className="rounded-md border border-neutral-300 px-3 py-2 text-sm outline-none dark:border-neutral-700"
         >
           Your account and all its data have been deleted.
         </p>

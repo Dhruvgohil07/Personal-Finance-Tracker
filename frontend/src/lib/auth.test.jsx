@@ -184,6 +184,23 @@ describe("AuthProvider", () => {
     expect(getAuth().loggedOut).toBe(false);
   });
 
+  it("forgets the deletion when a session starts without login() too", async () => {
+    // e.g. another tab logged in, and this tab's refresh picked that up.
+    const { client, getAuth } = renderSession((url) => {
+      if (url === "/api/v1/auth/refresh") {
+        return json(200, { access_token: "token-1" });
+      }
+      return new Response(null, { status: 204 });
+    });
+    await waitFor(() => expect(status()).toBe("authenticated"));
+    await act(() => getAuth().deleteAccount("correct horse battery"));
+
+    act(() => client.setAccessToken("token-from-another-tab"));
+
+    expect(getAuth().accountDeleted).toBe(false);
+    expect(getAuth().loggedOut).toBe(false);
+  });
+
   it("a session the API ended clears the cache too", async () => {
     const { client, queryClient } = renderSession((url) =>
       url === "/api/v1/auth/refresh" ? json(200, { access_token: "token-1" }) : unauthorized(),

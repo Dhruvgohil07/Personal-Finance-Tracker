@@ -30,6 +30,14 @@ const NO_ERRORS = { fieldErrors: {}, formError: null };
 export function DeleteAccount() {
   const [open, setOpen] = useState(false);
 
+  // Close the question when this page is left. With cacheComponents,
+  // Next.js keeps a page that was left mounted but hidden (React's
+  // <Activity>), with its state, and only runs its effects' cleanups. An
+  // open question would keep the typed password and come back ready to
+  // delete with one click (review of PR 39). Closing unmounts
+  // ConfirmDelete, and its state with it.
+  useEffect(() => () => setOpen(false), []);
+
   return (
     <section aria-labelledby="delete-heading" className="flex flex-col gap-3">
       <h2 id="delete-heading" className="text-lg font-semibold">

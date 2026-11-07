@@ -84,13 +84,29 @@ export function AuthProvider({ children, client = defaultClient }) {
   // than because it expired. The guard then sends them to plain /login,
   // without ?next=<the page they were on>: on a shared computer, the next
   // person shouldn't find the previous user's page in the URL (review of
-  // PR 31). Cleared by the next login.
+  // PR 31). Cleared when the next session starts (below).
   const [loggedOut, setLoggedOut] = useState(false);
   // True when the session ended because the account was deleted
   // (deleteAccount below), so the login page can say so. Kept here, not in
   // the URL (decided with Dhruv): a reload or a bookmark of /login must not
-  // announce a deletion again. Cleared by the next login.
+  // announce a deletion again. Cleared when the next session starts.
   const [accountDeleted, setAccountDeleted] = useState(false);
+
+  // Both flags describe how the LAST session ended, so they are cleared
+  // whenever a session starts, however it starts: a login here, or a
+  // refresh that picks up a session another tab opened with the shared
+  // cookie. Clearing them only in login() left them set in that second
+  // case, and the next expiry went to plain /login saying an existing
+  // account had been deleted (review of PR 39). An effect, so it runs on
+  // the change from "no token" to "a token" and never during a logout.
+  const tokenBefore = useRef(accessToken);
+  useEffect(() => {
+    if (tokenBefore.current === null && accessToken !== null) {
+      setLoggedOut(false);
+      setAccountDeleted(false);
+    }
+    tokenBefore.current = accessToken;
+  }, [accessToken]);
 
   const login = useCallback(
     async (email, password) => {
@@ -98,8 +114,6 @@ export function AuthProvider({ children, client = defaultClient }) {
         method: "POST",
         body: { email, password },
       });
-      setLoggedOut(false);
-      setAccountDeleted(false);
       client.setAccessToken(body.access_token);
     },
     [client],
