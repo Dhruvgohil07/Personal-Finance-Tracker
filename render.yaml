@@ -1,0 +1,90 @@
+# Render "Blueprint": the backend's hosting, described as code (ADR 023).
+#
+# Render reads this file when you create a Blueprint from the repository
+# (README, "Deploying"). It creates two things, both on the free plan and in
+# Singapore, the region nearest to India, next to the Neon database
+# (aws-ap-southeast-1) and Vercel's sin1 functions:
+#
+# - kharcha-api:   ONE Docker web service running the API, the RQ worker and
+#                  the scheduler together (app/run_all.py). Free means 0.1 CPU
+#                  and 512 MB for all three, and sleeping after 15 minutes
+#                  without requests. Uploads are stored in Postgres
+#                  (upload_blobs), so the three need no shared disk.
+# - kharcha-redis: Render's own Redis ("Key Value"), for the job queue and
+#                  the rate limits. Not Upstash: RQ's scheduler, which the
+#                  worker runs for delayed retries, sends a few commands every
+#                  second, and Upstash's free 500K commands a month would last
+#                  about a day (Phase 3 plan, Step 11).
+#
+# Secrets are never written here. `generateValue` makes Render create a
+# random value once; `sync: false` means "ask for it when the Blueprint is
+# applied" (it is then set in the dashboard).
+
+services:
+  - type: web
+    name: kharcha-api
+    runtime: docker
+    plan: free
+    region: singapore
+    # Build backend/Dockerfile with backend/ as the build context (both paths
+    # are relative to the repository root), so backend/.dockerignore applies.
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    # Only a change under backend/ starts a new deploy: a frontend-only
+    # commit doesn't restart the API (Vercel deploys the frontend).
+    buildFilter:
+      paths:
+        - backend/**
+    # The image's default command is the worker (for docker-compose); here
+    # the launcher runs migrations and the seed, then all three processes.
+    dockerCommand: python -m app.run_all
+    # Render calls this to decide whether a new deploy is healthy before
+    # sending traffic to it. It checks Postgres and Redis too (503 if not).
+    healthCheckPath: /api/v1/health
+    # Deploy a new commit on main only after its GitHub checks (the
+    # `backend` and `frontend` CI jobs) have passed.
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: ENV
+        value: production
+      - key: MAX_UPLOAD_MB
+        value: "10"
+      # Neon's DIRECT connection string (not the "-pooler" one), with the
+      # scheme changed to postgresql+psycopg:// (README, "Deploying").
+      - key: DATABASE_URL
+        sync: false
+      # The Vercel address of the frontend, e.g. https://kharcha.vercel.app
+      - key: FRONTEND_ORIGIN
+        sync: false
+      # Generate with:
+      #   python -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
+      # Never change it while an upload is waiting to be imported: its file
+      # could no longer be decrypted.
+      - key: FILE_ENCRYPTION_KEY
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      # Also set in Vercel, with the same value (copy it from Render's
+      # dashboard): the Next.js proxy signs each browser's IP with it.
+      - key: PROXY_SHARED_SECRET
+        generateValue: true
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: kharcha-redis
+          property: connectionString
+
+  # Free: 25 MB, 50 connections, kept in memory only (a restart empties it:
+  # a queued import is lost and the hourly cleanup marks it failed).
+  - type: keyvalue
+    name: kharcha-redis
+    plan: free
+    region: singapore
+    # No addresses outside Render may connect: the API reaches it over
+    # Render's private network.
+    ipAllowList: []
+    # A job queue must never have keys evicted to make room: a dropped key
+    # would be a lost import. When full, Redis refuses writes instead.
+    maxmemoryPolicy: noeviction
