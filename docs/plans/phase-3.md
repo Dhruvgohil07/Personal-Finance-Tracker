@@ -210,3 +210,9 @@ Then I stop for review.
   transaction's month; "Guess" rows are not counted. The latest-upload card stays on the
   home page only while it needs something, or after the user watched it import there.
   See ADR 022.
+- 2026-11-07, Step 10: decided with Dhruv: confirm by typing `DELETE` plus the
+  password; the "account deleted" notice is a session flag, not a URL parameter; the AI
+  and weekly-email switches wait for Phase 4. Added: the `(auth)` pages unmount their
+  form once a session starts (`SignedOutOnly`). The live check found `/login` showing
+  the previous user's password after a logout or a deletion, because `cacheComponents`
+  keeps left pages mounted. See ADR 022.

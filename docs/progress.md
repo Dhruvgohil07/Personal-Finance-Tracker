@@ -608,13 +608,24 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
     stops there; "Not categorized yet" grey with 3:1 contrast in both themes; one
     shared `plural` (`src/lib/text.js`); one fake insights API for tests. Left: the
     breakdown requested for empty months. 387 Vitest tests
+- [x] Step 10: Settings — `/settings` (header link): the profile from GET /me, and
+  "Delete my account…" with what gets deleted, the word DELETE typed out and the
+  password; `useAuth().deleteAccount` (DELETE /me) ends the session only after the 204,
+  and /login says the account was deleted (a session flag, so a reload doesn't repeat
+  it). A wrong password keeps the session and shows under its field. Decided with
+  Dhruv: DELETE, the flag, no Phase 4 switches yet (ADR 022 section). The live check
+  found `/login` showing the previous user's email and password after a logout or a
+  deletion (`cacheComponents` keeps left pages mounted, since Step 4): fixed with
+  `SignedOutOnly`, which unmounts the (auth) form once signed in. No backend change.
+  400 Vitest tests; checked live, test users deleted (0 rows left, audit rows kept),
+  logs clean
 
 ## In progress
 - (nothing)
 
 ## Next up
 - **Dhruv, after merging Step 3:** add `frontend` to the `protect-main` required checks
-- Phase 3 Step 10: settings (profile, delete account)
+- Phase 3 Step 11: deployment (Dockerfile, run_all.py, render.yaml, Vercel; ADR 023)
 - If the backend's `MAX_UPLOAD_MB` ever changes, change `MAX_UPLOAD_MB` in
   `frontend/src/lib/uploads.js` with it (ADR 022, Step 6)
 - Step 11: verify an upload near 10 MB on the deployed app; the host may limit a
