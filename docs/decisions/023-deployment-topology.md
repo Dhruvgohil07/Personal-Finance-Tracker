@@ -28,12 +28,17 @@ filesystem. The launcher, using only the standard library:
 - starts the three as child processes, with the same commands as in
   docker-compose (uvicorn on `0.0.0.0:$PORT`);
 - **exits with 1 as soon as any of them exits, even with 0**, after stopping the
-  other two (SIGTERM, then SIGKILL after 20 s). Render restarts the container.
+  other two (SIGTERM, then SIGKILL after 100 s). Render restarts the container.
   Otherwise a dead worker would leave a healthy-looking API that never imports
   anything;
 - passes Render's SIGTERM on to the children and exits 0. As PID 1 in a
   container it must install the handler itself, or the stop would wait for Render's
-  SIGKILL.
+  SIGKILL. A handler is installed before setup as well: a stop during the migrations
+  ends them at once, and Postgres rolls back the half-run migration.
+- gives the children 100 s to stop, because on SIGTERM the RQ worker first finishes
+  the import it is running, and on 0.1 CPU that can take a minute. Render waits
+  `maxShutdownDelaySeconds: 120` (default 30) before killing the container; a test
+  reads render.yaml and checks that the grace fits inside it.
 
 The image is the existing `backend/Dockerfile` (now with `alembic/` and
 `alembic.ini`). Its default command stays the worker, so docker-compose works as
@@ -87,8 +92,11 @@ base64, and Render doesn't document which base64 alphabet it uses. Vercel gets
   never run.
 - **A separate Render background worker:** paid only.
 - **Keeping the service awake with an external pinger** every 10 minutes: one more
-  account, and it would use almost all of the 750 free hours a month (744 for a
-  31-day month). Left as an option in the README.
+  account and almost all of Render's 750 free hours, and above all **Neon's compute
+  could never suspend**. While the service is up, Render keeps calling the health
+  check, which runs `SELECT 1`. At Neon's minimum of 0.25 CU that is 186 CU-hours a
+  month against the free plan's 100, so the database would stop mid-month (review of
+  PR 40). The README warns against it.
 - **Migrations in Render's pre-deploy command:** paid only.
 - **A process manager (supervisord, honcho) for the three processes:** another
   dependency and config file. Its one feature we need, "if one dies, stop all", is
@@ -103,6 +111,9 @@ base64, and Render doesn't document which base64 alphabet it uses. Vercel gets
   it: a queued import is lost, and the hourly cleanup marks that upload failed, so
   the user uploads again. Rate-limit counters reset too.
 - **The first request after 15 idle minutes takes about a minute**, with the hint.
+- **Every start runs the migrations and the seed**, including each wake from sleep.
+  On 0.1 CPU these two short-lived interpreters add some seconds to the cold start.
+  Measured in Step 11's checks before anything is changed.
 - **0.1 CPU** makes imports slower than locally. Upload polling already follows the
   API's `Retry-After`, so a slower import only means more polls.
 - Moving to paid plans later changes `render.yaml`, not the code: a separate worker
