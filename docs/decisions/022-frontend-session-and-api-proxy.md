@@ -477,3 +477,46 @@ Seven of eight findings fixed:
 
 Left as it is: the breakdown is requested even for a month that turns out empty.
 Waiting for the summary first would make every non-empty month load in two steps.
+
+## Phase 3 Step 10: settings (2026-11-07)
+A Settings page (`/settings`, linked in the header): the profile from `GET /me`, and
+deleting the account through `DELETE /me` (ADR 021). No backend change. Decided with
+Dhruv when the step started:
+
+- **Typed confirmation: the word `DELETE`**, exactly, plus the current password. The
+  delete button stays disabled until both are filled in. Rejected: typing the email
+  (slower, and a browser may autofill it). Only the password is sent; the typed word
+  stays in the browser.
+- **"Your account has been deleted" is a flag in the session context**
+  (`accountDeleted`, beside `loggedOut`), not `/login?deleted=1`: a reload or a bookmark
+  of the login page must not announce a deletion again. The next login clears it.
+- **No AI or weekly-email switches yet.** `PATCH /me/settings` and the plain-language
+  explanation of the AI step (CLAUDE.md §7.4) are Phase 4; a switch that can't be
+  changed would only confuse.
+- `useAuth().deleteAccount(password)` sits beside `login` and `logout`, so every way a
+  session starts or ends is in src/lib/auth.jsx. It ends the session only after the
+  204; a wrong password (400 `INCORRECT_PASSWORD`, deliberately not 401) or a 429 throws
+  first, the session goes on, the password field shows the error and is cleared.
+- The guard then sends the browser to plain `/login`, as after a logout.
+
+**Found in the live check: the login form kept the previous user's password.**
+`cacheComponents` (Step 3) makes Next.js keep a page that was left mounted but hidden,
+with its React state, so Back can show it at once. The login form left behind after a
+successful login still held the email and password, and "Logging in…". After a logout
+or an account deletion, `/login` showed them again. This was there since Step 4, and
+the deletion flow made it visible. Fixed at the source: the `(auth)` layout wraps its
+page in `SignedOutOnly`, which unmounts the form as soon as a session starts (it shows
+"Signing you in…" while `RedirectIfSignedIn` navigates), so a session that ends always
+comes back to an empty form. Rejected: clearing the fields inside each form, which
+every future form with a secret would have to remember. The signed-in pages need
+nothing: `RequireAuth` already unmounts them when the session ends.
+
+Checked live with throwaway users:
+- A wrong password kept the session and cleared the field.
+- The real password deleted the user's account and refresh-token rows (0 left), with
+  one `user_deleted` audit row each.
+- `/login` showed the notice above an empty form, and not again after a reload.
+- The old refresh cookie got 401.
+- Logging out also left an empty form.
+- The Settings page and the five-link header fit a phone width.
+- The API logs held no email or password.
