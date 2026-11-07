@@ -1,7 +1,8 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { LoginForm } from "@/components/login-form";
+import { SignedOutOnly } from "@/components/signed-out-only";
 import { apiError, json, renderWithSession, sentBody } from "@/test/session";
 
 async function renderForm(routes) {
@@ -110,5 +111,33 @@ describe("LoginForm", () => {
     fillAndSubmit();
 
     expect(await screen.findByRole("button", { name: "Logging in…" })).toBeDisabled();
+  });
+});
+
+// The (auth) layout wraps the form in SignedOutOnly. With cacheComponents,
+// Next.js keeps a page that was left mounted (hidden), so without it the
+// next visit to /login, after a logout or an account deletion, showed the
+// previous user's email and password (Phase 3 Step 10 live check).
+describe("LoginForm in the (auth) layout", () => {
+  it("is unmounted once signed in, and comes back empty after the session ends", async () => {
+    const { client } = renderWithSession(
+      <SignedOutOnly>
+        <LoginForm />
+      </SignedOutOnly>,
+      { routes: { "/auth/login": () => json(200, { access_token: "token-9", expires_in: 900 }) } },
+    );
+    await screen.findByRole("button", { name: "Log in" });
+
+    fillAndSubmit();
+
+    expect(await screen.findByText("Signing you in…")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+
+    // The session ends (a logout, or the account deleted in Settings).
+    act(() => client.setAccessToken(null));
+
+    expect(screen.getByLabelText("Email")).toHaveValue("");
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Log in" })).toBeEnabled();
   });
 });

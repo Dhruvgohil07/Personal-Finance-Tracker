@@ -5,6 +5,7 @@
 import { Suspense } from "react";
 
 import { RedirectIfSignedIn } from "@/components/redirect-if-signed-in";
+import { SignedOutOnly } from "@/components/signed-out-only";
 
 export default function AuthLayout({ children }) {
   return (
@@ -16,7 +17,9 @@ export default function AuthLayout({ children }) {
       <Suspense fallback={null}>
         <RedirectIfSignedIn />
       </Suspense>
-      {children}
+      {/* The form disappears once signed in, taking the typed password
+          with it (see SignedOutOnly). */}
+      <SignedOutOnly>{children}</SignedOutOnly>
     </main>
   );
 }
