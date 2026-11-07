@@ -216,3 +216,13 @@ Then I stop for review.
   form once a session starts (`SignedOutOnly`). The live check found `/login` showing
   the previous user's password after a logout or a deletion, because `cacheComponents`
   keeps left pages mounted. See ADR 022.
+- 2026-11-07, Step 11: decided with Dhruv: **Render Key Value instead of Upstash**,
+  because RQ's in-worker scheduler sends about 4–5 Redis commands a second (~400K a
+  day) and Upstash's free tier is 500K a month. Also decided: Neon's direct
+  connection, not the pooler; all hosts in Singapore; cold starts explained by a
+  "waking up" hint after 5 s instead of a keep-awake pinger. Migrations and the seed
+  run in `app/run_all.py` before the services start, because Render's pre-deploy step
+  is paid-only. The step is split in two: this PR (code, render.yaml, guide); then,
+  once Dhruv has created the accounts and deployed from `main`, the checks against
+  the deployed URLs (memory, cold start, an upload near 10 MB, the logs). See
+  ADR 023.

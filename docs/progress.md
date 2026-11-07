@@ -626,15 +626,27 @@ All ten steps built, reviewed and merged; the acceptance run passed on the real 
     are kept while hidden, and six copies of the submit guard. 402 Vitest tests
 
 ## In progress
-- (nothing)
+- Step 11: Deployment, part 1 (code) done on `phase-3/step-11-deploy`:
+  `app/run_all.py` (migrate + seed, then API, worker and scheduler; any exit stops all
+  and fails the container; 19 unit tests), Dockerfile with the migrations,
+  `render.yaml` (free web service + free Key Value, Singapore, deploy after CI),
+  `frontend/vercel.json` (sin1), the "server is waking up" hint after 5 s, README
+  "Deploying", ADR 023. Checked locally: the image ran with `run_all` against
+  compose's Postgres and Redis, health ok, `docker stop` exits 0 in 2 s, a killed
+  worker stops the rest and exits 1; idle memory ~330 MB of Render's 512 MB.
+  Decided with Dhruv: Render Key Value instead of Upstash (RQ's scheduler: ~400K
+  commands a day vs Upstash's 500K a month), Neon direct connection, Singapore,
+  the hint instead of a pinger
+  - Part 2, after this PR is merged: **Dhruv** creates Neon, Render (Blueprint) and
+    Vercel per the README; then the checks on the deployed URLs: health, the full
+    flow with a synthetic statement, memory on Render, cold start with the hint, an
+    upload near 10 MB, logs
 
 ## Next up
 - **Dhruv, after merging Step 3:** add `frontend` to the `protect-main` required checks
-- Phase 3 Step 11: deployment (Dockerfile, run_all.py, render.yaml, Vercel; ADR 023)
+- Step 11 part 2 (see In progress), then Phase 3 Step 12: acceptance + wrap-up
 - If the backend's `MAX_UPLOAD_MB` ever changes, change `MAX_UPLOAD_MB` in
   `frontend/src/lib/uploads.js` with it (ADR 022, Step 6)
-- Step 11: verify an upload near 10 MB on the deployed app; the host may limit a
-  proxy's request size too
 - Carried over from the Phase 2 acceptance (each needs a real file, no code):
   - **Real `.xls`/PDF cross-check:** put an ICICI `.xls` of the PDF's exact period
     in `samples/`, then run `uv run pytest tests/unit/test_real_samples.py`
