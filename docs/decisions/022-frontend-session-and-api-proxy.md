@@ -520,3 +520,21 @@ Checked live with throwaway users:
 - Logging out also left an empty form.
 - The Settings page and the five-link header fit a phone width.
 - The API logs held no email or password.
+
+### Review of PR 39 (2026-11-07)
+Three of five findings fixed:
+- **The delete question closes when Settings is left.** The page was kept hidden
+  (`cacheComponents`) with the question open, the password typed and the button
+  enabled, so coming back was one click from deleting. `DeleteAccount` closes it in an
+  effect cleanup, which React runs when `<Activity>` hides a page. A test hides and shows
+  the page with `<Activity>`, and fails without the fix.
+- **The session-end flags are cleared whenever a session starts**, in an effect on the
+  token going from none to some, not only in `login()`. A session picked up by a
+  refresh (another tab logged in with the shared cookie) used to keep them, so the next
+  expiry went to plain /login saying an existing account had been deleted.
+- **The deletion notice takes the focus** on the login page. A live region that
+  appears already holding its text on a new page is usually not announced.
+
+Left as they are: forms on other pages that hold a statement password (upload, unlock)
+still keep it while their page is hidden. A shared mechanism belongs with those forms,
+not in this PR. And the in-flight submit guard now has six copies.
